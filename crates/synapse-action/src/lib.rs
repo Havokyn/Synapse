@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod curve;
+pub mod dynamics;
 pub mod emitter;
 pub mod error;
 pub mod handle;
@@ -13,6 +14,7 @@ pub use backend::{
     unavailable::HardwareUnavailableBackend,
 };
 pub use curve::sample_curve;
+pub use dynamics::{BIGRAMS, KeystrokeEvent, ModifierMask, sample_typing_schedule};
 pub use emitter::{
     ActionEmitter, ActionEmitterSnapshotHandle, ActionSnapshotMessage, ActionStateSnapshot,
     EmitState,
