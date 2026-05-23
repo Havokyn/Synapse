@@ -57,7 +57,6 @@ arc-swap = "1.9.1"
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-bincode = "2.0.1"
 toml = "1.1.2"
 
 # Errors / logging
@@ -161,7 +160,7 @@ debug = "limited"
 incremental = false
 lto = "thin"
 codegen-units = 16
-strip = "debuginfo"
+strip = true
 panic = "abort"
 
 [profile.release-max]
@@ -174,7 +173,7 @@ inherits = "release"
 debug = "line-tables-only"
 ```
 
-`release` ships. `release-max` is for benchmarks-of-record and absolute fastest binaries. `bench` keeps line-tables for `criterion` flamegraphs.
+`release` ships and strips symbols for the M0 binary-size gate. `release-max` is for benchmarks-of-record and absolute fastest binaries. `bench` keeps line-tables for `criterion` flamegraphs.
 
 `panic = "abort"` because Synapse's `release_all` runs through the panic hook anyway; unwinding adds binary size without benefit.
 
@@ -481,7 +480,7 @@ Bitwise-reproducible Windows binaries (PE timestamps, COFF section ordering) not
 
 `cargo deny check` enforces:
 
-- Only `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-DFS-2016` allowed
+- Only `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-3.0`, `BSL-1.0`, `CC0-1.0` allowed at M0
 - `GPL-*`, `AGPL-*`, `SSPL-*` blocked
 - Vendored deps without SPDX identifier blocked
 

@@ -113,13 +113,13 @@ Column families at v1:
 
 | CF | Key | Value | Purpose |
 |---|---|---|---|
-| `CF_EVENTS` | `(monotonic_ts_ns, seq)` | bincode `Event` | Append-only replay log; TTL 7 days |
-| `CF_OBSERVATIONS` | `(monotonic_ts_ns)` | bincode `Observation` | Sampled snapshots (1 Hz) for replay |
+| `CF_EVENTS` | `(monotonic_ts_ns, seq)` | binary-codec `Event` | Append-only replay log; TTL 7 days |
+| `CF_OBSERVATIONS` | `(monotonic_ts_ns)` | binary-codec `Observation` | Sampled snapshots (1 Hz) for replay |
 | `CF_PROFILES` | `profile_id` | toml bytes | Per-app/per-game profiles, cached after first load |
 | `CF_MODEL_CACHE` | `model_sha256` | binary | Downloaded ONNX models, sha-verified |
 | `CF_SESSIONS` | `session_id` | json | MCP session metadata |
 | `CF_REFLEX_AUDIT` | `(reflex_id, fired_at_ns)` | json | Audit log of every reflex firing |
-| `CF_OCR_CACHE` | `image_sha256` | bincode `OcrResult` | OCR memoization, TTL 1h |
+| `CF_OCR_CACHE` | `image_sha256` | binary-codec `OcrResult` | OCR memoization, TTL 1h |
 | `CF_TELEMETRY` | `(metric_name, ts_ns)` | f64 | Local metric ringbuffer if no OTLP |
 
 Detail in `07_storage_and_profiles.md`.

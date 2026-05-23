@@ -20,15 +20,21 @@ allow = [
     "MPL-2.0",
     "ISC",
     "Zlib",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
 ]
-unlicensed = "deny"
+
+[[licenses.clarify]]
+name = "unescaper"
+expression = "MIT"
+license-files = [{ path = "LICENSE-MIT", hash = 0xeb164a42 }]
 
 [licenses.private]
 ignore = false
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "allow"
 wildcards = "deny"
 highlight = "all"
 

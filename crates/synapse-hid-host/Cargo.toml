@@ -10,7 +10,7 @@ repository.workspace = true
 crc16.workspace = true
 serde.workspace = true
 serialport.workspace = true
-synapse-core = { path = "../synapse-core" }
+synapse-core = { version = "0.1.0", path = "../synapse-core" }
 thiserror.workspace = true
 tracing.workspace = true
 

@@ -126,6 +126,8 @@ AUDIO_STT_MODEL_NOT_LOADED
 | 17 | `feat(audio): Whisper-tiny-int8 STT (lazy load)` | 5 s known clip; `audio_transcribe()` p99 ≤ 200 ms (10 §12); `AUDIO_STT_MODEL_NOT_LOADED` until present |
 | 18 | `feat(audio): direction estimate (L/R energy + GCC-PHAT)` | stereo test clips at ±60° azimuth; estimate within ±15° |
 
+> Dev-loop note: the dev box exposes a Windows-side PulseAudio daemon on `tcp:127.0.0.1:4713` reachable from WSL (mirrored networking). Useful for replaying fixtures or recording `output.monitor` from the Linux shell while iterating on 16-18. Production path stays WASAPI direct — PulseAudio is **not** in the shipped surface. Snapshot + commands: #85.
+
 ### Block E — MCP HTTP + SSE + new tools (work-items 19-23)
 
 | # | Title | Acceptance |

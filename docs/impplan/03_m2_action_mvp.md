@@ -63,7 +63,7 @@ SAFETY_RELEASE_ALL_FIRED
 
 | # | Title | Acceptance |
 |---|---|---|
-| 1 | `feat(core): Action enum + all sub-types from 06 §4` | round-trip serde JSON + bincode; insta snapshot of every variant |
+| 1 | `feat(core): Action enum + all sub-types from 06 §4` | round-trip serde JSON + maintained binary codec; insta snapshot of every variant |
 | 2 | `feat(action): ActionEmitter mpsc actor + held-state tracking` | proptest: random Action stream + final ReleaseAll ⇒ empty `held_keys`/`held_buttons` (13 §5) |
 | 3 | `feat(action): SoftwareBackend via enigo + windows-rs SendInput batches` | bench `action_software_press` ≤ 1 ms p99 (13 §7 / 10 §2) |
 | 4 | `feat(action): aim curves Instant / Linear / EaseInOut / Bezier / Natural + AimNaturalParams::FAST default preset` | proptest: curve step sequence start[0]=start, end[N-1]=end, total_ms within tolerance; bench `aim_curve_step_calc_natural` ≤ 1 µs/step; default-resolution test: any tool call without explicit `curve` resolves to `Natural` w/ `FAST` params |

@@ -35,7 +35,6 @@ crossbeam = "0.8.4"
 arc-swap = "1.9.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-bincode = "2.0.1"
 toml = "1.1.2"
 thiserror = "2.0.18"
 anyhow = "1.0.102"
@@ -109,7 +108,7 @@ debug = "limited"
 incremental = false
 lto = "thin"
 codegen-units = 16
-strip = "debuginfo"
+strip = true
 panic = "abort"
 
 [profile.release-max]

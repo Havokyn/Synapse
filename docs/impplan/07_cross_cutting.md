@@ -76,7 +76,7 @@ Per `13_testing_strategy.md`.
 |---|---|---|
 | Unit | every pub fn w/ non-trivial logic | error variant must be triggered |
 | Integration | every subsystem boundary | real OS where possible (capture, RocksDB, UIA on Win) |
-| Property | filter eval, aim curves, keystroke, coord transforms, bincode round-trip | `proptest` |
+| Property | filter eval, aim curves, keystroke, coord transforms, binary-codec round-trip | `proptest` |
 | Snapshot | tool schemas, observation shape, error response shape | `insta` |
 | Bench | tracked perf bench list (§1 above) | `criterion`, regression PR gate |
 | E2E | each milestone's demo scenario | real Notepad, real Minecraft, real RP2040 |
@@ -91,7 +91,7 @@ Per `13_testing_strategy.md`.
 
 Per `14_build_and_packaging.md` §14 + `deny.toml`.
 
-Allowed: `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-DFS-2016`.
+Allowed: `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-3.0`, `BSL-1.0`, `CC0-1.0`.
 Blocked: `GPL-*`, `AGPL-*`, `SSPL-*`, vendored deps w/o SPDX id.
 
 Adding a dep requires:

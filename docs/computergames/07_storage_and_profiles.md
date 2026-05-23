@@ -51,15 +51,15 @@ override:   --db <path>     (CLI flag)
 
 | CF | Key | Value | Encoding | TTL | Soft cap | Hard cap | Notes |
 |---|---|---|---|---|---|---|---|
-| `CF_EVENTS` | `[seq u64 BE]` | `StoredEvent` | bincode | 24h | 2 GB | 4 GB | Append-only ring; the replay log |
-| `CF_OBSERVATIONS` | `[seq u64 BE]` | `StoredObservation` | bincode | 6h | 500 MB | 1 GB | 1Hz sample + reason-triggered snapshots |
+| `CF_EVENTS` | `[seq u64 BE]` | `StoredEvent` | binary codec | 24h | 2 GB | 4 GB | Append-only ring; the replay log |
+| `CF_OBSERVATIONS` | `[seq u64 BE]` | `StoredObservation` | binary codec | 6h | 500 MB | 1 GB | 1Hz sample + reason-triggered snapshots |
 | `CF_PROFILES` | `[profile_id utf8]` | TOML bytes | raw bytes | none | 20 MB | 50 MB | Cached load; source of truth is on-disk TOML |
 | `CF_MODEL_CACHE` | `[model_sha256 32 bytes]` | model bytes | raw bytes | LRU when full | 1 GB | 2 GB | Downloaded ONNX models, sha-verified |
 | `CF_SESSIONS` | `[session_id utf8]` | `StoredSession` | json | 30d | 50 MB | 100 MB | One row per session |
-| `CF_REFLEX_AUDIT` | `[reflex_id 16 bytes][at_ns u64 BE]` | `StoredReflexAudit` | bincode | 7d | 200 MB | 500 MB | Per-reflex audit |
-| `CF_OCR_CACHE` | `[image_sha256 32 bytes]` | `OcrResult` | bincode | 1h | 50 MB | 100 MB | Memoization of OCR on stable regions |
+| `CF_REFLEX_AUDIT` | `[reflex_id 16 bytes][at_ns u64 BE]` | `StoredReflexAudit` | binary codec | 7d | 200 MB | 500 MB | Per-reflex audit |
+| `CF_OCR_CACHE` | `[image_sha256 32 bytes]` | `OcrResult` | binary codec | 1h | 50 MB | 100 MB | Memoization of OCR on stable regions |
 | `CF_TELEMETRY` | `[metric_name utf8][at_ns u64 BE]` | `f64 LE` | raw 8 bytes | 6h | 100 MB | 200 MB | Local metric ringbuffer |
-| `CF_ACTION_LOG` | `[at_ns u64 BE][seq u32 BE]` | `StoredActionRecord` | bincode | 24h | 200 MB | 500 MB | Every action emitted |
+| `CF_ACTION_LOG` | `[at_ns u64 BE][seq u32 BE]` | `StoredActionRecord` | binary codec | 24h | 200 MB | 500 MB | Every action emitted |
 | `CF_PROCESS_HISTORY` | `[at_ns u64 BE][pid u32]` | json | json | 6h | 20 MB | 50 MB | Process started/exited events |
 | `CF_KV` | `[utf8]` | bytes | raw | none | 10 MB | 50 MB | Generic key-value extension |
 

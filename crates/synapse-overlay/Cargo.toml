@@ -15,8 +15,8 @@ name = "synapse-overlay"
 path = "src/main.rs"
 
 [dependencies]
-synapse-core = { path = "../synapse-core" }
-synapse-telemetry = { path = "../synapse-telemetry" }
+synapse-core = { version = "0.1.0", path = "../synapse-core" }
+synapse-telemetry = { version = "0.1.0", path = "../synapse-telemetry" }
 tokio.workspace = true
 tracing.workspace = true
 

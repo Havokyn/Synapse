@@ -71,7 +71,7 @@ CAPTURE_TARGET_INVALID
 
 | # | Title | Acceptance |
 |---|---|---|
-| 1 | `feat(core): Observation + Event + EventFilter types` | round-trip serde JSON + bincode; `insta` snapshot of sample observation |
+| 1 | `feat(core): Observation + Event + EventFilter types` | round-trip serde JSON + maintained binary codec; `insta` snapshot of sample observation |
 | 2 | `feat(capture): windows-capture wrap + CapturedFrame` | bench: 60 fps capture loop on primary monitor stays ≤ 2% CPU steady-state idle |
 | 3 | `feat(capture): DXGI Output Duplication fallback` | env var `SYNAPSE_CAPTURE_FORCE_DXGI=1` selects fallback; same frame shape emitted |
 | 4 | `feat(capture): coordinate transforms + DPI awareness` | `screen_to_window(window_to_screen(p, h), h) == p` proptest |

@@ -26,6 +26,9 @@ Compatibility is part of "current": if the newest search result is intentionally
 non-compiling or incompatible with the workspace, use the newest usable line and
 record the reason in the issue evidence.
 
+`bincode` is excluded from M0 dependencies because `3.0.0` intentionally fails
+to compile and `2.0.1` is rejected by RustSec advisory RUSTSEC-2025-0141.
+
 ## Rationale
 
 This matches the actual development environment the operator uses across Rust

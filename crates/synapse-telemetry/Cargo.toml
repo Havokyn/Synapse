@@ -12,7 +12,7 @@ metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry-otlp.workspace = true
 serde.workspace = true
-synapse-core = { path = "../synapse-core" }
+synapse-core = { version = "0.1.0", path = "../synapse-core" }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true

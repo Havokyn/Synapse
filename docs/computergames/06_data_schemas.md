@@ -744,7 +744,7 @@ Profile TOML examples in `07_storage_and_profiles.md`.
 
 ## 7. Storage records (RocksDB values)
 
-Most CF values are bincode-serialized for storage efficiency; some are JSON for human inspection. Choice documented in `07_storage_and_profiles.md`.
+Most hot CF values use a maintained binary codec for storage efficiency; some are JSON for human inspection. Choice documented in `07_storage_and_profiles.md`.
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]

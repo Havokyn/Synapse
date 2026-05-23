@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-synapse-core = { path = "../synapse-core" }
+synapse-core = { version = "0.1.0", path = "../synapse-core" }
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

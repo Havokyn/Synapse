@@ -9,8 +9,8 @@ repository.workspace = true
 [dependencies]
 crossbeam.workspace = true
 serde.workspace = true
-synapse-action = { path = "../synapse-action" }
-synapse-core = { path = "../synapse-core" }
+synapse-action = { version = "0.1.0", path = "../synapse-action" }
+synapse-core = { version = "0.1.0", path = "../synapse-core" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

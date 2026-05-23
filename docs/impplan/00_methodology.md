@@ -109,7 +109,7 @@ Per `11_security_and_safety.md`:
 - Redaction patterns (`synapse-core::redact`, 19 patterns at v1) apply to: `observe()` text, `read_text()`, `audio_transcribe()`, clipboard summaries, `CF_EVENTS` payloads, replay export, tracing logs, OTLP
 - Forbidden capabilities (compile-time `#[cfg(feature)]` off): DLL injection, kernel drivers, raw process memory r/w, FS writes outside profile paths, non-loopback by default
 - Panic hotkey `Ctrl+Alt+Shift+P` registered via `RegisterHotKey`; fires `ReleaseAll` + reflex disable in ≤ 50 ms
-- `cargo deny`: allow only `MIT`, `Apache-2.0`, `BSD-2/3`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-DFS-2016`. Block GPL/AGPL/SSPL.
+- `cargo deny`: allow only `MIT`, `Apache-2.0`, `BSD-2/3`, `MPL-2.0`, `ISC`, `Zlib`, `Unicode-3.0`, `BSL-1.0`, `CC0-1.0`. Block GPL/AGPL/SSPL.
 - Supported-use gates: `08` §6 — explicit operator configuration for hardware HID and other sensitive capabilities
 
 ---
@@ -132,7 +132,7 @@ Per `12_observability.md`:
 Per `07_storage_and_profiles.md` §6 (data lifecycle):
 
 - Every new CF declares TTL + soft cap + hard cap in `synapse-core::retention::DEFAULTS`. No "decide later."
-- Bincode for hot/binary CFs, JSON for human-readable/audit CFs.
+- Binary codec for hot/binary CFs, JSON for human-readable/audit CFs. `bincode` is disallowed after RUSTSEC-2025-0141; pick a maintained codec before M3 storage.
 - Per-frame writes forbidden — aggregate, batch every 100 ms or 64 KB
 - Three cleanup layers: compaction filter, periodic GC (5 min), disk-pressure responder
 - Test with 1 GB tmpfs DB volume in CI to verify pressure levels (`07_storage_and_profiles.md` §6.3)
@@ -167,7 +167,17 @@ Run: `scripts/check_docs.ps1` (M0 deliverable).
 
 ---
 
-## 12. Definition of release-ready
+## 12. Dev-environment notes (informational, not contract)
+
+These are facts about the current dev box that help when iterating, not requirements on the shipped product. New contributors are not assumed to have any of this set up.
+
+| Resource | Detail |
+|---|---|
+| WSL → Windows PulseAudio bridge | Windows host runs `pulseaudio.exe` v1.1 on TCP `127.0.0.1:4713` (mirrored WSL networking). Useful when building Block D of M3 (`04 §Block D`, work-items 16-18) for replaying audio fixtures from WSL or recording `output.monitor` without leaving the Linux shell. Does **not** replace WASAPI loopback — production capture stays direct on Windows. Full snapshot + setup commands in #85. |
+
+---
+
+## 13. Definition of release-ready
 
 Per `15_roadmap_and_milestones.md` §10 — repeated here for forcing function:
 
