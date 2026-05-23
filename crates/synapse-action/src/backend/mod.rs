@@ -2,6 +2,7 @@ use synapse_core::{Action, Backend};
 
 use crate::{ActionError, EmitState};
 
+pub mod recording;
 #[cfg(windows)]
 pub mod software;
 #[cfg(not(windows))]

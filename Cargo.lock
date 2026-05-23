@@ -2940,6 +2940,7 @@ version = "0.1.0"
 dependencies = [
  "bit-set 0.10.0",
  "enigo",
+ "insta",
  "proptest",
  "serde",
  "synapse-core",
