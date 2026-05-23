@@ -44,6 +44,26 @@ function Get-HeadingAnchors {
     return $Anchors
 }
 
+function Get-RelativePathCompat {
+    param(
+        [string]$Base,
+        [string]$Target
+    )
+
+    if ([System.IO.Path].GetMethod("GetRelativePath", [type[]]@([string], [string]))) {
+        return [System.IO.Path]::GetRelativePath($Base, $Target)
+    }
+
+    $BasePath = [System.IO.Path]::GetFullPath($Base)
+    if (-not ($BasePath.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or $BasePath.EndsWith([System.IO.Path]::AltDirectorySeparatorChar))) {
+        $BasePath = $BasePath + [System.IO.Path]::DirectorySeparatorChar
+    }
+    $TargetPath = [System.IO.Path]::GetFullPath($Target)
+    $BaseUri = [System.Uri]::new($BasePath)
+    $TargetUri = [System.Uri]::new($TargetPath)
+    return [System.Uri]::UnescapeDataString($BaseUri.MakeRelativeUri($TargetUri).ToString()).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+}
+
 $Files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 $RootReadme = Join-Path $RepoRoot "README.md"
 if (Test-Path -LiteralPath $RootReadme) {
@@ -85,7 +105,7 @@ foreach ($File in $Files) {
                 $TargetPath = [System.IO.Path]::GetFullPath((Join-Path $File.DirectoryName $PathPart))
             }
 
-            $RelativeFile = [System.IO.Path]::GetRelativePath($RepoRoot, $File.FullName)
+            $RelativeFile = Get-RelativePathCompat $RepoRoot $File.FullName
             if (-not (Test-Path -LiteralPath $TargetPath -PathType Leaf)) {
                 $Failures.Add("${RelativeFile}:${LineNumber}: broken markdown link '$RawLink' -> '$PathPart'")
                 continue

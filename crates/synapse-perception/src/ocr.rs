@@ -89,16 +89,17 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
+    use std::sync::OnceLock;
+
+    use synapse_capture::screen_region_to_software_bitmap;
     use synapse_core::Rect;
     use windows::Media::Ocr::{OcrEngine, OcrResult};
 
     use super::{PerceptionError, PerceptionResult, TextRegion};
 
     pub fn read_text(region: Rect) -> PerceptionResult<Vec<TextRegion>> {
-        let _engine = ocr_engine()?;
-        Err(PerceptionError::OcrBackendUnavailable {
-            detail: format!("screen region {region:?} is not yet available as SoftwareBitmap"),
-        })
+        let captured = capture_region_bitmap(region)?;
+        read_text_from_software_bitmap(captured.region, &captured.bitmap)
     }
 
     pub fn read_text_from_software_bitmap(
@@ -114,9 +115,14 @@ mod platform {
         text_regions_from_result(region, &result)
     }
 
-    fn ocr_engine() -> PerceptionResult<OcrEngine> {
-        OcrEngine::TryCreateFromUserProfileLanguages()
-            .map_err(|err| backend_unavailable(err.to_string()))
+    fn ocr_engine() -> PerceptionResult<&'static OcrEngine> {
+        static ENGINE: OnceLock<Result<OcrEngine, String>> = OnceLock::new();
+        ENGINE
+            .get_or_init(|| {
+                OcrEngine::TryCreateFromUserProfileLanguages().map_err(|err| err.to_string())
+            })
+            .as_ref()
+            .map_err(|detail| backend_unavailable(detail.clone()))
     }
 
     fn text_regions_from_result(
@@ -185,5 +191,11 @@ mod platform {
 
     const fn backend_unavailable(detail: String) -> PerceptionError {
         PerceptionError::OcrBackendUnavailable { detail }
+    }
+
+    fn capture_region_bitmap(
+        region: Rect,
+    ) -> PerceptionResult<synapse_capture::CapturedSoftwareBitmap> {
+        screen_region_to_software_bitmap(region).map_err(|err| backend_unavailable(err.to_string()))
     }
 }

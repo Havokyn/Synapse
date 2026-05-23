@@ -336,23 +336,26 @@ fn ocr_empty_region_and_backend_unavailable_are_fail_closed() -> TestResult {
         Some(error_codes::OCR_NO_TEXT)
     );
 
-    let region = Rect {
-        x: 0,
-        y: 0,
-        w: 256,
-        h: 64,
-    };
-    fsv_log(format_args!(
-        "source_of_truth=ocr edge=backend before=region:{region:?}"
-    ))?;
-    let backend_after = read_text(region);
-    fsv_log(format_args!(
-        "source_of_truth=ocr edge=backend after={backend_after:?}"
-    ))?;
-    assert_eq!(
-        backend_after.err().map(|err| err.code()),
-        Some(error_codes::OCR_BACKEND_UNAVAILABLE)
-    );
+    #[cfg(not(windows))]
+    {
+        let region = Rect {
+            x: 0,
+            y: 0,
+            w: 256,
+            h: 64,
+        };
+        fsv_log(format_args!(
+            "source_of_truth=ocr edge=backend before=region:{region:?}"
+        ))?;
+        let backend_after = read_text(region);
+        fsv_log(format_args!(
+            "source_of_truth=ocr edge=backend after={backend_after:?}"
+        ))?;
+        assert_eq!(
+            backend_after.err().map(|err| err.code()),
+            Some(error_codes::OCR_BACKEND_UNAVAILABLE)
+        );
+    }
     Ok(())
 }
 
@@ -449,4 +452,167 @@ fn winrt_blank_bitmap_returns_no_text_or_backend_unavailable() -> TestResult {
         Some(error_codes::OCR_NO_TEXT | error_codes::OCR_BACKEND_UNAVAILABLE)
     ));
     Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an interactive Windows desktop with WinRT OCR"]
+fn winrt_text_window_region_read_text_native() -> TestResult {
+    use std::{
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let title = format!("synapse-ocr-fsv-{stamp}");
+    let expected = "Synapse OCR FSV 2468";
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         Add-Type -AssemblyName System.Drawing; \
+         $form = New-Object System.Windows.Forms.Form; \
+         $form.Text = '{title}'; \
+         $form.Width = 900; $form.Height = 260; \
+         $form.StartPosition = 'CenterScreen'; $form.TopMost = $true; \
+         $label = New-Object System.Windows.Forms.Label; \
+         $label.Text = '{expected}'; \
+         $label.Font = New-Object System.Drawing.Font('Segoe UI', 36); \
+         $label.Dock = 'Fill'; $label.TextAlign = 'MiddleCenter'; \
+         $form.Controls.Add($label); \
+         $form.Add_Shown({{ $form.Activate() }}); \
+         [void]$form.ShowDialog();"
+    );
+    fsv_log(format_args!(
+        "source_of_truth=ocr edge=winrt_text_window before=title:{title} text={expected}"
+    ))?;
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .spawn()?;
+
+    let result = (|| -> TestResult {
+        let hwnd = wait_for_window_hwnd(child.id())?;
+        fsv_log(format_args!(
+            "source_of_truth=ocr edge=winrt_text_window hwnd_readback={hwnd}"
+        ))?;
+        let root = synapse_a11y::window_from_hwnd(hwnd)?;
+        let tree = synapse_a11y::snapshot(&root, 2)?;
+        let target = tree
+            .nodes
+            .iter()
+            .find(|node| node.name.contains("Synapse") && node.bbox.w > 0 && node.bbox.h > 0)
+            .or_else(|| {
+                tree.nodes
+                    .iter()
+                    .find(|node| node.focused && node.bbox.w > 0 && node.bbox.h > 0)
+            })
+            .or_else(|| {
+                tree.nodes
+                    .iter()
+                    .find(|node| node.bbox.w > 0 && node.bbox.h > 0)
+            })
+            .ok_or_else(|| io::Error::other("no visible text-window node"))?;
+        fsv_log(format_args!(
+            "source_of_truth=ocr edge=winrt_text_window focus_readback=root:{} nodes:{} role:{} name:{} bbox:{:?}",
+            tree.root,
+            tree.nodes.len(),
+            target.role,
+            target.name,
+            target.bbox
+        ))?;
+        let words = read_text(target.bbox)?;
+        let text = words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        fsv_log(format_args!(
+            "source_of_truth=ocr edge=winrt_text_window after=text:{text} words:{}",
+            words.len()
+        ))?;
+        assert!(text.contains("Synapse"), "actual OCR text: {text}");
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an interactive Windows desktop with WinRT OCR"]
+fn winrt_ocr_capture_vs_recognize_timing_native() -> TestResult {
+    use std::time::Instant;
+
+    use synapse_capture::screen_region_to_software_bitmap;
+    use synapse_perception::read_text_from_software_bitmap;
+
+    for (name, region) in [
+        (
+            "small_256x64",
+            Rect {
+                x: 0,
+                y: 0,
+                w: 256,
+                h: 64,
+            },
+        ),
+        (
+            "full_1080p",
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+        ),
+    ] {
+        let mut capture_ms = Vec::new();
+        let mut recognize_ms = Vec::new();
+        fsv_log(format_args!(
+            "source_of_truth=ocr_timing edge={name} before=region:{region:?} samples:10"
+        ))?;
+        for _ in 0..10 {
+            let capture_started = Instant::now();
+            let captured = screen_region_to_software_bitmap(region)?;
+            capture_ms.push(capture_started.elapsed().as_secs_f64() * 1_000.0);
+
+            let recognize_started = Instant::now();
+            let result = read_text_from_software_bitmap(captured.region, &captured.bitmap);
+            recognize_ms.push(recognize_started.elapsed().as_secs_f64() * 1_000.0);
+            if matches!(
+                result.as_ref().err().map(|err| err.code()),
+                Some(error_codes::OCR_BACKEND_UNAVAILABLE)
+            ) {
+                return Err(io::Error::other("WinRT OCR backend unavailable").into());
+            }
+        }
+        fsv_log(format_args!(
+            "source_of_truth=ocr_timing edge={name} after=capture_p99_ms:{:.3} recognize_p99_ms:{:.3}",
+            p99_ms(capture_ms),
+            p99_ms(recognize_ms)
+        ))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_for_window_hwnd(pid: u32) -> Result<i64, Box<dyn Error>> {
+    for _ in 0..20 {
+        match synapse_a11y::window_for_process(pid) {
+            Ok(root) => {
+                let tree = synapse_a11y::snapshot(&root, 0)?;
+                return Ok(tree.root.parts()?.hwnd);
+            }
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+    }
+    Err(io::Error::other(format!("window for process id {pid} was not visible")).into())
+}
+
+#[cfg(windows)]
+fn p99_ms(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples.last().copied().unwrap_or_default()
 }

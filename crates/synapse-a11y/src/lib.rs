@@ -258,6 +258,26 @@ pub fn focused_window() -> A11yResult<UIElement> {
     platform::focused_window()
 }
 
+/// Returns a top-level UIA window for a native HWND.
+///
+/// # Errors
+///
+/// Returns `A11Y_NO_FOREGROUND` when the HWND is invalid, or
+/// `A11Y_NOT_AVAILABLE` on non-Windows platforms.
+pub fn window_from_hwnd(hwnd: i64) -> A11yResult<UIElement> {
+    platform::window_from_hwnd(hwnd)
+}
+
+/// Returns the top-level UIA window for a process id.
+///
+/// # Errors
+///
+/// Returns `A11Y_NO_FOREGROUND` when no visible window exists for the pid, or
+/// `A11Y_NOT_AVAILABLE` on non-Windows platforms.
+pub fn window_for_process(pid: u32) -> A11yResult<UIElement> {
+    platform::window_for_process(pid)
+}
+
 /// Returns foreground-window process, title, bounds, and display metadata.
 ///
 /// # Errors
@@ -495,14 +515,14 @@ mod platform {
                     DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
                     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SELECTION,
                     EVENT_OBJECT_VALUECHANGE, EVENT_SYSTEM_ALERT, EVENT_SYSTEM_FOREGROUND,
-                    EVENT_SYSTEM_MENUEND, EVENT_SYSTEM_MENUSTART, GetForegroundWindow, GetMessageW,
-                    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, MSG,
-                    PostThreadMessageW, TranslateMessage, WINEVENT_OUTOFCONTEXT,
-                    WINEVENT_SKIPOWNPROCESS, WM_APP,
+                    EVENT_SYSTEM_MENUEND, EVENT_SYSTEM_MENUSTART, EnumWindows, GetForegroundWindow,
+                    GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+                    IsWindowVisible, MSG, PostThreadMessageW, TranslateMessage,
+                    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
                 },
             },
         },
-        core::PWSTR,
+        core::{BOOL, PWSTR},
     };
 
     use super::{
@@ -577,6 +597,31 @@ mod platform {
             });
         }
 
+        element_from_hwnd(hwnd)
+    }
+
+    pub fn window_from_hwnd(hwnd: i64) -> A11yResult<UIElement> {
+        let hwnd = HWND(hwnd as *mut c_void);
+        if hwnd.0.is_null() {
+            return Err(A11yError::NoForeground {
+                detail: "HWND was null".to_owned(),
+            });
+        }
+        element_from_hwnd(hwnd)
+    }
+
+    fn element_from_hwnd(hwnd: HWND) -> A11yResult<UIElement> {
+        with_automation(|automation| {
+            automation
+                .element_from_handle(Handle::from(hwnd))
+                .map_err(map_uia_error)
+        })
+    }
+
+    pub fn window_for_process(pid: u32) -> A11yResult<UIElement> {
+        let hwnd = find_window_for_pid(pid).ok_or_else(|| A11yError::NoForeground {
+            detail: format!("no visible top-level window for pid {pid}"),
+        })?;
         with_automation(|automation| {
             automation
                 .element_from_handle(Handle::from(hwnd))
@@ -1057,6 +1102,35 @@ mod platform {
         ))
     }
 
+    fn find_window_for_pid(pid: u32) -> Option<HWND> {
+        struct Search {
+            pid: u32,
+            hwnd: Option<HWND>,
+        }
+
+        unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let search = unsafe { &mut *(lparam.0 as *mut Search) };
+            let mut window_pid = 0_u32;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, Some(&raw mut window_pid));
+            }
+            if window_pid == search.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                search.hwnd = Some(hwnd);
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+
+        let mut search = Search { pid, hwnd: None };
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_window),
+                LPARAM((&raw mut search).cast::<core::ffi::c_void>() as isize),
+            );
+        }
+        search.hwnd
+    }
+
     fn find_by_runtime_id_hex(
         root: &UIElement,
         runtime_id_hex_expected: &str,
@@ -1277,6 +1351,18 @@ mod platform {
     pub fn focused_window() -> A11yResult<UIElement> {
         Err(A11yError::not_available(
             "UIA foreground window lookup requires Windows",
+        ))
+    }
+
+    pub fn window_from_hwnd(_hwnd: i64) -> A11yResult<UIElement> {
+        Err(A11yError::not_available(
+            "UIA HWND window lookup requires Windows",
+        ))
+    }
+
+    pub fn window_for_process(_pid: u32) -> A11yResult<UIElement> {
+        Err(A11yError::not_available(
+            "UIA process window lookup requires Windows",
         ))
     }
 

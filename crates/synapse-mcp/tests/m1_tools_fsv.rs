@@ -79,6 +79,7 @@ async fn observe_find_and_read_text_fsv() -> anyhow::Result<()> {
     let mut client = StdioMcpClient::launch_and_init_with_env(None, SYNTHETIC_ENV).await?;
 
     verify_observe(&mut client).await?;
+    verify_observe_latency(&mut client).await?;
     verify_find(&mut client).await?;
     verify_read_text(&mut client).await?;
     assert!(client.shutdown().await?.success());
@@ -151,6 +152,7 @@ async fn capture_target_and_perception_mode_fsv() -> anyhow::Result<()> {
         observation.mode
     );
     assert_eq!(observation.mode, PerceptionMode::Hybrid);
+    verify_hybrid_observe_latency(&mut client).await?;
 
     println!("source_of_truth=mcp_perception_mode edge=invalid before=telepathy");
     let invalid_mode = client
@@ -188,6 +190,13 @@ async fn verify_observe(client: &mut StdioMcpClient) -> anyhow::Result<()> {
             .map(|focused| focused.role.as_str()),
         Some("Edit")
     );
+    let focused_bbox = observation
+        .focused
+        .as_ref()
+        .map(|focused| focused.bbox)
+        .context("focused element missing")?;
+    assert!(focused_bbox.w > 0);
+    assert!(focused_bbox.h > 0);
 
     println!("source_of_truth=mcp_observe edge=include_diagnostics before=include:[diagnostics]");
     let filtered_resp = client
@@ -203,6 +212,43 @@ async fn verify_observe(client: &mut StdioMcpClient) -> anyhow::Result<()> {
     assert!(filtered.focused.is_none());
     assert!(filtered.elements.is_empty());
     assert!(filtered.entities.is_empty());
+    Ok(())
+}
+
+async fn verify_observe_latency(client: &mut StdioMcpClient) -> anyhow::Result<()> {
+    let mut elapsed_ms = Vec::with_capacity(100);
+    println!("source_of_truth=mcp_observe edge=round_trip_p99 before=samples:100");
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        let observe_resp = client.tools_call("observe", json!({})).await?;
+        let observation: Observation = structured(&observe_resp)?;
+        assert_eq!(observation.foreground.process_name, "notepad.exe");
+        elapsed_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    elapsed_ms.sort_by(f64::total_cmp);
+    let p99 = elapsed_ms[98];
+    println!("source_of_truth=mcp_observe edge=round_trip_p99 after=p99_ms:{p99:.3}");
+    assert!(p99 <= 50.0, "observe round-trip p99 was {p99:.3} ms");
+    Ok(())
+}
+
+async fn verify_hybrid_observe_latency(client: &mut StdioMcpClient) -> anyhow::Result<()> {
+    let mut elapsed_ms = Vec::with_capacity(100);
+    println!("source_of_truth=mcp_perception_mode edge=hybrid_round_trip_p99 before=samples:100");
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        let observe_resp = client.tools_call("observe", json!({})).await?;
+        let observation: Observation = structured(&observe_resp)?;
+        assert_eq!(observation.mode, PerceptionMode::Hybrid);
+        assert_eq!(observation.foreground.process_name, "notepad.exe");
+        elapsed_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    elapsed_ms.sort_by(f64::total_cmp);
+    let p99 = elapsed_ms[98];
+    println!(
+        "source_of_truth=mcp_perception_mode edge=hybrid_round_trip_p99 after=p99_ms:{p99:.3}"
+    );
+    assert!(p99 <= 30.0, "hybrid observe round-trip p99 was {p99:.3} ms");
     Ok(())
 }
 

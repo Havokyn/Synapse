@@ -1,12 +1,23 @@
 # Synapse
 
-[![M0 Bootstrap](https://img.shields.io/badge/status-M0_bootstrap-blue)](https://github.com/ChrisRoyse/Synapse/milestone/1)
+[![M1 Perception MVP](https://img.shields.io/badge/status-M1_perception_mvp-blue)](https://github.com/ChrisRoyse/Synapse/milestone/2)
 
-Synapse is a Rust MCP server that gives AI agents a local computer-use body: structured perception, action, and low-latency reflexes live in Synapse while the connected model remains the brain. At M0, the only shipped tool is `health`; perception, action, storage, profiles, and game-control surfaces start in later milestones.
+Synapse is a Rust MCP server that gives AI agents a local computer-use body: structured perception, action, and low-latency reflexes live in Synapse while the connected model remains the brain. M1 ships the local perception tool surface; action, storage, profiles, and game-control surfaces start in later milestones.
 
-## Status: M0
+## Status: M1
 
-M0 is the bootstrap milestone: a working `synapse-mcp` binary serves MCP over stdio and answers `tools/call health` with a stable JSON health shape. The live tracker is the [M0 milestone](https://github.com/ChrisRoyse/Synapse/milestone/1), with mission context pinned in [issue #1](https://github.com/ChrisRoyse/Synapse/issues/1). The implementation checklist is [docs/impplan/01_m0_bootstrap.md](docs/impplan/01_m0_bootstrap.md).
+M1 is the local perception milestone: a working `synapse-mcp` binary serves MCP over stdio, exposes the six local tools below, and verifies the perception surface through local manual FSV instead of GitHub Actions. The live tracker is the [M1 milestone](https://github.com/ChrisRoyse/Synapse/milestone/2), with mission context pinned in [issue #86](https://github.com/ChrisRoyse/Synapse/issues/86). The implementation checklist is [docs/impplan/02_m1_perception_mvp.md](docs/impplan/02_m1_perception_mvp.md).
+
+## Tools
+
+| Tool | Description | Milestone | Status |
+|---|---|---:|---|
+| `health` | Reports server version, build, uptime, and subsystem health. | [M0](https://github.com/ChrisRoyse/Synapse/milestone/1) | Done |
+| `observe` | Returns the current structured perception snapshot. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done locally |
+| `find` | Searches accessible elements and detected entities by role/name/query. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done locally |
+| `read_text` | Reads OCR text from a region or element target. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done locally |
+| `set_capture_target` | Sets the active primary, monitor, window, or element-window capture target. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done locally |
+| `set_perception_mode` | Overrides perception mode between auto, a11y-only, pixel-only, and hybrid. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done locally |
 
 ## Build
 
@@ -38,11 +49,11 @@ Inspect available flags:
 synapse-mcp --help
 ```
 
-The HTTP transport flag is present for the future surface but returns `NOT_YET_IMPLEMENTED` during M0.
+The HTTP transport flag is present for the future surface but returns `NOT_YET_IMPLEMENTED` in the local M1 build.
 
 ## Quick Demo
 
-The stdio transport speaks newline-delimited JSON-RPC. A client initializes the server, sends `notifications/initialized`, then calls the `health` tool:
+The stdio transport speaks newline-delimited JSON-RPC. A client initializes the server, sends `notifications/initialized`, then calls a tool:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-demo","version":"0.1.0"}}}

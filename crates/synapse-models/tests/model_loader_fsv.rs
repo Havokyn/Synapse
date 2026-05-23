@@ -8,8 +8,8 @@ use std::{
 use synapse_core::error_codes;
 use synapse_models::{
     DetectOpts, DetectionFrame, Detector, ModelBackend, ModelDescriptor, ModelError, ModelLoader,
-    ModelResult, SessionBuildResult, SessionFactory, SessionHandle, model_download_failed,
-    sha256_file,
+    ModelResult, SessionBuildResult, SessionFactory, SessionHandle, detection_infer_failed,
+    detection_model_not_loaded, model_download_failed, sha256_file,
 };
 use tempfile::NamedTempFile;
 
@@ -180,6 +180,32 @@ fn verified_file_loads_and_reuses_session_id() -> TestResult {
 }
 
 #[test]
+fn detector_rejects_zero_sized_frame_before_inference() -> TestResult {
+    let (file, digest) = temp_model(b"verified-model-zero-frame")?;
+    let loader = ModelLoader::new(vec![ModelBackend::Cpu]);
+    let factory = FakeSessionFactory::success(ModelBackend::Cpu);
+    let model = loader.load_with_factory(descriptor(file.path(), digest), &factory)?;
+    let frame = DetectionFrame {
+        frame_seq: 99,
+        width: 0,
+        height: 640,
+    };
+    record_fsv(format_args!(
+        "source_of_truth=model_detector edge=no_frame before=frame_seq:{} width:{} height:{}",
+        frame.frame_seq, frame.width, frame.height
+    ))?;
+    let after = model.infer(frame, DetectOpts::default());
+    record_fsv(format_args!(
+        "source_of_truth=model_detector edge=no_frame after={after:?}"
+    ))?;
+    assert_eq!(
+        after.err().map(|err| err.code()),
+        Some(error_codes::DETECTION_NO_FRAME)
+    );
+    Ok(())
+}
+
+#[test]
 fn missing_yolov10n_file_is_not_an_error() -> TestResult {
     let tempdir = tempfile::tempdir()?;
     let missing = tempdir.path().join("yolov10n_general.onnx");
@@ -260,6 +286,18 @@ fn model_error_codes_have_throw_sites() -> TestResult {
             error_codes::MODEL_BACKEND_UNAVAILABLE,
             "ModelError::BackendUnavailable",
         ),
+        (
+            error_codes::DETECTION_MODEL_NOT_LOADED,
+            "ModelError::DetectionModelNotLoaded",
+        ),
+        (
+            error_codes::DETECTION_NO_FRAME,
+            "ModelError::DetectionNoFrame",
+        ),
+        (
+            error_codes::DETECTION_MODEL_INFER_FAILED,
+            "ModelError::DetectionInferFailed",
+        ),
     ] {
         record_fsv(format_args!(
             "source_of_truth=model_error_code_audit before=code:{code}"
@@ -288,6 +326,30 @@ fn model_download_attempt_fails_closed() -> TestResult {
         after
     ))?;
     assert_eq!(after.code(), error_codes::MODEL_DOWNLOAD_FAILED);
+    Ok(())
+}
+
+#[test]
+fn detection_error_helpers_return_catalog_codes() -> TestResult {
+    for (edge, after, code) in [
+        (
+            "not_loaded",
+            detection_model_not_loaded("operator did not load a model"),
+            error_codes::DETECTION_MODEL_NOT_LOADED,
+        ),
+        (
+            "infer_failed",
+            detection_infer_failed("synthetic runtime failure"),
+            error_codes::DETECTION_MODEL_INFER_FAILED,
+        ),
+    ] {
+        record_fsv(format_args!(
+            "source_of_truth=model_detector edge={edge} after=code:{} detail:{}",
+            after.code(),
+            after
+        ))?;
+        assert_eq!(after.code(), code);
+    }
     Ok(())
 }
 

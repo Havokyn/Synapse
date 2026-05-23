@@ -1,9 +1,11 @@
 # 02 — M1: Perception MVP (2-3 weeks) — ACTIVE
 
-**Status (2026-05-23):** active phase. M0 closed at `v0.1.0-m0`. All 11 M1
-target crates (`synapse-capture`, `synapse-a11y`, `synapse-perception`,
-`synapse-models`, plus extensions in `synapse-core`, `synapse-mcp`) are
-currently pure stubs (≤ 8 LoC each) — see audit in M1 tracker.
+**Status (2026-05-23):** local implementation complete under the WSL/global
+install constraint. M0 closed at `v0.1.0-m0`. M1 now has the six MCP tools
+registered, structured observation assembly, capture target state, perception
+mode override, UIA foreground snapshots, WinRT OCR over real Windows screen
+regions, model-loader error surfaces, and local manual FSV evidence. GitHub
+Actions/self-hosted runner work is explicitly out of scope for this local pass.
 
 **Pre-existing assets available for M1:**
 
