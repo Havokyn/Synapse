@@ -24,12 +24,12 @@ use crate::{
         read_text_in_state, set_capture_target_in_state, set_perception_mode_in_state,
     },
     m2::{
-        ActAimParams, ActAimResponse, ActClickParams, ActClickResponse, ActDragParams,
-        ActDragResponse, ActPadParams, ActPadResponse, ActPressParams, ActPressResponse,
-        ActScrollParams, ActScrollResponse, ActTypeParams, ActTypeResponse, SharedM2State,
-        act_aim_with_handle, act_click_with_handle, act_drag_with_handle, act_pad_with_handle,
-        act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
-        shared_m2_state_from_env,
+        ActAimParams, ActAimResponse, ActClickParams, ActClickResponse, ActClipboardParams,
+        ActClipboardResponse, ActDragParams, ActDragResponse, ActPadParams, ActPadResponse,
+        ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse, ActTypeParams,
+        ActTypeResponse, SharedM2State, act_aim_with_handle, act_click_with_handle, act_clipboard,
+        act_drag_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
+        act_type_with_handle, shared_m2_state_from_env,
     },
 };
 
@@ -308,6 +308,19 @@ impl SynapseService {
         act_pad_with_handle(handle, recording, params.0)
             .await
             .map(Json)
+    }
+
+    #[tool(description = "Read, write, or clear the system clipboard")]
+    pub async fn act_clipboard(
+        &self,
+        params: Parameters<ActClipboardParams>,
+    ) -> Result<Json<ActClipboardResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_clipboard",
+            "tool.invocation kind=act_clipboard"
+        );
+        act_clipboard(params.0).await.map(Json)
     }
 }
 

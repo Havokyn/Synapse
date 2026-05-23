@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 
 pub mod backend;
+pub mod clipboard;
 pub mod curve;
 pub mod dynamics;
 pub mod emitter;
@@ -15,6 +16,10 @@ pub use backend::{
     recording::{RecordedInput, RecordingBackend},
     resolve_backend,
     unavailable::HardwareUnavailableBackend,
+};
+pub use clipboard::{
+    ClipboardFormat, clear as clear_clipboard, read_text as read_clipboard_text,
+    write_text as write_clipboard_text,
 };
 pub use curve::sample_curve;
 pub use dynamics::{BIGRAMS, KeystrokeEvent, ModifierMask, sample_typing_schedule};

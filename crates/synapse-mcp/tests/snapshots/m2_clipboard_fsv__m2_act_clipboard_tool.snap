@@ -1,0 +1,62 @@
+---
+source: crates/synapse-mcp/tests/m2_clipboard_fsv.rs
+expression: projection
+---
+{
+  "description": "Read, write, or clear the system clipboard",
+  "inputSchema": {
+    "$defs": {
+      "ActClipboardFormat": {
+        "enum": [
+          "text",
+          "unicode"
+        ],
+        "type": "string"
+      },
+      "ActClipboardVerb": {
+        "enum": [
+          "read",
+          "write",
+          "clear"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "format": {
+        "$ref": "#/$defs/ActClipboardFormat",
+        "default": "unicode"
+      },
+      "text": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "verb": {
+        "$ref": "#/$defs/ActClipboardVerb"
+      }
+    },
+    "required": [
+      "verb"
+    ],
+    "title": "ActClipboardParams",
+    "type": "object"
+  },
+  "name": "act_clipboard",
+  "outputSchemaRoot": {
+    "additionalProperties": false,
+    "required": [
+      "ok",
+      "verb",
+      "format",
+      "written",
+      "cleared",
+      "elapsed_ms"
+    ],
+    "title": "ActClipboardResponse",
+    "type": "object"
+  }
+}
