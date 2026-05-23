@@ -1,0 +1,2653 @@
+---
+source: crates/synapse-mcp/tests/m2_tools_fsv.rs
+expression: schemas
+---
+[
+  {
+    "description": "Move the pointer toward a screen, element, or track target",
+    "inputSchema": {
+      "$defs": {
+        "ActAimElementTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "element_id": {
+              "$ref": "#/$defs/ElementId"
+            }
+          },
+          "required": [
+            "element_id"
+          ],
+          "type": "object"
+        },
+        "ActAimPointTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "type": "object"
+        },
+        "ActAimTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActAimPointTarget"
+            },
+            {
+              "$ref": "#/$defs/ActAimElementTarget"
+            },
+            {
+              "$ref": "#/$defs/ActAimTrackTarget"
+            }
+          ]
+        },
+        "ActAimTrackTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "track_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "track_id"
+          ],
+          "type": "object"
+        },
+        "AimBackend": {
+          "enum": [
+            "software",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "AimStyleParam": {
+          "enum": [
+            "snap",
+            "flick",
+            "natural",
+            "track"
+          ],
+          "type": "string"
+        },
+        "ElementId": {
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/AimBackend",
+          "default": "auto"
+        },
+        "deadline_ms": {
+          "default": 80,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "style": {
+          "$ref": "#/$defs/AimStyleParam",
+          "default": "snap"
+        },
+        "target": {
+          "$ref": "#/$defs/ActAimTarget"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "ActAimParams",
+      "type": "object"
+    },
+    "name": "act_aim",
+    "outputSchema": {
+      "$defs": {
+        "AimStyleParam": {
+          "enum": [
+            "snap",
+            "flick",
+            "natural",
+            "track"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "style_used": {
+          "$ref": "#/$defs/AimStyleParam"
+        }
+      },
+      "required": [
+        "ok",
+        "style_used",
+        "duration_ms",
+        "backend_used",
+        "elapsed_ms"
+      ],
+      "title": "ActAimResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Click a screen coordinate or UI Automation element",
+    "inputSchema": {
+      "$defs": {
+        "ActClickElementTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "element_id": {
+              "$ref": "#/$defs/ElementId"
+            }
+          },
+          "required": [
+            "element_id"
+          ],
+          "type": "object"
+        },
+        "ActClickPointTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "type": "object"
+        },
+        "ActClickTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActClickElementTarget"
+            },
+            {
+              "$ref": "#/$defs/ActClickPointTarget"
+            }
+          ]
+        },
+        "Backend": {
+          "enum": [
+            "software",
+            "vigem",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "ClickCurve": {
+          "enum": [
+            "natural",
+            "instant",
+            "linear",
+            "ease_in_out"
+          ],
+          "type": "string"
+        },
+        "ClickModifier": {
+          "enum": [
+            "ctrl",
+            "shift",
+            "alt",
+            "super"
+          ],
+          "type": "string"
+        },
+        "ElementId": {
+          "type": "string"
+        },
+        "MouseButton": {
+          "enum": [
+            "left",
+            "right",
+            "middle",
+            "x1",
+            "x2"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/Backend",
+          "default": "auto"
+        },
+        "button": {
+          "$ref": "#/$defs/MouseButton",
+          "default": "left"
+        },
+        "clicks": {
+          "default": 1,
+          "format": "uint8",
+          "maximum": 3,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "curve": {
+          "$ref": "#/$defs/ClickCurve",
+          "default": "natural"
+        },
+        "duration_ms": {
+          "default": 50,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modifiers": {
+          "items": {
+            "$ref": "#/$defs/ClickModifier"
+          },
+          "type": "array"
+        },
+        "target": {
+          "$ref": "#/$defs/ActClickTarget"
+        },
+        "use_invoke_pattern": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "ActClickParams",
+      "type": "object"
+    },
+    "name": "act_click",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "used_invoke_pattern": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "used_invoke_pattern",
+        "backend_used",
+        "elapsed_ms"
+      ],
+      "title": "ActClickResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Read, write, or clear the system clipboard",
+    "inputSchema": {
+      "$defs": {
+        "ActClipboardFormat": {
+          "enum": [
+            "text",
+            "unicode"
+          ],
+          "type": "string"
+        },
+        "ActClipboardVerb": {
+          "enum": [
+            "read",
+            "write",
+            "clear"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/ActClipboardFormat",
+          "default": "unicode"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verb": {
+          "$ref": "#/$defs/ActClipboardVerb"
+        }
+      },
+      "required": [
+        "verb"
+      ],
+      "title": "ActClipboardParams",
+      "type": "object"
+    },
+    "name": "act_clipboard",
+    "outputSchema": {
+      "$defs": {
+        "ActClipboardFormat": {
+          "enum": [
+            "text",
+            "unicode"
+          ],
+          "type": "string"
+        },
+        "ActClipboardVerb": {
+          "enum": [
+            "read",
+            "write",
+            "clear"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "cleared": {
+          "type": "boolean"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format": {
+          "$ref": "#/$defs/ActClipboardFormat"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_len": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "verb": {
+          "$ref": "#/$defs/ActClipboardVerb"
+        },
+        "written": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "verb",
+        "format",
+        "written",
+        "cleared",
+        "elapsed_ms"
+      ],
+      "title": "ActClipboardResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Drag between screen coordinates or element centers",
+    "inputSchema": {
+      "$defs": {
+        "ActDragElementTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "element_id": {
+              "$ref": "#/$defs/ElementId"
+            }
+          },
+          "required": [
+            "element_id"
+          ],
+          "type": "object"
+        },
+        "ActDragPointTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "type": "object"
+        },
+        "ActDragTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActDragPointTarget"
+            },
+            {
+              "$ref": "#/$defs/ActDragElementTarget"
+            }
+          ]
+        },
+        "DragBackend": {
+          "enum": [
+            "software",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "DragButton": {
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "type": "string"
+        },
+        "DragCurve": {
+          "enum": [
+            "natural",
+            "instant",
+            "linear",
+            "ease_in_out"
+          ],
+          "type": "string"
+        },
+        "ElementId": {
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/DragBackend",
+          "default": "auto"
+        },
+        "button": {
+          "$ref": "#/$defs/DragButton",
+          "default": "left"
+        },
+        "curve": {
+          "$ref": "#/$defs/DragCurve",
+          "default": "natural"
+        },
+        "duration_ms": {
+          "default": 200,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "from": {
+          "$ref": "#/$defs/ActDragTarget"
+        },
+        "to": {
+          "$ref": "#/$defs/ActDragTarget"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "ActDragParams",
+      "type": "object"
+    },
+    "name": "act_drag",
+    "outputSchema": {
+      "$defs": {
+        "DragButton": {
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "type": "string"
+        },
+        "DragCurve": {
+          "enum": [
+            "natural",
+            "instant",
+            "linear",
+            "ease_in_out"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "button_used": {
+          "$ref": "#/$defs/DragButton"
+        },
+        "curve_used": {
+          "$ref": "#/$defs/DragCurve"
+        },
+        "distance_px": {
+          "format": "double",
+          "type": "number"
+        },
+        "duration_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "button_used",
+        "curve_used",
+        "duration_ms",
+        "distance_px",
+        "backend_used",
+        "elapsed_ms"
+      ],
+      "title": "ActDragResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Apply a virtual gamepad report and optionally return it to neutral",
+    "inputSchema": {
+      "$defs": {
+        "ActPadButton": {
+          "enum": [
+            "a",
+            "b",
+            "x",
+            "y",
+            "lb",
+            "rb",
+            "ls",
+            "rs",
+            "back",
+            "start",
+            "up",
+            "down",
+            "left",
+            "right"
+          ],
+          "type": "string"
+        },
+        "ActPadReport": {
+          "additionalProperties": false,
+          "properties": {
+            "buttons": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ActPadButton"
+              },
+              "type": "array"
+            },
+            "lt": {
+              "default": 0.0,
+              "format": "float",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rt": {
+              "default": 0.0,
+              "format": "float",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "thumb_l": {
+              "default": [
+                0.0,
+                0.0
+              ],
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "maximum": 1.0,
+                  "minimum": -1.0,
+                  "type": "number"
+                },
+                {
+                  "maximum": 1.0,
+                  "minimum": -1.0,
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            "thumb_r": {
+              "default": [
+                0.0,
+                0.0
+              ],
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "maximum": 1.0,
+                  "minimum": -1.0,
+                  "type": "number"
+                },
+                {
+                  "maximum": 1.0,
+                  "minimum": -1.0,
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "PadBackend": {
+          "enum": [
+            "vigem",
+            "hardware"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/PadBackend",
+          "default": "vigem"
+        },
+        "hold_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pad_id": {
+          "default": 0,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "report": {
+          "$ref": "#/$defs/ActPadReport"
+        }
+      },
+      "required": [
+        "report"
+      ],
+      "title": "ActPadParams",
+      "type": "object"
+    },
+    "name": "act_pad",
+    "outputSchema": {
+      "$defs": {
+        "ActPadButton": {
+          "enum": [
+            "a",
+            "b",
+            "x",
+            "y",
+            "lb",
+            "rb",
+            "ls",
+            "rs",
+            "back",
+            "start",
+            "up",
+            "down",
+            "left",
+            "right"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "buttons": {
+          "items": {
+            "$ref": "#/$defs/ActPadButton"
+          },
+          "type": "array"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hold_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "pad_id": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned_to_neutral": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "pad_id",
+        "buttons",
+        "backend_used",
+        "returned_to_neutral",
+        "elapsed_ms"
+      ],
+      "title": "ActPadResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Press a keyboard key or ordered chord",
+    "inputSchema": {
+      "$defs": {
+        "PressBackend": {
+          "enum": [
+            "software",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/PressBackend",
+          "default": "auto"
+        },
+        "hold_ms": {
+          "default": 33,
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "keys"
+      ],
+      "title": "ActPressParams",
+      "type": "object"
+    },
+    "name": "act_press",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keys_pressed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "keys_pressed",
+        "elapsed_ms",
+        "backend_used"
+      ],
+      "title": "ActPressResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Scroll vertically or horizontally at the current pointer or screen point",
+    "inputSchema": {
+      "$defs": {
+        "ActScrollPoint": {
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActScrollPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dx": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        },
+        "dy": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        },
+        "smooth": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "ActScrollParams",
+      "type": "object"
+    },
+    "name": "act_scroll",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend_used": {
+          "type": "string"
+        },
+        "dx": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "dy": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "scrolled": {
+          "type": "boolean"
+        },
+        "smooth": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "dy",
+        "dx",
+        "smooth",
+        "scrolled",
+        "backend_used",
+        "elapsed_ms"
+      ],
+      "title": "ActScrollResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Type text through the active keyboard backend",
+    "inputSchema": {
+      "$defs": {
+        "ElementId": {
+          "type": "string"
+        },
+        "TypeBackend": {
+          "enum": [
+            "software",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "TypeDynamics": {
+          "enum": [
+            "burst",
+            "linear",
+            "natural"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/TypeBackend",
+          "default": "auto"
+        },
+        "dynamics": {
+          "$ref": "#/$defs/TypeDynamics",
+          "default": "natural"
+        },
+        "into_element": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "linear_ms_per_char": {
+          "default": 30,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "press_enter_after": {
+          "default": false,
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "use_scancodes": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "ActTypeParams",
+      "type": "object"
+    },
+    "name": "act_type",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "chars_typed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "chars_typed",
+        "elapsed_ms"
+      ],
+      "title": "ActTypeResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Search visible accessibility nodes and detected entities",
+    "inputSchema": {
+      "$defs": {
+        "ElementId": {
+          "type": "string"
+        },
+        "FindScope": {
+          "enum": [
+            "elements",
+            "entities",
+            "both"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "automation_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in_window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "limit": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name_substring": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "FindParams",
+      "type": "object"
+    },
+    "name": "find",
+    "outputSchema": {
+      "$defs": {
+        "ElementId": {
+          "type": "string"
+        },
+        "FindResult": {
+          "additionalProperties": false,
+          "properties": {
+            "automation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bbox": {
+              "$ref": "#/$defs/Rect"
+            },
+            "class_label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "entity_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/FindResultKind"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "score": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "bbox",
+            "score"
+          ],
+          "type": "object"
+        },
+        "FindResultKind": {
+          "enum": [
+            "element",
+            "entity"
+          ],
+          "type": "string"
+        },
+        "Rect": {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "w": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "results": {
+          "items": {
+            "$ref": "#/$defs/FindResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "results"
+      ],
+      "title": "FindResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Return server health",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "EmptyParams",
+      "type": "object"
+    },
+    "name": "health",
+    "outputSchema": {
+      "$defs": {
+        "SubsystemHealth": {
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "build": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "subsystems": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SubsystemHealth"
+          },
+          "type": "object"
+        },
+        "uptime_s": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "version",
+        "build",
+        "uptime_s",
+        "subsystems"
+      ],
+      "title": "Health",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Returns structured state of the focused window and surrounding context",
+    "inputSchema": {
+      "$defs": {
+        "ObserveSlot": {
+          "enum": [
+            "focused",
+            "elements",
+            "entities",
+            "hud",
+            "audio",
+            "events",
+            "clipboard",
+            "fs",
+            "diagnostics"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "include": {
+          "items": {
+            "$ref": "#/$defs/ObserveSlot"
+          },
+          "type": "array"
+        },
+        "max_elements": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "since_event_seq": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "ObserveParams",
+      "type": "object"
+    },
+    "name": "observe",
+    "outputSchema": {
+      "$defs": {
+        "AccessibleNode": {
+          "additionalProperties": false,
+          "properties": {
+            "automation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bbox": {
+              "$ref": "#/$defs/Rect"
+            },
+            "children_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "depth": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "element_id": {
+              "$ref": "#/$defs/ElementId"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parent": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ElementId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "patterns": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UiaPattern"
+              },
+              "type": "array"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "element_id",
+            "name",
+            "role",
+            "bbox",
+            "enabled",
+            "focused",
+            "children_count",
+            "depth"
+          ],
+          "type": "object"
+        },
+        "AudioContext": {
+          "additionalProperties": false,
+          "properties": {
+            "direction_estimate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DirectionEstimate"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recent_events": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/AudioEvent"
+              },
+              "type": "array"
+            },
+            "rms_db": {
+              "format": "float",
+              "type": "number"
+            },
+            "vad_speech_recent": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "rms_db",
+            "vad_speech_recent"
+          ],
+          "type": "object"
+        },
+        "AudioEvent": {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "azimuth_deg": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            },
+            "kind": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "at",
+            "kind",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "ClipboardSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "formats": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "text_excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text_len": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "redacted"
+          ],
+          "type": "object"
+        },
+        "DetectedEntity": {
+          "additionalProperties": false,
+          "properties": {
+            "bbox": {
+              "$ref": "#/$defs/Rect"
+            },
+            "class_label": {
+              "type": "string"
+            },
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            },
+            "entity_id": {
+              "type": "string"
+            },
+            "first_seen_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "last_seen_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "track_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "velocity_px_per_s": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "float",
+                  "type": "number"
+                },
+                {
+                  "format": "float",
+                  "type": "number"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "entity_id",
+            "track_id",
+            "class_label",
+            "bbox",
+            "confidence",
+            "first_seen_at",
+            "last_seen_at"
+          ],
+          "type": "object"
+        },
+        "DirectionEstimate": {
+          "additionalProperties": false,
+          "properties": {
+            "azimuth_deg": {
+              "format": "float",
+              "type": "number"
+            },
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "azimuth_deg",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "ElementId": {
+          "type": "string"
+        },
+        "EventSource": {
+          "enum": [
+            "a11y_uia",
+            "a11y_win_event",
+            "a11y_cdp",
+            "perception",
+            "perception_detection",
+            "perception_hud",
+            "perception_audio",
+            "filesystem",
+            "process",
+            "clipboard",
+            "action_emitter",
+            "reflex",
+            "system"
+          ],
+          "type": "string"
+        },
+        "EventSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "data_excerpt": true,
+            "kind": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/$defs/EventSource"
+            }
+          },
+          "required": [
+            "seq",
+            "at",
+            "source",
+            "kind",
+            "data_excerpt"
+          ],
+          "type": "object"
+        },
+        "FocusedElement": {
+          "additionalProperties": false,
+          "properties": {
+            "automation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bbox": {
+              "$ref": "#/$defs/Rect"
+            },
+            "element_id": {
+              "$ref": "#/$defs/ElementId"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "patterns": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UiaPattern"
+              },
+              "type": "array"
+            },
+            "role": {
+              "type": "string"
+            },
+            "selected_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "element_id",
+            "name",
+            "role",
+            "bbox",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        "ForegroundContext": {
+          "additionalProperties": false,
+          "properties": {
+            "dpi_scale": {
+              "format": "float",
+              "type": "number"
+            },
+            "hwnd": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "is_dwm_composed": {
+              "type": "boolean"
+            },
+            "is_fullscreen": {
+              "type": "boolean"
+            },
+            "monitor_index": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "process_name": {
+              "type": "string"
+            },
+            "process_path": {
+              "type": "string"
+            },
+            "profile_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "steam_appid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "window_bounds": {
+              "$ref": "#/$defs/Rect"
+            },
+            "window_title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hwnd",
+            "pid",
+            "process_name",
+            "process_path",
+            "window_title",
+            "window_bounds",
+            "monitor_index",
+            "dpi_scale",
+            "is_fullscreen",
+            "is_dwm_composed"
+          ],
+          "type": "object"
+        },
+        "FsEvent": {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/FsEventKind"
+            },
+            "path": {
+              "type": "string"
+            },
+            "size_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "FsEventKind": {
+          "enum": [
+            "created",
+            "modified",
+            "deleted",
+            "renamed"
+          ],
+          "type": "string"
+        },
+        "HudReading": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            },
+            "parsed": {
+              "$ref": "#/$defs/HudValue"
+            },
+            "raw_text": {
+              "type": "string"
+            },
+            "stale_ms": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "raw_text",
+            "parsed",
+            "confidence",
+            "stale_ms"
+          ],
+          "type": "object"
+        },
+        "HudReadings": {
+          "additionalProperties": false,
+          "properties": {
+            "by_name": {
+              "additionalProperties": {
+                "$ref": "#/$defs/HudReading"
+              },
+              "default": {},
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "HudValue": {
+          "anyOf": [
+            {
+              "format": "double",
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ObservationDiagnostics": {
+          "additionalProperties": false,
+          "properties": {
+            "a11y_enabled": {
+              "type": "boolean"
+            },
+            "a11y_status": {
+              "$ref": "#/$defs/SensorStatus"
+            },
+            "assembled_in_ms": {
+              "format": "float",
+              "type": "number"
+            },
+            "audio_enabled": {
+              "type": "boolean"
+            },
+            "audio_status": {
+              "$ref": "#/$defs/SensorStatus"
+            },
+            "capture_status": {
+              "$ref": "#/$defs/SensorStatus"
+            },
+            "detection_status": {
+              "$ref": "#/$defs/SensorStatus"
+            },
+            "elements_truncated": {
+              "type": "boolean"
+            },
+            "entities_truncated": {
+              "type": "boolean"
+            },
+            "pixel_enabled": {
+              "type": "boolean"
+            },
+            "sensor_latency_ms": {
+              "additionalProperties": {
+                "format": "float",
+                "type": "number"
+              },
+              "type": "object"
+            },
+            "size_bytes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "size_estimate_tokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "assembled_in_ms",
+            "a11y_enabled",
+            "pixel_enabled",
+            "audio_enabled",
+            "a11y_status",
+            "capture_status",
+            "detection_status",
+            "audio_status",
+            "elements_truncated",
+            "entities_truncated",
+            "size_bytes",
+            "size_estimate_tokens"
+          ],
+          "type": "object"
+        },
+        "PerceptionMode": {
+          "enum": [
+            "a11y_only",
+            "pixel_only",
+            "hybrid",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "Rect": {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "w": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        },
+        "SensorStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "healthy",
+                "disabled",
+                "unavailable"
+              ],
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "degraded_latency": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "last_p99_ms": {
+                      "format": "float",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "last_p99_ms"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "degraded_latency"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "degraded_sensor_failed": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "reason_code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "reason_code"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "degraded_sensor_failed"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "UiaPattern": {
+          "enum": [
+            "invoke",
+            "toggle",
+            "value",
+            "selection",
+            "expand_collapse",
+            "scroll",
+            "text",
+            "window",
+            "transform",
+            "range_value"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "audio": {
+          "$ref": "#/$defs/AudioContext",
+          "default": {
+            "recent_events": [],
+            "rms_db": 0.0,
+            "vad_speech_recent": false
+          }
+        },
+        "clipboard_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClipboardSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/ObservationDiagnostics"
+        },
+        "elements": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AccessibleNode"
+          },
+          "type": "array"
+        },
+        "entities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DetectedEntity"
+          },
+          "type": "array"
+        },
+        "focused": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FocusedElement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "foreground": {
+          "$ref": "#/$defs/ForegroundContext"
+        },
+        "fs_recent": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FsEvent"
+          },
+          "type": "array"
+        },
+        "hud": {
+          "$ref": "#/$defs/HudReadings",
+          "default": {
+            "by_name": {}
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/PerceptionMode"
+        },
+        "recent_events": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EventSummary"
+          },
+          "type": "array"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "mode",
+        "foreground",
+        "diagnostics"
+      ],
+      "title": "Observation",
+      "type": "object"
+    }
+  },
+  {
+    "description": "OCR text from a screen region or visible element",
+    "inputSchema": {
+      "$defs": {
+        "ElementId": {
+          "type": "string"
+        },
+        "OcrBackend": {
+          "enum": [
+            "winrt",
+            "crnn",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "Rect": {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "w": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/OcrBackend",
+          "default": "auto"
+        },
+        "element_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ElementId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lang_hint": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ReadTextParams",
+      "type": "object"
+    },
+    "name": "read_text",
+    "outputSchema": {
+      "$defs": {
+        "OcrBackend": {
+          "enum": [
+            "winrt",
+            "crnn",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "OcrWord": {
+          "additionalProperties": false,
+          "properties": {
+            "bbox": {
+              "$ref": "#/$defs/Rect"
+            },
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "bbox",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "Rect": {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "w": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/OcrBackend"
+        },
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "words": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OcrWord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "text",
+        "backend"
+      ],
+      "title": "OcrResult",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Release all held keyboard, mouse, and gamepad input state",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "ReleaseAllParams",
+      "type": "object"
+    },
+    "name": "release_all",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "neutralized_pads": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "released_buttons": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "released_keys": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "released_keys",
+        "released_buttons",
+        "neutralized_pads"
+      ],
+      "title": "ReleaseAllResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Set the active capture target",
+    "inputSchema": {
+      "$defs": {
+        "CaptureTargetParam": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "primary",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "monitor",
+                  "type": "string"
+                },
+                "monitor_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "monitor_index"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "window",
+                  "type": "string"
+                },
+                "window_hwnd": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "window_hwnd"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "element_id": {
+                  "$ref": "#/$defs/ElementId"
+                },
+                "kind": {
+                  "const": "element_window",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "element_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ElementId": {
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "cursor_visible": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "dirty_region_only": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "min_update_interval_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/CaptureTargetParam"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "SetCaptureTargetParams",
+      "type": "object"
+    },
+    "name": "set_capture_target",
+    "outputSchema": {
+      "$defs": {
+        "CaptureTargetWire": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "primary",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "monitor",
+                  "type": "string"
+                },
+                "monitor_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "monitor_index"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "window",
+                  "type": "string"
+                },
+                "window_hwnd": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "window_hwnd"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "current": {
+          "$ref": "#/$defs/CaptureTargetWire"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous": {
+          "$ref": "#/$defs/CaptureTargetWire"
+        }
+      },
+      "required": [
+        "previous",
+        "current",
+        "generation",
+        "backend"
+      ],
+      "title": "SetCaptureTargetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Set the active perception mode",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "SetPerceptionModeParams",
+      "type": "object"
+    },
+    "name": "set_perception_mode",
+    "outputSchema": {
+      "$defs": {
+        "PerceptionMode": {
+          "enum": [
+            "a11y_only",
+            "pixel_only",
+            "hybrid",
+            "auto"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/PerceptionMode"
+        },
+        "previous": {
+          "$ref": "#/$defs/PerceptionMode"
+        },
+        "rationale": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "previous",
+        "mode",
+        "rationale"
+      ],
+      "title": "SetPerceptionModeResponse",
+      "type": "object"
+    }
+  }
+]
