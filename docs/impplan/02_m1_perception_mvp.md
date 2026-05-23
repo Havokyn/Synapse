@@ -1,4 +1,18 @@
-# 02 — M1: Perception MVP (2-3 weeks)
+# 02 — M1: Perception MVP (2-3 weeks) — ACTIVE
+
+**Status (2026-05-23):** active phase. M0 closed at `v0.1.0-m0`. All 11 M1
+target crates (`synapse-capture`, `synapse-a11y`, `synapse-perception`,
+`synapse-models`, plus extensions in `synapse-core`, `synapse-mcp`) are
+currently pure stubs (≤ 8 LoC each) — see audit in M1 tracker.
+
+**Pre-existing assets available for M1:**
+
+- All M1 error codes already declared as `pub const` in
+  `crates/synapse-core/src/error_codes.rs` (asserted by `tests/error_codes_literal.rs`).
+- `synapse-test-utils::stdio_mcp_client::StdioMcpClient` available for E2E tests.
+- `synapse-telemetry::init_tracing()` available; instrument every M1 fn.
+- `Backend`, `PerceptionMode`, `Point`, `Rect`, `Size`, `SCHEMA_VERSION` exist
+  in `synapse-core::types` — extend, do not redefine.
 
 PRD: `15_roadmap_and_milestones.md` §3. Subsystem detail: `02_perception.md`. Schemas: `06_data_schemas.md` §2.
 

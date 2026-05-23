@@ -228,8 +228,8 @@ Crate boundaries and dep graph in `01_architecture.md`. Build details in `14_bui
 | Phase | Status |
 |---|---|
 | PRD | Active drafting |
-| M0 — bootstrap | Not started |
-| M1 — perception MVP (a11y + capture) | Not started |
+| M0 — bootstrap | DONE (tag `v0.1.0-m0`, 2026-05-23) |
+| M1 — perception MVP (a11y + capture) | In progress (active phase) |
 | M2 — action MVP (kbd/mouse/pad) | Not started |
 | M3 — reflex + MCP surface | Not started |
 | M4 — hardware HID + first game profile | Not started |

@@ -1,4 +1,10 @@
-# 01 — M0: Bootstrap (1 week)
+# 01 — M0: Bootstrap (1 week) — DONE
+
+**Status:** Closed 2026-05-23 by release tag `v0.1.0-m0` (commit `f04b429`).
+**Evidence:** `crates/synapse-mcp/tests/m0_demo_gate.rs` exercises the full
+`tools/list` → `tools/call health {}` round-trip end-to-end. CI green on Ubuntu
++ Windows (`.github/workflows/ci.yml`). M0 work-items and acceptance gates
+below are preserved for archival and onboarding.
 
 PRD: `15_roadmap_and_milestones.md` §2.
 

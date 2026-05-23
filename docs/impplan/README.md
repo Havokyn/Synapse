@@ -10,16 +10,16 @@ Doctrine: `docs2/compressionprompt.md` §0-13. Keep verbatim: paths, crate names
 
 ## Phase index
 
-| # | File | Phase | PRD demo gate | Effort (solo) |
-|---|---|---|---|---|
-| 00 | [`00_methodology.md`](00_methodology.md) | Dev discipline (all phases) | n/a | — |
-| 01 | [`01_m0_bootstrap.md`](01_m0_bootstrap.md) | M0 — workspace + rmcp stdio + `health` | `15_roadmap_and_milestones.md` §2 | 1w |
-| 02 | [`02_m1_perception_mvp.md`](02_m1_perception_mvp.md) | M1 — capture + UIA + `observe()` | §3 | 2-3w |
-| 03 | [`03_m2_action_mvp.md`](03_m2_action_mvp.md) | M2 — input emit + `ReleaseAll` | §4 | 2w |
-| 04 | [`04_m3_reflex_mcp_surface.md`](04_m3_reflex_mcp_surface.md) | M3 — reflexes + RocksDB + profiles + HTTP/SSE | §5 | 2-3w |
-| 05 | [`05_m4_hardware_hid_first_game.md`](05_m4_hardware_hid_first_game.md) | M4 — RP2040 firmware + `minecraft.java` | §6 | 2-3w |
-| 06 | [`06_m5_production_polish.md`](06_m5_production_polish.md) | M5 — installer + 5 profiles + overlay + soak | §7 | 3-4w |
-| 07 | [`07_cross_cutting.md`](07_cross_cutting.md) | Perf gates, security, observability, release | §10/§11/§12/§14 | — |
+| # | File | Phase | PRD demo gate | Effort (solo) | Status |
+|---|---|---|---|---|---|
+| 00 | [`00_methodology.md`](00_methodology.md) | Dev discipline (all phases) | n/a | — | active |
+| 01 | [`01_m0_bootstrap.md`](01_m0_bootstrap.md) | M0 — workspace + rmcp stdio + `health` | `15_roadmap_and_milestones.md` §2 | 1w | **DONE** (`v0.1.0-m0`, 2026-05-23) |
+| 02 | [`02_m1_perception_mvp.md`](02_m1_perception_mvp.md) | M1 — capture + UIA + `observe()` | §3 | 2-3w | **active phase** |
+| 03 | [`03_m2_action_mvp.md`](03_m2_action_mvp.md) | M2 — input emit + `ReleaseAll` | §4 | 2w | blocked by M1 |
+| 04 | [`04_m3_reflex_mcp_surface.md`](04_m3_reflex_mcp_surface.md) | M3 — reflexes + RocksDB + profiles + HTTP/SSE | §5 | 2-3w | blocked by M2 |
+| 05 | [`05_m4_hardware_hid_first_game.md`](05_m4_hardware_hid_first_game.md) | M4 — RP2040 firmware + `minecraft.java` | §6 | 2-3w | blocked by M3 |
+| 06 | [`06_m5_production_polish.md`](06_m5_production_polish.md) | M5 — installer + 5 profiles + overlay + soak | §7 | 3-4w | blocked by M4 |
+| 07 | [`07_cross_cutting.md`](07_cross_cutting.md) | Perf gates, security, observability, release | §10/§11/§12/§14 | — | active |
 
 Total: ~14w solo to v1.0. Each phase is merge-blocked by the prior phase's demo gate.
 
