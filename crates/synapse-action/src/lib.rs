@@ -7,6 +7,7 @@ pub mod emitter;
 pub mod error;
 pub mod handle;
 pub mod invoke;
+pub mod rate_limit;
 
 pub use backend::{
     ActionBackend, ResolvedBackend,
@@ -24,4 +25,7 @@ pub use error::{ActionError, ActionResult};
 pub use handle::{ACTION_QUEUE_CAPACITY, ActionHandle, ActionMessage, RELEASE_ALL_HANDLE};
 pub use invoke::{
     CoordinateFallbackPlan, ElementClickOutcome, click_element_or_fallback, invoke_element,
+};
+pub use rate_limit::{
+    SOFTWARE_RATE_LIMIT_PER_S, TokenBucket, TokenBucketSnapshot, VIGEM_RATE_LIMIT_PER_S,
 };
