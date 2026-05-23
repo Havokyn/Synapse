@@ -224,7 +224,19 @@ pub enum KeystrokeDynamics {
 
 `Natural` samples inter-keystroke interval (IKI) from Gaussian; if `bigram_bias`, common bigrams ("th", "he", "in") get reduced IKI matching human bigram stats.
 
-Default for productivity apps: `Burst`. Default for game profiles where chat typing matters: `Natural`.
+**Default policy (v1.0+): `Natural` is the default everywhere — productivity, games, chat. `Burst` exists in the enum but is never a default; reserved for explicit caller opt-in (e.g., pasting machine-generated tokens where authenticity is irrelevant).**
+
+### `KeystrokeDynamics::Natural::FAST` — the default preset
+
+```rust
+KeystrokeDynamics::Natural {
+    mean_iki_ms: 32.0,      // ~190 WPM equivalent — faster than typical human, smooth
+    stddev_ms: 10.0,        // realistic variance
+    bigram_bias: true,      // common bigrams ~25% faster than mean
+}
+```
+
+10-char string under `FAST`: ~320 ms total (vs ~30 ms `Burst`). Looks human; well under perceptible wait for productivity. Long strings (≥ 200 chars) auto-bias toward bigram-faster regions to keep total time bounded.
 
 ---
 
