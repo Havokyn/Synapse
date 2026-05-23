@@ -8,6 +8,7 @@ pub mod software;
 #[cfg(not(windows))]
 #[path = "software_non_windows.rs"]
 pub mod software;
+pub mod unavailable;
 
 pub trait ActionBackend: Send + Sync {
     /// Executes one action against a concrete backend while updating emitter state.
@@ -23,6 +24,7 @@ pub trait ActionBackend: Send + Sync {
 pub enum ResolvedBackend {
     Software,
     Vigem,
+    Hardware,
 }
 
 impl ResolvedBackend {
@@ -31,6 +33,7 @@ impl ResolvedBackend {
         match self {
             Self::Software => "software",
             Self::Vigem => "vigem",
+            Self::Hardware => "hardware",
         }
     }
 }
@@ -39,7 +42,7 @@ impl ResolvedBackend {
 ///
 /// # Errors
 ///
-/// Returns `ActionError::BackendUnavailable` for `Backend::Hardware` in M2.
+/// Resolves `Backend::Hardware` to the M2 fail-closed hardware stub.
 #[tracing::instrument(skip_all, fields(requested_backend = ?requested))]
 pub fn resolve_backend(
     requested: Backend,
@@ -48,9 +51,7 @@ pub fn resolve_backend(
     match requested {
         Backend::Software => Ok(ResolvedBackend::Software),
         Backend::Vigem => Ok(ResolvedBackend::Vigem),
-        Backend::Hardware => Err(ActionError::BackendUnavailable {
-            detail: "hardware HID backend is unavailable in M2".to_owned(),
-        }),
+        Backend::Hardware => Ok(ResolvedBackend::Hardware),
         Backend::Auto => Ok(auto_backend_for(action)),
     }
 }

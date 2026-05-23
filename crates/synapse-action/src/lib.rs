@@ -9,6 +9,7 @@ pub use backend::{
     ActionBackend, ResolvedBackend,
     recording::{RecordedInput, RecordingBackend},
     resolve_backend,
+    unavailable::HardwareUnavailableBackend,
 };
 pub use emitter::{
     ActionEmitter, ActionEmitterSnapshotHandle, ActionSnapshotMessage, ActionStateSnapshot,

@@ -1,4 +1,4 @@
-use synapse_action::{ActionError, ResolvedBackend, resolve_backend};
+use synapse_action::{ResolvedBackend, resolve_backend};
 use synapse_core::{Action, Backend, ButtonAction, Key, KeyCode, MouseButton, PadButton};
 
 #[test]
@@ -18,19 +18,11 @@ fn explicit_backend_variants_resolve_or_fail_closed() {
         ResolvedBackend::Vigem,
     );
 
-    let error = match resolve_backend(Backend::Hardware, &action) {
-        Ok(backend) => panic!("hardware backend must be unavailable in M2, got {backend:?}"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, ActionError::BackendUnavailable { .. }));
-    assert_eq!(
-        error.code(),
-        synapse_core::error_codes::ACTION_BACKEND_UNAVAILABLE
-    );
-    println!(
-        "source_of_truth=backend_resolution edge=explicit_hardware before_backend={:?} after_backend=unavailable final_value={}",
+    assert_backend(
+        "explicit_hardware",
         Backend::Hardware,
-        error.code()
+        &action,
+        ResolvedBackend::Hardware,
     );
 
     assert_backend(
