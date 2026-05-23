@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use synapse_action::{ActionBackend, EmitState, RecordedInput, RecordingBackend};
+use synapse_action::{
+    ActionBackend, EmitState, RecordedInput, RecordingBackend, sample_typing_schedule,
+};
 use synapse_core::{
     Action, AimCurve, AimNaturalParams, AimStyle, AimTarget, Backend, ButtonAction, ComboInput,
     ComboStep, GamepadReport, Key, KeyCode, KeystrokeDynamics, KeystrokeNaturalParams, MouseButton,
@@ -271,13 +273,19 @@ fn key_chord_case() -> RecordingCase {
 }
 
 fn type_text_case() -> RecordingCase {
+    let dynamics = KeystrokeDynamics::Natural {
+        params: KeystrokeNaturalParams::FAST,
+    };
+    let ikis = non_zero_ikis("Az", &dynamics);
+    let delay = ikis
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("two-character natural typing must have one non-zero IKI"));
     RecordingCase {
         edge: "type_text",
         action: Action::TypeText {
             text: "Az".to_owned(),
-            dynamics: KeystrokeDynamics::Natural {
-                params: KeystrokeNaturalParams::FAST,
-            },
+            dynamics,
             backend: Backend::Software,
         },
         expected_events: vec![
@@ -285,11 +293,19 @@ fn type_text_case() -> RecordingCase {
             RecordedInput::KeyDown { key: key("a") },
             RecordedInput::KeyUp { key: key("a") },
             RecordedInput::KeyUp { key: key("shift") },
+            RecordedInput::DelayMs { ms: delay },
             RecordedInput::KeyDown { key: key("z") },
             RecordedInput::KeyUp { key: key("z") },
         ],
         ..empty_expectations()
     }
+}
+
+fn non_zero_ikis(text: &str, dynamics: &KeystrokeDynamics) -> Vec<u32> {
+    sample_typing_schedule(text, dynamics, None)
+        .iter()
+        .filter_map(|event| (event.iki_ms_before > 0).then_some(event.iki_ms_before))
+        .collect()
 }
 
 fn mouse_move_case() -> RecordingCase {

@@ -388,7 +388,7 @@ Reconfigures active capture target.
     "properties": {
       "text": {"type": "string"},
       "into_element": {"type": "string", "description": "Optional element_id; focuses + clears + types"},
-      "dynamics": {"enum": ["burst","linear","natural"], "default": "burst"},
+      "dynamics": {"enum": ["burst","linear","natural"], "default": "natural"},
       "linear_ms_per_char": {"type": "integer", "default": 30},
       "use_scancodes": {"type": "boolean", "default": false},
       "press_enter_after": {"type": "boolean", "default": false},

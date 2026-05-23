@@ -1,0 +1,87 @@
+---
+source: crates/synapse-mcp/tests/m2_type_fsv.rs
+assertion_line: 58
+expression: projection
+---
+{
+  "description": "Type text through the active keyboard backend",
+  "inputSchema": {
+    "$defs": {
+      "ElementId": {
+        "type": "string"
+      },
+      "TypeBackend": {
+        "enum": [
+          "software",
+          "hardware",
+          "auto"
+        ],
+        "type": "string"
+      },
+      "TypeDynamics": {
+        "enum": [
+          "burst",
+          "linear",
+          "natural"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "backend": {
+        "$ref": "#/$defs/TypeBackend",
+        "default": "auto"
+      },
+      "dynamics": {
+        "$ref": "#/$defs/TypeDynamics",
+        "default": "natural"
+      },
+      "into_element": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ElementId"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "linear_ms_per_char": {
+        "default": 30,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "press_enter_after": {
+        "default": false,
+        "type": "boolean"
+      },
+      "text": {
+        "type": "string"
+      },
+      "use_scancodes": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "title": "ActTypeParams",
+    "type": "object"
+  },
+  "name": "act_type",
+  "outputSchemaRoot": {
+    "additionalProperties": false,
+    "required": [
+      "ok",
+      "chars_typed",
+      "elapsed_ms"
+    ],
+    "title": "ActTypeResponse",
+    "type": "object"
+  }
+}

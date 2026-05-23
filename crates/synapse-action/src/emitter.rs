@@ -756,7 +756,7 @@ mod tests {
 
     use crate::{ActionBackend, RecordedInput, RecordingBackend};
     use synapse_core::KeyCode;
-    use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, TestWriter};
+    use tracing_subscriber::fmt::writer::MakeWriter;
 
     use super::*;
 
@@ -932,11 +932,11 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn stuck_key_auto_release_tracing_event_and_recording_keyup_are_observable() {
         let trace_buffer = SharedTraceBuffer::default();
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(TestWriter::new().and(trace_buffer.clone()))
+            .with_writer(trace_buffer.clone())
             .with_ansi(false)
             .without_time()
             .with_target(false)

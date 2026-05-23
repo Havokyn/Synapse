@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::MutexGuard, time::Instant};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, MutexGuard},
+    time::Instant,
+};
 
 use rmcp::{
     ErrorData, ServerHandler,
@@ -9,6 +13,7 @@ use rmcp::{
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
+use synapse_action::RecordingBackend;
 use synapse_core::Health;
 
 use crate::{
@@ -19,8 +24,8 @@ use crate::{
         read_text_in_state, set_capture_target_in_state, set_perception_mode_in_state,
     },
     m2::{
-        ActClickParams, ActClickResponse, SharedM2State, act_click_with_handle,
-        shared_m2_state_from_env,
+        ActClickParams, ActClickResponse, ActTypeParams, ActTypeResponse, SharedM2State,
+        act_click_with_handle, act_type_with_handle, shared_m2_state_from_env,
     },
 };
 
@@ -78,6 +83,20 @@ impl SynapseService {
         self.m2_state
             .lock()
             .map(|state| state.emitter_handle.clone())
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::OBSERVE_INTERNAL,
+                    "M2 service state lock poisoned",
+                )
+            })
+    }
+
+    fn m2_action_context(
+        &self,
+    ) -> Result<(synapse_action::ActionHandle, Option<Arc<RecordingBackend>>), ErrorData> {
+        self.m2_state
+            .lock()
+            .map(|state| (state.emitter_handle.clone(), state.recording.clone()))
             .map_err(|_err| {
                 mcp_error(
                     synapse_core::error_codes::OBSERVE_INTERNAL,
@@ -187,6 +206,22 @@ impl SynapseService {
         );
         let handle = self.m2_action_handle()?;
         act_click_with_handle(handle, params.0).await.map(Json)
+    }
+
+    #[tool(description = "Type text through the active keyboard backend")]
+    pub async fn act_type(
+        &self,
+        params: Parameters<ActTypeParams>,
+    ) -> Result<Json<ActTypeResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_type",
+            "tool.invocation kind=act_type"
+        );
+        let (handle, recording) = self.m2_action_context()?;
+        act_type_with_handle(handle, recording, params.0)
+            .await
+            .map(Json)
     }
 }
 

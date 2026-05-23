@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-action/tests/recording_backend_fsv.rs
+assertion_line: 63
 expression: snapshot
 ---
 {
@@ -327,6 +328,10 @@ expression: snapshot
         },
         "use_scancode": false
       }
+    },
+    {
+      "kind": "delay_ms",
+      "ms": 32
     },
     {
       "kind": "key_down",

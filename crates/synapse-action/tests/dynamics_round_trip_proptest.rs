@@ -11,30 +11,44 @@ use synapse_core::{Action, Backend, KeyCode, KeystrokeDynamics, KeystrokeNatural
 #[test]
 fn empty_string_records_zero_events_fsv() -> Result<(), Box<dyn std::error::Error>> {
     let text = "";
-    let (schedule_chars, events, reconstructed) = record_and_reconstruct(text)?;
+    let truth = record_and_reconstruct(text)?;
     println!(
-        "source_of_truth=dynamics_round_trip edge=empty before={text:?} after=events:{events:?},reconstructed:{reconstructed:?} final_value=events:{}",
-        events.len()
+        "source_of_truth=dynamics_round_trip edge=empty before={text:?} after=events:{:?},reconstructed:{:?} final_value=events:{}",
+        truth.events,
+        truth.reconstructed,
+        truth.events.len()
     );
 
-    assert!(schedule_chars.is_empty());
-    assert!(events.is_empty());
-    assert_eq!(reconstructed, text);
+    assert!(truth.schedule_chars.is_empty());
+    assert!(truth.schedule_ikis.is_empty());
+    assert!(truth.events.is_empty());
+    assert_eq!(truth.reconstructed, text);
     Ok(())
 }
 
 #[test]
 fn extended_latin_string_round_trips_fsv() -> Result<(), Box<dyn std::error::Error>> {
     let text = "Az ÀĿſƀ";
-    let (schedule_chars, events, reconstructed) = record_and_reconstruct(text)?;
+    let truth = record_and_reconstruct(text)?;
     println!(
-        "source_of_truth=dynamics_round_trip edge=extended_latin before={text:?} after=schedule:{schedule_chars:?},events:{events:?},reconstructed:{reconstructed:?} final_value={reconstructed:?}"
+        "source_of_truth=dynamics_round_trip edge=extended_latin before={text:?} after=schedule:{:?},events:{:?},reconstructed:{:?} final_value={:?}",
+        truth.schedule_chars, truth.events, truth.reconstructed, truth.reconstructed
     );
 
-    assert_eq!(schedule_chars, text);
-    assert_eq!(reconstructed, text);
-    assert_eq!(unicode_down_count(&events), expected_unicode_units(text));
-    assert_eq!(events.len(), expected_recorded_event_count(text));
+    assert_eq!(truth.schedule_chars, text);
+    assert_eq!(truth.reconstructed, text);
+    assert_eq!(
+        unicode_down_count(&truth.events),
+        expected_unicode_units(text)
+    );
+    assert_eq!(
+        delay_ikis(&truth.events),
+        non_zero_ikis(&truth.schedule_ikis)
+    );
+    assert_eq!(
+        truth.events.len(),
+        expected_recorded_event_count(text, &truth.schedule_ikis)
+    );
     Ok(())
 }
 
@@ -50,37 +64,45 @@ fn random_strings_round_trip_through_recording_backend_10k()
     let mut runner = TestRunner::new_with_rng(config, TestRng::deterministic_rng(algorithm));
 
     runner.run(&text_strategy(), |text| {
-        let (schedule_chars, events, reconstructed) = record_and_reconstruct(&text)
+        let truth = record_and_reconstruct(&text)
             .map_err(|error| TestCaseError::fail(format!("input={text:?} error={error}")))?;
 
         prop_assert_eq!(
-            &schedule_chars,
+            &truth.schedule_chars,
             &text,
             "input={:?} schedule={:?} events={:?}",
             text,
-            schedule_chars,
-            events
+            truth.schedule_chars,
+            truth.events
         );
         prop_assert_eq!(
-            unicode_down_count(&events),
+            unicode_down_count(&truth.events),
             expected_unicode_units(&text),
             "input={:?} events={:?}",
             text,
-            events
+            truth.events
         );
         prop_assert_eq!(
-            events.len(),
-            expected_recorded_event_count(&text),
+            delay_ikis(&truth.events),
+            non_zero_ikis(&truth.schedule_ikis),
+            "input={:?} ikis={:?} events={:?}",
+            text,
+            truth.schedule_ikis,
+            truth.events
+        );
+        prop_assert_eq!(
+            truth.events.len(),
+            expected_recorded_event_count(&text, &truth.schedule_ikis),
             "input={:?} events={:?}",
             text,
-            events
+            truth.events
         );
         prop_assert_eq!(
-            &reconstructed,
+            &truth.reconstructed,
             &text,
             "input={:?} events={:?}",
             text,
-            events
+            truth.events
         );
         Ok(())
     })?;
@@ -102,14 +124,20 @@ fn text_strategy() -> impl Strategy<Value = String> {
     .prop_map(|chars| chars.into_iter().collect())
 }
 
-fn record_and_reconstruct(
-    text: &str,
-) -> Result<(String, Vec<RecordedInput>, String), Box<dyn std::error::Error>> {
+struct RoundTripTruth {
+    schedule_chars: String,
+    schedule_ikis: Vec<u32>,
+    events: Vec<RecordedInput>,
+    reconstructed: String,
+}
+
+fn record_and_reconstruct(text: &str) -> Result<RoundTripTruth, Box<dyn std::error::Error>> {
     let dynamics = KeystrokeDynamics::Natural {
         params: KeystrokeNaturalParams::FAST,
     };
-    let schedule = sample_typing_schedule(text, &dynamics, Some(42));
+    let schedule = sample_typing_schedule(text, &dynamics, None);
     let schedule_chars: String = schedule.iter().map(|event| event.r#char).collect();
+    let schedule_ikis = schedule.iter().map(|event| event.iki_ms_before).collect();
     let backend = RecordingBackend::new();
     let mut state = EmitState::new();
     backend.execute(
@@ -122,7 +150,12 @@ fn record_and_reconstruct(
     )?;
     let events = backend.events();
     let reconstructed = reconstruct_typed_text(&events)?;
-    Ok((schedule_chars, events, reconstructed))
+    Ok(RoundTripTruth {
+        schedule_chars,
+        schedule_ikis,
+        events,
+        reconstructed,
+    })
 }
 
 fn reconstruct_typed_text(events: &[RecordedInput]) -> Result<String, Box<dyn std::error::Error>> {
@@ -253,7 +286,7 @@ fn expected_unicode_units(text: &str) -> usize {
         .sum()
 }
 
-fn expected_recorded_event_count(text: &str) -> usize {
+fn expected_recorded_event_count(text: &str, schedule_ikis: &[u32]) -> usize {
     text.chars()
         .map(|ch| {
             if is_reversible_key_character(ch) {
@@ -262,7 +295,22 @@ fn expected_recorded_event_count(text: &str) -> usize {
                 ch.len_utf16() * 2
             }
         })
-        .sum()
+        .sum::<usize>()
+        + schedule_ikis.iter().filter(|iki| **iki > 0).count()
+}
+
+fn delay_ikis(events: &[RecordedInput]) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RecordedInput::DelayMs { ms } => Some(*ms),
+            _ => None,
+        })
+        .collect()
+}
+
+fn non_zero_ikis(ikis: &[u32]) -> Vec<u32> {
+    ikis.iter().copied().filter(|iki| *iki > 0).collect()
 }
 
 const fn requires_shift(ch: char) -> bool {

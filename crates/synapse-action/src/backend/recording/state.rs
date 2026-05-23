@@ -118,6 +118,9 @@ impl RecordingState {
 
     fn type_text(&mut self, text: &str, dynamics: &KeystrokeDynamics, state: &mut EmitState) {
         for event in sample_typing_schedule(text, dynamics, None) {
+            if event.iki_ms_before > 0 {
+                self.delay(event.iki_ms_before);
+            }
             if is_reversible_key_character(event.r#char) {
                 self.type_key_event(&event.key, event.modifier_state, state);
             } else {
