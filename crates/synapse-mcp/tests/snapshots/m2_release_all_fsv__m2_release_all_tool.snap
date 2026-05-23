@@ -1,0 +1,42 @@
+---
+source: crates/synapse-mcp/tests/m2_release_all_fsv.rs
+expression: projection
+---
+{
+  "description": "Release all held keyboard, mouse, and gamepad input state",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "title": "ReleaseAllParams",
+    "type": "object"
+  },
+  "name": "release_all",
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "neutralized_pads": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "released_buttons": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "released_keys": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "released_keys",
+      "released_buttons",
+      "neutralized_pads"
+    ],
+    "title": "ReleaseAllResponse",
+    "type": "object"
+  }
+}

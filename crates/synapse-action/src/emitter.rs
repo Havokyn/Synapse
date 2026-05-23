@@ -353,11 +353,11 @@ impl ActionEmitter {
                     let _emitted_action = self.auto_release_held_key(&auto_release);
                 },
                 () = cancel.cancelled() => {
-                    self.release_all().await;
+                    self.release_all("shutdown").await;
                     return self.snapshot();
                 },
                 else => {
-                    self.release_all().await;
+                    self.release_all("connection_closed").await;
                     return self.snapshot();
                 }
             }
@@ -419,7 +419,7 @@ impl ActionEmitter {
             } => self.apply_pad_trigger(pad, trigger, value),
             Action::PadReport { pad, report } => self.apply_pad_report(pad, report),
             Action::Combo { steps, .. } => self.apply_combo(steps),
-            Action::ReleaseAll => self.release_all().await,
+            Action::ReleaseAll => self.release_all("tool_invocation").await,
         }
         Ok(())
     }
@@ -445,11 +445,12 @@ impl ActionEmitter {
     }
 
     #[tracing::instrument(skip_all, fields(action_kind = "release_all"))]
-    async fn release_all(&mut self) {
+    async fn release_all(&mut self, reason: &'static str) {
         let cancelled_key_timers = self.abort_all_held_key_timers();
         let (released_keys, released_buttons, released_pads) = self.state.release_all();
         tracing::warn!(
             code = error_codes::SAFETY_RELEASE_ALL_FIRED,
+            reason,
             released_keys,
             released_buttons,
             released_pads,

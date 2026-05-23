@@ -27,9 +27,10 @@ use crate::{
         ActAimParams, ActAimResponse, ActClickParams, ActClickResponse, ActClipboardParams,
         ActClipboardResponse, ActDragParams, ActDragResponse, ActPadParams, ActPadResponse,
         ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse, ActTypeParams,
-        ActTypeResponse, SharedM2State, act_aim_with_handle, act_click_with_handle, act_clipboard,
-        act_drag_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
-        act_type_with_handle, shared_m2_state_from_env,
+        ActTypeResponse, ReleaseAllParams, ReleaseAllResponse, SharedM2State, act_aim_with_handle,
+        act_click_with_handle, act_clipboard, act_drag_with_handle, act_pad_with_handle,
+        act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
+        release_all_with_handles, shared_m2_state_from_env,
     },
 };
 
@@ -101,6 +102,26 @@ impl SynapseService {
         self.m2_state
             .lock()
             .map(|state| (state.emitter_handle.clone(), state.recording.clone()))
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::OBSERVE_INTERNAL,
+                    "M2 service state lock poisoned",
+                )
+            })
+    }
+
+    fn m2_release_all_context(
+        &self,
+    ) -> Result<
+        (
+            synapse_action::ActionHandle,
+            synapse_action::ActionEmitterSnapshotHandle,
+        ),
+        ErrorData,
+    > {
+        self.m2_state
+            .lock()
+            .map(|state| (state.emitter_handle.clone(), state.snapshot_handle.clone()))
             .map_err(|_err| {
                 mcp_error(
                     synapse_core::error_codes::OBSERVE_INTERNAL,
@@ -321,6 +342,22 @@ impl SynapseService {
             "tool.invocation kind=act_clipboard"
         );
         act_clipboard(params.0).await.map(Json)
+    }
+
+    #[tool(description = "Release all held keyboard, mouse, and gamepad input state")]
+    pub async fn release_all(
+        &self,
+        params: Parameters<ReleaseAllParams>,
+    ) -> Result<Json<ReleaseAllResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "release_all",
+            "tool.invocation kind=release_all"
+        );
+        let (handle, snapshot_handle) = self.m2_release_all_context()?;
+        release_all_with_handles(handle, snapshot_handle, params.0)
+            .await
+            .map(Json)
     }
 }
 

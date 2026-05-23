@@ -40,7 +40,7 @@ fn assert_act_clipboard_schema(tools: &[Value]) -> anyhow::Result<()> {
         schema["additionalProperties"],
         schema["required"]
     );
-    assert_eq!(tools.len(), 14);
+    assert_eq!(tools.len(), 15);
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["properties"]["format"]["default"], "unicode");
     assert_eq!(schema["required"], json!(["verb"]));

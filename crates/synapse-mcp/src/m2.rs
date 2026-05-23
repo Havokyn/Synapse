@@ -25,6 +25,7 @@ pub use clipboard::{ActClipboardParams, ActClipboardResponse, act_clipboard};
 pub use drag::{ActDragParams, ActDragResponse, act_drag_with_handle};
 pub use pad::{ActPadParams, ActPadResponse, act_pad_with_handle};
 pub use press::{ActPressParams, ActPressResponse, act_press_with_handle};
+pub use release_all::{ReleaseAllParams, ReleaseAllResponse, release_all_with_handles};
 pub use scroll::{ActScrollParams, ActScrollResponse, act_scroll_with_handle};
 pub use type_text::{ActTypeParams, ActTypeResponse, act_type_with_handle};
 
