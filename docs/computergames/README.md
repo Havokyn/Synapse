@@ -171,7 +171,7 @@ synapse-mcp --mode http --bind 127.0.0.1:7700
 cargo run -p synapse-hid-host -- flash --device COM7
 ```
 
-Configure your agent client to launch `synapse-mcp` as an MCP server. The agent gains every tool in `05_mcp_tool_surface.md`.
+Configure your agent client to launch `synapse-mcp` as an MCP server. Agent gains every tool in `05_mcp_tool_surface.md`.
 
 ---
 
@@ -214,11 +214,11 @@ Crate boundaries and dep graph in `01_architecture.md`. Build details in `14_bui
 
 ## Out of scope (explicit non-goals)
 
-1. **Online competitive PvP cheating.** Synapse is for single-player, PvE, modded, dev-mode, custom-server, research, accessibility, and computer-use automation. Ships no anti-cheat-evasion logic for ladder/ranked. The hardware HID path exists for legitimate accessibility, automation, and AI-tournament use — not unsanctioned competitive advantage. See `08_anti_cheat_policy.md`.
-2. **Goal/planning/skill libraries.** Agent does this via tool-use loop.
+1. **Online competitive PvP cheating.** Synapse is for single-player, PvE, modded, dev-mode, custom-server, research, accessibility, computer-use automation. Ships no anti-cheat-evasion for ladder/ranked. Hardware HID exists for legitimate accessibility, automation, AI-tournament use — not unsanctioned competitive advantage. See `08_anti_cheat_policy.md`.
+2. **Goal/planning/skill libraries.** Agent via tool-use loop.
 3. **Inner LLM.** Optional small vision models (YOLO-nano, ConvNeXt-tiny) only.
-4. **Cross-platform v1.** Windows first. Linux/macOS are v2.
-5. **General-purpose RPA.** Web/SaaS form-filling is a side-effect, not a target.
+4. **Cross-platform v1.** Windows first. Linux/macOS v2.
+5. **General-purpose RPA.** Web/SaaS form-filling is a side-effect, not target.
 6. **Reverse-engineering proprietary game protocols.** RAM reads / packet inspection only for games operator owns and where ToS permits.
 
 ---
