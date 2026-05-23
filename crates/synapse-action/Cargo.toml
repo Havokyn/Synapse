@@ -27,6 +27,7 @@ insta.workspace = true
 proptest.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 
 [[bench]]
 name = "action_curve_step_calc_natural"

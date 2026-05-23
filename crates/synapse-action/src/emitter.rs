@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bit_set::BitSet;
 use synapse_core::{
-    Action, Backend, ButtonAction, ComboInput, GamepadReport, Key, MouseButton, PadButton, PadId,
-    Stick, Trigger, error_codes,
+    Action, Backend, ButtonAction, ComboInput, GamepadReport, Key, KeyCode, MouseButton, PadButton,
+    PadId, Stick, Trigger, error_codes,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -350,7 +350,7 @@ impl ActionEmitter {
                     let _send_result = snapshot_ack.send(self.snapshot());
                 },
                 Some(auto_release) = self.auto_release_rx.recv() => {
-                    self.auto_release_held_key(&auto_release);
+                    let _emitted_action = self.auto_release_held_key(&auto_release);
                 },
                 () = cancel.cancelled() => {
                     self.release_all().await;
@@ -496,28 +496,33 @@ impl ActionEmitter {
         cancelled
     }
 
-    fn auto_release_held_key(&mut self, auto_release: &HeldKeyAutoRelease) {
+    fn auto_release_held_key(&mut self, auto_release: &HeldKeyAutoRelease) -> Option<Action> {
         if self
             .held_key_timer_ids
             .get(&auto_release.key)
             .is_none_or(|timer_id| *timer_id != auto_release.timer_id)
         {
-            return;
+            return None;
         }
 
         self.held_key_timer_ids.remove(&auto_release.key);
         self.held_key_timers.remove(&auto_release.key);
         if !self.state.is_key_held(&auto_release.key) {
-            return;
+            return None;
         }
 
         self.state.release_key(&auto_release.key);
         tracing::warn!(
-            code = error_codes::STUCK_KEY_AUTO_RELEASED,
+            code = %error_codes::STUCK_KEY_AUTO_RELEASED,
             held_ms = HELD_KEY_MAX_DURATION_MS,
-            key = ?auto_release.key,
+            key = %key_log_label(&auto_release.key),
+            key_debug = ?auto_release.key,
             "stuck key auto-released"
         );
+        Some(Action::KeyUp {
+            key: auto_release.key.clone(),
+            backend: Backend::Auto,
+        })
     }
 
     fn held_key_timer_keys(&self) -> Vec<Key> {
@@ -689,6 +694,14 @@ const fn action_kind(action: &Action) -> &'static str {
     }
 }
 
+fn key_log_label(key: &Key) -> String {
+    match &key.code {
+        KeyCode::Named { value } => value.clone(),
+        KeyCode::Symbol { value } => value.to_string(),
+        KeyCode::HidCode { value } => format!("hid:{value}"),
+    }
+}
+
 const fn mouse_button_index(button: MouseButton) -> usize {
     match button {
         MouseButton::Left => 0,
@@ -736,7 +749,14 @@ fn push_unique(buttons: &mut Vec<PadButton>, button: PadButton) {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    use crate::{ActionBackend, RecordedInput, RecordingBackend};
     use synapse_core::KeyCode;
+    use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, TestWriter};
 
     use super::*;
 
@@ -895,19 +915,91 @@ mod tests {
         time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS)).await;
         tokio::task::yield_now().await;
         let auto_release = read_pending_auto_release(&mut emitter);
-        emitter.auto_release_held_key(&auto_release);
+        let emitted_action = emitter.auto_release_held_key(&auto_release);
         let after_auto_release = emitter.snapshot();
 
         assert!(before.held_keys.is_empty());
         assert_eq!(after_key_down.held_keys, vec![key.clone()]);
-        assert_eq!(after_key_down.held_key_timer_keys, vec![key]);
+        assert_eq!(after_key_down.held_key_timer_keys, vec![key.clone()]);
         assert_eq!(after_key_down.held_key_timer_count, 1);
+        assert_auto_key_up(emitted_action.as_ref(), &key);
         assert!(after_auto_release.held_keys.is_empty());
         assert!(after_auto_release.held_key_timer_keys.is_empty());
         assert_eq!(after_auto_release.held_key_timer_count, 0);
         println!(
             "source_of_truth=held_keys_bitset_and_timer_hashmap edge=happy_auto_release before={before:?} after_key_down={after_key_down:?} after_auto_release={after_auto_release:?} data.code={}",
             error_codes::STUCK_KEY_AUTO_RELEASED
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_key_auto_release_tracing_event_and_recording_keyup_are_observable() {
+        let trace_buffer = SharedTraceBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(TestWriter::new().and(trace_buffer.clone()))
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_level(false)
+            .finish();
+        let _trace_guard = tracing::subscriber::set_default(subscriber);
+
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(generous_limits());
+        let recording_backend = RecordingBackend::new();
+        let mut recording_state = EmitState::new();
+        let key = key_named("a");
+        let key_down = Action::KeyDown {
+            key: key.clone(),
+            backend: Backend::Software,
+        };
+        recording_backend
+            .execute(&key_down, &mut recording_state)
+            .unwrap_or_else(|error| panic!("recording keydown should succeed: {error}"));
+        let before_empty = emitter.snapshot();
+
+        let key_down_result = emitter.execute(key_down).await;
+        assert!(
+            key_down_result.is_ok(),
+            "KeyDown should set held state for trace test: {key_down_result:?}"
+        );
+        let before_auto_release = emitter.snapshot();
+
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS)).await;
+        tokio::task::yield_now().await;
+        let auto_release = read_pending_auto_release(&mut emitter);
+        let emitted_action = emitter
+            .auto_release_held_key(&auto_release)
+            .unwrap_or_else(|| panic!("auto-release should emit KeyUp action"));
+        recording_backend
+            .execute(&emitted_action, &mut recording_state)
+            .unwrap_or_else(|error| panic!("recording auto KeyUp should succeed: {error}"));
+        let after_auto_release = emitter.snapshot();
+
+        let log_output = trace_buffer.text();
+        let log_line = find_log_line(&log_output, error_codes::STUCK_KEY_AUTO_RELEASED);
+        let recording_events = recording_backend.events();
+        let expected_events = vec![
+            RecordedInput::KeyDown { key: key.clone() },
+            RecordedInput::KeyUp { key: key.clone() },
+        ];
+
+        assert!(before_empty.held_keys.is_empty());
+        assert_eq!(before_auto_release.held_keys, vec![key.clone()]);
+        assert_eq!(before_auto_release.held_key_timer_count, 1);
+        assert!(after_auto_release.held_keys.is_empty());
+        assert_eq!(after_auto_release.held_key_timer_count, 0);
+        assert_eq!(recording_events, expected_events);
+        assert_auto_key_up(Some(&emitted_action), &key);
+        assert!(log_line.contains("code=STUCK_KEY_AUTO_RELEASED"));
+        assert!(log_line.contains("held_ms=30000"));
+        assert!(log_line.contains("key=a"));
+        println!(
+            "source_of_truth=stuck_key edge=auto_release before=held:{:?} after=held:{:?} log_line={} recording_events={recording_events:?}",
+            held_key_labels(&before_auto_release),
+            held_key_labels(&after_auto_release),
+            log_line
         );
     }
 
@@ -1033,14 +1125,15 @@ mod tests {
         time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS - 2_000)).await;
         tokio::task::yield_now().await;
         let auto_release = read_pending_auto_release(&mut emitter);
-        emitter.auto_release_held_key(&auto_release);
+        let emitted_action = emitter.auto_release_held_key(&auto_release);
         let after_new_deadline = emitter.snapshot();
 
         assert_ne!(first_timer_id, second_timer_id);
         assert_eq!(after_first.held_key_timer_count, 1);
         assert_eq!(after_second.held_key_timer_count, 1);
-        assert_eq!(after_old_deadline.held_keys, vec![key]);
+        assert_eq!(after_old_deadline.held_keys, vec![key.clone()]);
         assert_eq!(after_old_deadline.held_key_timer_count, 1);
+        assert_auto_key_up(emitted_action.as_ref(), &key);
         assert!(after_new_deadline.held_keys.is_empty());
         assert_eq!(after_new_deadline.held_key_timer_count, 0);
         println!(
@@ -1128,6 +1221,73 @@ mod tests {
             || panic!("expected held key timer id for {key:?}"),
             |timer_id| *timer_id,
         )
+    }
+
+    fn assert_auto_key_up(action: Option<&Action>, expected_key: &Key) {
+        match action {
+            Some(Action::KeyUp { key, backend }) => {
+                assert_eq!(key, expected_key);
+                assert_eq!(*backend, Backend::Auto);
+            }
+            other => panic!("expected emitted auto KeyUp for {expected_key:?}, got {other:?}"),
+        }
+    }
+
+    fn held_key_labels(snapshot: &ActionStateSnapshot) -> Vec<String> {
+        snapshot.held_keys.iter().map(key_log_label).collect()
+    }
+
+    fn find_log_line(log_output: &str, needle: &str) -> String {
+        log_output
+            .lines()
+            .find(|line| line.contains(needle))
+            .map_or_else(
+                || panic!("expected log output to contain {needle}, got {log_output:?}"),
+                ToOwned::to_owned,
+            )
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedTraceBuffer {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedTraceBuffer {
+        fn text(&self) -> String {
+            let bytes = match self.bytes.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedTraceBuffer {
+        type Writer = SharedTraceBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedTraceBufferWriter {
+                bytes: Arc::clone(&self.bytes),
+            }
+        }
+    }
+
+    struct SharedTraceBufferWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedTraceBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.bytes.lock() {
+                Ok(mut guard) => guard.extend_from_slice(buf),
+                Err(poisoned) => poisoned.into_inner().extend_from_slice(buf),
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     async fn snapshot_until_empty(
