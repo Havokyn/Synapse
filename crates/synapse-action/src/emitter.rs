@@ -461,7 +461,9 @@ impl ActionEmitter {
                     let _send_result = snapshot_ack.send(self.snapshot());
                 },
                 Some(auto_release) = self.auto_release_rx.recv() => {
-                    let _emitted_action = self.auto_release_held_key(&auto_release);
+                    if let Some(emitted_action) = self.auto_release_held_key(&auto_release) {
+                        let _release_result = self.execute(emitted_action).await;
+                    }
                 },
                 () = shutdown_cancel.cancelled() => {
                     self.release_all(shutdown_reason).await;
@@ -573,17 +575,23 @@ impl ActionEmitter {
 
     /// Schedules safety auto-release timers for any key the action just put
     /// into a held-down state. Called only when the backend dispatch
-    /// succeeded — if the backend errored the key is never in `held_keys`
-    /// and there is nothing to time out.
+    /// succeeded — and only for keys whose post-dispatch state actually
+    /// shows them held. A `Combo` like
+    /// `[KeyDown(ctrl), KeyUp(ctrl)]` nets to zero held keys, so no
+    /// timer is scheduled even though the combo contained a `KeyDown` step.
     fn schedule_timers_for_held_keys(&mut self, action: &Action) {
         match action {
             Action::KeyDown { key, .. } => {
-                self.schedule_held_key_auto_release(key.clone());
+                if self.state.is_key_held(key) {
+                    self.schedule_held_key_auto_release(key.clone());
+                }
             }
             Action::Combo { steps, .. } => {
                 for step in steps {
                     if let ComboInput::KeyDown { key } = &step.input {
-                        self.schedule_held_key_auto_release(key.clone());
+                        if self.state.is_key_held(key) {
+                            self.schedule_held_key_auto_release(key.clone());
+                        }
                     }
                 }
             }
