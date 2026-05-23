@@ -156,12 +156,20 @@ async fn call_act_drag_error_edges(client: &mut StdioMcpClient) -> anyhow::Resul
         error_codes::ACTION_DRAG_DISTANCE_EXCEEDS_LIMIT,
     )
     .await?;
+    // On non-Windows the a11y backend is unavailable, so element resolution
+    // returns BACKEND_UNAVAILABLE. On Windows UIA is wired and the synthetic
+    // element id `0x1:2a` resolves no live element, surfacing as
+    // ELEMENT_NOT_RESOLVED instead.
+    #[cfg(not(windows))]
+    let expected_element_error = error_codes::ACTION_BACKEND_UNAVAILABLE;
+    #[cfg(windows)]
+    let expected_element_error = error_codes::ACTION_ELEMENT_NOT_RESOLVED;
     assert_error_code(
         client,
-        "element_target_non_windows",
+        "element_target_unresolved",
         "from:element_id=0x1:2a to:(1,1)",
         json!({"from": {"element_id": "0x1:2a"}, "to": {"x": 1, "y": 1}}),
-        error_codes::ACTION_BACKEND_UNAVAILABLE,
+        expected_element_error,
     )
     .await?;
     assert_error_code(
