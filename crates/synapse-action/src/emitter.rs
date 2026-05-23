@@ -24,6 +24,61 @@ pub struct ActionStateSnapshot {
     pub pad_state: HashMap<PadId, GamepadReport>,
 }
 
+#[derive(Debug)]
+pub struct EmitState {
+    pub(crate) held_keys: BitSet,
+    pub(crate) held_buttons: BitSet,
+    pub(crate) key_indices: HashMap<Key, usize>,
+    pub(crate) keys_by_index: Vec<Key>,
+    pub(crate) pad_state: HashMap<PadId, GamepadReport>,
+}
+
+impl EmitState {
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(action_kind = "emit_state_new"))]
+    pub fn new() -> Self {
+        Self {
+            held_keys: BitSet::new(),
+            held_buttons: BitSet::new(),
+            key_indices: HashMap::new(),
+            keys_by_index: Vec::new(),
+            pad_state: HashMap::new(),
+        }
+    }
+
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(action_kind = "emit_state_snapshot"))]
+    pub fn snapshot(&self) -> ActionStateSnapshot {
+        ActionStateSnapshot {
+            held_keys: self.held_keys(),
+            held_key_bits: self.held_keys.iter().collect(),
+            held_buttons: self.held_buttons(),
+            held_button_bits: self.held_buttons.iter().collect(),
+            pad_state: self.pad_state.clone(),
+        }
+    }
+
+    fn held_keys(&self) -> Vec<Key> {
+        self.held_keys
+            .iter()
+            .filter_map(|index| self.keys_by_index.get(index).cloned())
+            .collect()
+    }
+
+    fn held_buttons(&self) -> Vec<MouseButton> {
+        self.held_buttons
+            .iter()
+            .filter_map(mouse_button_from_index)
+            .collect()
+    }
+}
+
+impl Default for EmitState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ActionEmitterSnapshotHandle {
     tx: mpsc::Sender<ActionSnapshotMessage>,
@@ -62,11 +117,7 @@ impl ActionEmitterSnapshotHandle {
 pub struct ActionEmitter {
     rx: mpsc::Receiver<ActionMessage>,
     snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
-    held_keys: BitSet,
-    held_buttons: BitSet,
-    key_indices: HashMap<Key, usize>,
-    keys_by_index: Vec<Key>,
-    pad_state: HashMap<PadId, GamepadReport>,
+    state: EmitState,
 }
 
 impl ActionEmitter {
@@ -79,11 +130,7 @@ impl ActionEmitter {
         Self {
             rx,
             snapshot_rx,
-            held_keys: BitSet::new(),
-            held_buttons: BitSet::new(),
-            key_indices: HashMap::new(),
-            keys_by_index: Vec::new(),
-            pad_state: HashMap::new(),
+            state: EmitState::new(),
         }
     }
 
@@ -149,13 +196,7 @@ impl ActionEmitter {
     #[must_use]
     #[tracing::instrument(skip_all, fields(action_kind = "snapshot_state"))]
     pub fn snapshot(&self) -> ActionStateSnapshot {
-        ActionStateSnapshot {
-            held_keys: self.held_keys(),
-            held_key_bits: self.held_keys.iter().collect(),
-            held_buttons: self.held_buttons(),
-            held_button_bits: self.held_buttons.iter().collect(),
-            pad_state: self.pad_state.clone(),
-        }
+        self.state.snapshot()
     }
 
     #[tracing::instrument(skip_all, fields(action_kind = %action_kind(&action)))]
@@ -196,12 +237,12 @@ impl ActionEmitter {
 
     #[tracing::instrument(skip_all, fields(action_kind = "release_all"))]
     async fn release_all(&mut self) {
-        let released_keys = self.held_keys.count();
-        let released_buttons = self.held_buttons.count();
-        let released_pads = self.pad_state.len();
-        self.held_keys.make_empty();
-        self.held_buttons.make_empty();
-        self.pad_state.clear();
+        let released_keys = self.state.held_keys.count();
+        let released_buttons = self.state.held_buttons.count();
+        let released_pads = self.state.pad_state.len();
+        self.state.held_keys.make_empty();
+        self.state.held_buttons.make_empty();
+        self.state.pad_state.clear();
         tracing::warn!(
             code = error_codes::SAFETY_RELEASE_ALL_FIRED,
             released_keys,
@@ -245,54 +286,41 @@ impl ActionEmitter {
 
     fn hold_key(&mut self, key: &Key) {
         let index = self.key_index(key);
-        self.held_keys.insert(index);
+        self.state.held_keys.insert(index);
     }
 
     fn release_key(&mut self, key: &Key) {
-        if let Some(index) = self.key_indices.get(key) {
-            self.held_keys.remove(*index);
+        if let Some(index) = self.state.key_indices.get(key) {
+            self.state.held_keys.remove(*index);
         }
     }
 
     fn key_index(&mut self, key: &Key) -> usize {
-        if let Some(index) = self.key_indices.get(key) {
+        if let Some(index) = self.state.key_indices.get(key) {
             return *index;
         }
-        let index = self.keys_by_index.len();
-        self.keys_by_index.push(key.clone());
-        self.key_indices.insert(key.clone(), index);
+        let index = self.state.keys_by_index.len();
+        self.state.keys_by_index.push(key.clone());
+        self.state.key_indices.insert(key.clone(), index);
         index
-    }
-
-    fn held_keys(&self) -> Vec<Key> {
-        self.held_keys
-            .iter()
-            .filter_map(|index| self.keys_by_index.get(index).cloned())
-            .collect()
     }
 
     fn apply_mouse_button(&mut self, button: MouseButton, action: ButtonAction) {
         let index = mouse_button_index(button);
         match action {
             ButtonAction::Down => {
-                self.held_buttons.insert(index);
+                self.state.held_buttons.insert(index);
             }
             ButtonAction::Up | ButtonAction::Press => {
-                self.held_buttons.remove(index);
+                self.state.held_buttons.remove(index);
             }
         }
-    }
-
-    fn held_buttons(&self) -> Vec<MouseButton> {
-        self.held_buttons
-            .iter()
-            .filter_map(mouse_button_from_index)
-            .collect()
     }
 
     fn apply_pad_button(&mut self, pad: PadId, button: PadButton, action: ButtonAction) {
         let should_remove = {
             let report = self
+                .state
                 .pad_state
                 .entry(pad)
                 .or_insert_with(neutral_gamepad_report);
@@ -306,13 +334,14 @@ impl ActionEmitter {
         };
 
         if should_remove {
-            self.pad_state.remove(&pad);
+            self.state.pad_state.remove(&pad);
         }
     }
 
     fn apply_pad_stick(&mut self, pad: PadId, stick: Stick, x: f32, y: f32) {
         let should_remove = {
             let report = self
+                .state
                 .pad_state
                 .entry(pad)
                 .or_insert_with(neutral_gamepad_report);
@@ -324,13 +353,14 @@ impl ActionEmitter {
         };
 
         if should_remove {
-            self.pad_state.remove(&pad);
+            self.state.pad_state.remove(&pad);
         }
     }
 
     fn apply_pad_trigger(&mut self, pad: PadId, trigger: Trigger, value: f32) {
         let should_remove = {
             let report = self
+                .state
                 .pad_state
                 .entry(pad)
                 .or_insert_with(neutral_gamepad_report);
@@ -342,15 +372,15 @@ impl ActionEmitter {
         };
 
         if should_remove {
-            self.pad_state.remove(&pad);
+            self.state.pad_state.remove(&pad);
         }
     }
 
     fn apply_pad_report(&mut self, pad: PadId, report: GamepadReport) {
         if is_neutral_report(&report) {
-            self.pad_state.remove(&pad);
+            self.state.pad_state.remove(&pad);
         } else {
-            self.pad_state.insert(pad, report);
+            self.state.pad_state.insert(pad, report);
         }
     }
 }
