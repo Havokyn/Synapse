@@ -2,8 +2,8 @@ use std::{mem, thread, time::Duration};
 
 use enigo::{Button as EnigoButton, Direction, Enigo, Key as EnigoKey, Keyboard, Mouse, Settings};
 use synapse_core::{
-    Action, AimStyle, AimTarget, ButtonAction, ComboInput, Key, KeyCode, MouseButton, MouseTarget,
-    Point,
+    Action, AimStyle, AimTarget, ButtonAction, ComboInput, Key, KeyCode, KeystrokeDynamics,
+    MouseButton, MouseTarget, Point,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -11,6 +11,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 
+use super::text_dispatch::{TextDispatchInput, text_dispatch_plan};
 use crate::{ActionBackend, ActionError, EmitState, sample_curve};
 
 const CURVE_BATCH_STEPS: usize = 50;
@@ -50,7 +51,7 @@ impl ActionBackend for SoftwareBackend {
             Action::KeyDown { key, .. } => set_key(key, Direction::Press, state),
             Action::KeyUp { key, .. } => set_key(key, Direction::Release, state),
             Action::KeyChord { keys, hold_ms, .. } => key_chord(keys, *hold_ms, state),
-            Action::TypeText { text, .. } => type_text(text),
+            Action::TypeText { text, dynamics, .. } => type_text(text, dynamics),
             Action::MouseMove { to, .. } => mouse_move(to),
             Action::MouseMoveRelative { dx, dy, .. } => mouse_move_relative(*dx, *dy),
             Action::MouseButton {
@@ -128,13 +129,41 @@ fn key_chord(keys: &[Key], hold_ms: u32, state: &mut EmitState) -> Result<(), Ac
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_type_text"))]
-fn type_text(text: &str) -> Result<(), ActionError> {
-    let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
-    for unit in text.encode_utf16() {
-        inputs.push(keyboard_input(unit, KEYEVENTF_UNICODE));
-        inputs.push(keyboard_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+fn type_text(text: &str, dynamics: &KeystrokeDynamics) -> Result<(), ActionError> {
+    for step in text_dispatch_plan(text, dynamics) {
+        sleep_ms(step.iki_ms_before);
+        for input in step.inputs {
+            send_text_input(input)?;
+            thread::yield_now();
+        }
+        thread::yield_now();
     }
-    send_input_batch(&inputs, "unicode text")
+    Ok(())
+}
+
+fn send_text_input(input: TextDispatchInput) -> Result<(), ActionError> {
+    match input {
+        TextDispatchInput::UnicodeUnit(unit) => send_unicode_unit(unit),
+        TextDispatchInput::VirtualKey(vkey) => {
+            send_virtual_key(VIRTUAL_KEY(vkey), "text virtual key")
+        }
+    }
+}
+
+fn send_unicode_unit(unit: u16) -> Result<(), ActionError> {
+    let inputs = [
+        keyboard_input(unit, KEYEVENTF_UNICODE),
+        keyboard_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+    ];
+    send_input_batch(&inputs, "unicode text character")
+}
+
+fn send_virtual_key(vkey: VIRTUAL_KEY, detail: &'static str) -> Result<(), ActionError> {
+    let inputs = [
+        virtual_keyboard_input(vkey, KEYBD_EVENT_FLAGS(0)),
+        virtual_keyboard_input(vkey, KEYEVENTF_KEYUP),
+    ];
+    send_input_batch(&inputs, detail)
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_mouse_move"))]
@@ -431,6 +460,21 @@ const fn keyboard_input(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(0),
                 wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+const fn virtual_keyboard_input(vkey: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vkey,
+                wScan: 0,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,

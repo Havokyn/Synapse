@@ -8,6 +8,8 @@ pub mod software;
 #[cfg(not(windows))]
 #[path = "software_non_windows.rs"]
 pub mod software;
+#[cfg(any(windows, test))]
+pub(crate) mod text_dispatch;
 pub mod unavailable;
 pub mod vigem;
 

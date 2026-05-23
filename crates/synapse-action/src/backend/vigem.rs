@@ -129,17 +129,16 @@ impl VigemBackendInner {
             .pads
             .get(&pad)
             .is_some_and(|target| target.controller() != controller)
+            && let Some(mut old_target) = self.pads.remove(&pad)
         {
-            if let Some(mut old_target) = self.pads.remove(&pad) {
-                old_target.neutralize()?;
-            }
+            old_target.neutralize()?;
         }
 
         if !self.pads.contains_key(&pad) {
             let client = self.ensure_client()?;
             let target = match controller {
-                GamepadController::X360 => self.plug_x360(client)?,
-                GamepadController::Ds4 => self.plug_ds4(client)?,
+                GamepadController::X360 => Self::plug_x360(client)?,
+                GamepadController::Ds4 => Self::plug_ds4(client)?,
             };
             self.pads.insert(pad, target);
         }
@@ -151,7 +150,7 @@ impl VigemBackendInner {
             })
     }
 
-    fn plug_x360(&mut self, client: Arc<vigem_client::Client>) -> Result<VigemPad, ActionError> {
+    fn plug_x360(client: Arc<vigem_client::Client>) -> Result<VigemPad, ActionError> {
         let mut target =
             vigem_client::Xbox360Wired::new(client, vigem_client::TargetId::XBOX360_WIRED);
         target
@@ -167,7 +166,7 @@ impl VigemBackendInner {
         Ok(VigemPad::new_x360(target, neutral))
     }
 
-    fn plug_ds4(&mut self, client: Arc<vigem_client::Client>) -> Result<VigemPad, ActionError> {
+    fn plug_ds4(client: Arc<vigem_client::Client>) -> Result<VigemPad, ActionError> {
         let mut target =
             vigem_client::DualShock4Wired::new(client, vigem_client::TargetId::DUALSHOCK4_WIRED);
         target
@@ -299,14 +298,14 @@ enum VigemPad {
 
 #[cfg(windows)]
 impl VigemPad {
-    fn new_x360(
+    const fn new_x360(
         target: vigem_client::Xbox360Wired<Arc<vigem_client::Client>>,
         report: GamepadReport,
     ) -> Self {
         Self::X360(VigemX360Pad { target, report })
     }
 
-    fn new_ds4(
+    const fn new_ds4(
         target: vigem_client::DualShock4Wired<Arc<vigem_client::Client>>,
         report: GamepadReport,
     ) -> Self {
@@ -372,7 +371,7 @@ impl VigemDs4Pad {
 }
 
 #[cfg(windows)]
-fn xgamepad_from_snapshot(snapshot: X360ReportSnapshot) -> vigem_client::XGamepad {
+const fn xgamepad_from_snapshot(snapshot: X360ReportSnapshot) -> vigem_client::XGamepad {
     vigem_client::XGamepad {
         buttons: vigem_client::XButtons {
             raw: snapshot.buttons_raw,
@@ -409,15 +408,6 @@ fn map_vigem_error(context: &'static str, error: vigem_client::Error) -> ActionE
             detail: format!(
                 "backend=vigem context={context} driver=ViGEmBus access_failed_win32={code}"
             ),
-        },
-        vigem_client::Error::BusVersionMismatch
-        | vigem_client::Error::NoFreeSlot
-        | vigem_client::Error::AlreadyConnected
-        | vigem_client::Error::NotPluggedIn
-        | vigem_client::Error::TargetNotReady
-        | vigem_client::Error::UserIndexOutOfRange
-        | vigem_client::Error::OperationAborted => ActionError::VigemPluginFailed {
-            detail: format!("backend=vigem context={context} error={error}"),
         },
         vigem_client::Error::WinError(code) => ActionError::VigemPluginFailed {
             detail: format!("backend=vigem context={context} win32={code}"),
