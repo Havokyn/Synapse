@@ -1,10 +1,20 @@
-# 06 — M5: Production Polish (3-4 weeks)
+# 06 — M5: Production Polish (3-4 weeks) — BLOCKED BY M4
 
-PRD: `15_roadmap_and_milestones.md` §7. Build/install: `14_build_and_packaging.md`. Acceptance: `15 §10`. Manual test plan: `13 §15`.
+> Read after `05_m4_hardware_hid_first_game.md` is closed (`v0.1.0-m4`
+> tagged). Gets a full self-contained M2-style rewrite as the first M5 task.
+> **All global invariants apply** (no backcompat, no mocks gate completion,
+> FSV with source-of-truth read-back, Natural-only motion, manual
+> configured-host shipping gate; CI is regression safety net only).
+
+PRD: `docs/computergames/15_roadmap_and_milestones.md` §7. Build/install: `14_build_and_packaging.md`. Acceptance: `15 §10`. Manual test plan: `13 §15`. Doctrine: `00_methodology.md` + `07_cross_cutting.md`.
+
+## Mission (Occam's razor)
+
+**Sign an installer, fill out the debug overlay (currently a 3-LoC main.rs in `synapse-overlay`), bundle 10+ profiles including the M4 `minecraft.java` lighthouse, ship the VLM `describe` tool, and prove an 8 h soak.** Every other M5 clause is a consequence of that sentence plus the global invariants.
 
 ## Goal
 
-v1.0 ship-ready: signed installer, 5+ bundled profiles, debug overlay, VLM `describe`, Grafana dashboards, soak 8 h clean, setup wizard, tray icon, public release on GitHub Releases + crates.io + winget submission.
+v1.0 ship-ready: signed installer, 10+ bundled profiles (4 from M3 + 1 from M4 + 5+ new), debug overlay (fills out `synapse-overlay` crate from M0 stub), VLM `describe` (Florence-2-base, downloaded on first call — never bundled), Grafana dashboards, soak 8 h clean, setup wizard, tray icon, public release on GitHub Releases + crates.io + winget submission.
 
 ## Demo gate
 
@@ -22,12 +32,15 @@ Total token cost ≤ 30 K across the whole sequence.
 
 ## Inputs
 
-- M4 demo gate passed
+- M4 demo gate passed; `v0.1.0-m4` tag cut
 - Clean Windows 11 VM (or Hyper-V Sandbox) for fresh-install testing
 - Code-signing cert (self-signed at v1.0; community/EV cert tracked as separate workstream)
 - `wix-installer` (WiX Toolset v4+) available
 - Reference machine for perf gates: RTX 3060 + 8-core CPU
 - Reference machine for soak: dedicated runner, 16 GB RAM, 5 GB free disk
+- M5 starting surface (verified at M4 close): 25 MCP tools live (15 from M1+M2 + 10 from M3) — M5 adds `describe` to make 26
+- M5 starting profile bundle: 5 (`notepad`, `vscode`, `chrome`, `terminal` from M3 + `minecraft.java` from M4)
+- `synapse-overlay` is still the 3-LoC binary skeleton from M0; first M5 task fills it out
 
 ---
 
@@ -260,6 +273,15 @@ STORAGE_DISK_PRESSURE_LEVEL_4
 
 ## Definition of Done
 
-v1.0.0 cut when all M5 acceptance gates green + manual test plan signed + tag `v1.0.0` published with all release artifacts.
+v1.0.0 cut when:
+
+1. M5 demo passes on a fresh Win11 VM (the 5-app scenario per `15 §7`, ≤ 30 K tokens total).
+2. Every acceptance gate above green; **manual FSV with source-of-truth read-back on every row** of `13 §15`.
+3. Soak 8 h clean — no memory growth > 50 MB, no deadlocks, no held-key leaks after `release_all`, p99 latencies stable across the run.
+4. Manual happy-path + edge-case table filled in by operator in the v1.0.0 release PR (mirror the M2 §9 structure; expand to cover the 5-app M5 scenario + installer + setup wizard + overlay + VLM describe).
+5. `CHANGELOG.md` updated; tag `v1.0.0` published with all release artifacts (MSI, portable zip, pico-hid `.uf2`, source tarball).
+6. `cargo publish` for library crates; winget manifest PR opened.
+
+**FSV reminder for v1.0:** the installer test reads back via `Get-Package`/`Get-WmiObject` to confirm the MSI registered; the setup wizard test reads back the actual files written to `%APPDATA%\synapse\` and asserts contents byte-by-byte; the overlay test screenshots the window and asserts FPS counter present and incrementing; the `describe` test downloads the model, sha256-verifies it on disk, then calls the tool and asserts a non-empty `description` field. No row is "ok by inspection."
 
 Post-v1 work tracked in `15 §8` (v1.x patches + v2 horizons) and `16_open_questions.md` (remaining OQs).

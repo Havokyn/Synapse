@@ -1,6 +1,12 @@
 # 00 — Methodology
 
-Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` §"Authoring rules" + `14_build_and_packaging.md` + `13_testing_strategy.md`.
+Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` §"Authoring rules" + `14_build_and_packaging.md` + `13_testing_strategy.md`. State-tracking authority: git tags + `CHANGELOG.md` (final) > codebase on `main` (operational) > GitHub Issues (https://github.com/ChrisRoyse/Synapse/issues — every PR-sized task, `[DECISION]`, `[DISCOVERY]`, `[BUG]`, `[RISK]`, `[CONTEXT]`). Use `gh issue list --state all --search 'phase:m3'` (etc.) to walk landed-decision history for context the commit message did not carry. **All 244 historical issues are closed as of 2026-05-24**; new work opens fresh issues with the same labels.
+
+**Three load-bearing operator directives (NEVER violate):**
+
+1. **No backwards compatibility (pre-v1).** Schema/API changes break callers. No fallbacks, no compatibility shims, no silent error swallowing. Fail fast with a structured `synapse_core::error_codes::*` code and a `tracing` line carrying that code so the failure is debuggable.
+2. **No mocks gate completion.** Unit fakes are fine for isolation. An OS-bound work-item is **not done** until a real-OS integration test exercises it and a separate source-of-truth read confirms the side effect landed.
+3. **Manual configured-host FSV is the shipping gate, not GitHub Actions** (issues #246/#247, operator decision 2026-05-24). CI is the regression safety net; do not block a tag on CI; do not attempt to wait on workflow runs to "ship" a phase.
 
 ---
 
@@ -8,8 +14,8 @@ Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` �
 
 | Rule | Mechanism |
 |---|---|
-| `#![forbid(unsafe_code)]` workspace-wide | per-crate override only for `synapse-capture` (DX FFI), `synapse-hid-host` (serial OS handle), `firmware/pico-hid` |
-| File ≤ 500 LoC, function ≤ 30 LoC, cyclomatic ≤ 10 | clippy + custom lint check in CI |
+| `#![forbid(unsafe_code)]` workspace-wide | per-crate override only for `synapse-action` (Win32 SendInput batching), `synapse-capture` (DX FFI), `synapse-hid-host` (serial OS handle), `firmware/pico-hid` |
+| File ≤ 500 LoC, function ≤ 30 LoC, cyclomatic ≤ 10 | clippy + custom lint check in CI. **M2 left 6 files over cap** (emitter.rs 1474, vigem.rs 1131, invoke.rs 653, software.rs 586, m2/click.rs 506, m2/press.rs 545) — M3 work-item A.0a/A.0b splits them before building reflex on top. Reviewers must enforce at ≤ 450 LoC during code review to leave 50 LoC of margin. |
 | `unwrap()` / `expect()` forbidden outside `#[cfg(test)]` | `#[deny(clippy::unwrap_used, clippy::expect_used)]` |
 | `anyhow` forbidden in library crates | manual review + workspace dep gating |
 | No `println!` / `eprintln!` | clippy lint + grep gate |
@@ -83,13 +89,20 @@ Test pyramid: `13_testing_strategy.md` §2.
 
 **Full-state verification (FSV) — mandatory for every M2+ test:**
 
-1. **Identify the source of truth** for the work the test is meant to perform (UIA `ValuePattern.value` for a typed string, file bytes on disk for a saved file, `RecordingBackend::events()` for the emitted `INPUT` sequence, `vigem-client` device state for a pad report, the daemon's tracing log line for an audit event, the `held_keys` BitSet for stuck-key state, etc.).
+1. **Identify the source of truth** for the work the test is meant to perform (UIA `ValuePattern.value` for a typed string, file bytes on disk for a saved file, `RecordingBackend::events()` for the emitted `INPUT` sequence, `vigem-client` device state for a pad report, the daemon's tracing log line for an audit event, the `held_keys` BitSet for stuck-key state, RocksDB `Db::scan(CF_REFLEX_AUDIT, ..)` for a reflex fire, `GetClipboardData(CF_UNICODETEXT)` for clipboard write, `XInputGetState(0)` for ViGEm pad state, etc.).
 2. **Print `before` state**, execute the action, **print `after` state**. Use the M1-established `println!("source_of_truth=<name> edge=<edge> before=<...> after=<...>")` convention.
-3. **Read back from the source of truth** with a separate operation. Never trust the return value of the operation under test as evidence that the side effect landed.
-4. **Three edge cases minimum** per primary path (empty input / boundary value / structurally invalid input). Each edge case prints its own `before`/`after` and asserts on the source of truth.
-5. **Evidence of success in the log.** The test must emit a line containing the actual post-state of the source of truth. A grep against the test stdout shows what landed.
+3. **Read back from the source of truth** with a separate operation, distinct from the action under test. Never trust the return value of the operation under test as evidence that the side effect landed.
+4. **Three edge cases minimum** per primary path:
+   - **Empty / zero input** (`act_type({text:""})`, `audio_tail({seconds:0})`, empty event filter, empty profile dir)
+   - **Boundary value** (`act_press({hold_ms:30000})` succeeds vs `30001` rejected; reflex cap 32 vs 33; 4096-event SSE ring boundary)
+   - **Structurally invalid** (`schemars` reject → `TOOL_PARAMS_INVALID`; unknown enum variant; out-of-range float)
+   Each edge case prints its own `before` / `after` and asserts on the source of truth.
+5. **Evidence of success in the log.** The test must emit at least one `source_of_truth=<name> edge=<edge> after_truth=<state>` line and one `source_of_truth=<name> edge=<edge> final_value=<state>` line per scenario. A reviewer greps `--nocapture` stdout for these patterns to verify the side effect landed.
+6. **Trigger → outcome reasoning** in a doc-comment on the test fn: identify the trigger event, the process X inside the daemon, the observable outcome Y, and the source of truth that proves Y. See M2 §8.5 for the canonical example.
+7. **Synthetic inputs with known expected outputs.** Pick fixtures whose expected source-of-truth state is unambiguous (`"Hello world."` → exact byte sequence in `Notepad ValuePattern.value`; a 5 s WAV with known transcript → Whisper response within Levenshtein ≤ 10%; 33 reflex registrations → cap rejection on the 33rd). Tests assert byte-equal or count-equal, not "looks ok."
+8. **Process-restart durability check** for any test touching persistent storage (RocksDB CFs from M3 onward): write data, drop the daemon, spawn a fresh `StdioMcpClient`, read back, assert data survived.
 
-A test that asserts only on return values is **not done**; review fails the PR.
+A test that asserts only on return values is **not done**; review fails the PR. A test that produces zero `final_value=` lines in stdout fails review even if `assert_*` passed.
 
 ---
 

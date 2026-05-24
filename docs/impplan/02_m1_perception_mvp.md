@@ -1,13 +1,15 @@
-# 02 — M1: Perception MVP (2-3 weeks) — DONE locally
+# 02 — M1: Perception MVP (2-3 weeks) — DONE (archival)
 
-**Status (2026-05-23):** local implementation complete under the WSL/global
-install constraint. M0 closed at `v0.1.0-m0`. M1 ships the six MCP tools below
-(commits `b8ad120`, `75176b6`, `8d141c6`, `3d53f22`, `de4c5b9`, `42d6278`,
-`977a4c8`, `3e177f7`, `79a9428`, `6373932`, `920c664`, `01ea9e1`, `defa76d`,
-`97c16db`, `57cd8b1`, `b4066bd`, `403b5f8`) and is verified by local FSV
-tests. GitHub Actions / self-hosted runner work is explicitly out of scope for
-this local pass; the next phase (M2) must keep CI green on the existing matrix
-(`.github/workflows/ci.yml`).
+**Status:** Closed 2026-05-23 by release tag `v0.1.0-m1` (commit `b8ad120`).
+GitHub context issue: #86. All M1 sub-issues (#87-#135) are closed.
+
+**Shipped MCP tools (6):** `health` (carried from M0), `observe`, `find`,
+`read_text`, `set_capture_target`, `set_perception_mode`. Schemas frozen via
+`crates/synapse-mcp/tests/snapshots/m1_tools_fsv__m1_tools_list.snap`.
+
+Manual configured-host FSV is the shipping gate (operator decision 2026-05-24,
+issues #246/#247). CI runs the portable Linux/Windows test subset as a
+regression safety net only; M3+ must keep it green.
 
 **Shipped M1 surface (consume from M2 — do not re-implement):**
 
@@ -160,9 +162,7 @@ CAPTURE_TARGET_INVALID
 
 ## Definition of Done
 
-M1 closed locally (commits listed in Status). Tag `v0.1.0-m1` will be cut once
-the Windows self-hosted runner is back online and the bench/E2E suite has been
-re-run against the live OS. For M2 purposes M1 is the "shipped" baseline:
-M2 work begins against the current `main` without waiting on the tag.
-
-Open next: `03_m2_action_mvp.md`.
+Closed 2026-05-23 by `v0.1.0-m1` (commit `b8ad120`). M2 began against `main`
+without waiting on a self-hosted runner; manual configured-host FSV is the
+shipping evidence (see `00_methodology.md` §5 + issues #246/#247). Open
+next: `03_m2_action_mvp.md` (also closed); active phase: `04_m3_reflex_mcp_surface.md`.

@@ -1,22 +1,26 @@
-# 01 — M0: Bootstrap (1 week) — DONE
+# 01 — M0: Bootstrap (1 week) — DONE (archival)
 
 **Status:** Closed 2026-05-23 by release tag `v0.1.0-m0` (commit `f04b429`).
-**Evidence:** `crates/synapse-mcp/tests/m0_demo_gate.rs` exercises the full
+GitHub context issue: #1. All 81 M0 sub-issues (#2-#81) are closed.
+
+**Evidence:** `crates/synapse-mcp/tests/m0_demo_gate.rs` runs the
 `tools/list` → `tools/call health {}` round-trip end-to-end via
-`synapse_test_utils::stdio_mcp_client::StdioMcpClient`. CI green on Ubuntu +
-Windows (`.github/workflows/ci.yml`). M0 work-items and acceptance gates below
-are preserved for archival and onboarding.
+`synapse_test_utils::stdio_mcp_client::StdioMcpClient` and reads back the
+rotating JSONL log at the configured `SYNAPSE_LOG_DIR` to confirm the
+`tool.invocation kind=health` line appears (the source-of-truth read).
+CI green on Ubuntu + Windows (`.github/workflows/ci.yml`).
 
-**Source-of-truth verification example (already wired):** the M0 gate test
-spawns `synapse-mcp --mode stdio`, calls `tools/list`, asserts `health` is
-present, calls `tools/call health {}`, decodes the response into
-`synapse_core::Health`, then reads the rotating JSONL file at the configured
-`SYNAPSE_LOG_DIR` and asserts the line `tool.invocation kind=health` appears.
-M2 follows the same pattern: every test reads back the actual side effect from
-its source of truth (UIA, file system, RecordingBackend log, ViGEm device
-state) before declaring success.
+**FSV pattern established here is the M2+ standard:** spawn the daemon,
+exercise the tool, decode the response, then **read the side effect back from
+its source of truth via a separate operation** before declaring success.
+Every M3+ test follows the same pattern against UIA, the file system,
+`RecordingBackend`, ViGEm/`XInputGetState`, RocksDB CFs, etc.
 
-PRD: `15_roadmap_and_milestones.md` §2.
+The rest of this file is preserved for onboarding so a fresh agent can see
+how M0 was structured. M0 work-items and acceptance gates are not active —
+they shipped.
+
+PRD: `docs/computergames/15_roadmap_and_milestones.md` §2.
 
 ## Goal
 

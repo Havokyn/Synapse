@@ -1,10 +1,21 @@
-# 05 — M4: Hardware HID + First Game Profile (2-3 weeks)
+# 05 — M4: Hardware HID + First Game Profile (2-3 weeks) — BLOCKED BY M3
 
-PRD: `15_roadmap_and_milestones.md` §6. Hardware: `09_hardware_hid_gateway.md`. Firmware: `09 §4`. Wire protocol: `09 §5`. Supported-use policy: `08`.
+> Read after `04_m3_reflex_mcp_surface.md` is closed (`v0.1.0-m3` tagged).
+> This file is structured as a planning sketch; it gets a full self-contained
+> M2-style rewrite as the first M4 task once M3 lands. **All global
+> invariants apply** (no backcompat, no mocks gate completion, FSV with
+> source-of-truth read-back, Natural-only motion, manual configured-host
+> shipping gate).
+
+PRD: `docs/computergames/15_roadmap_and_milestones.md` §6. Hardware: `09_hardware_hid_gateway.md`. Firmware: `09 §4`. Wire protocol: `09 §5`. Supported-use policy: `08_*.md`. Doctrine: `00_methodology.md` + `07_cross_cutting.md`.
+
+## Mission (Occam's razor)
+
+**Bring the RP2040 firmware online, fill out `synapse-hid-host` so `Backend::Hardware` routes to a real device over CDC ACM, and ship the first game profile (`minecraft.java`) with HUD template-match + keymap + supported-use gates.** Every other M4 clause is a consequence of that sentence plus the global invariants.
 
 ## Goal
 
-RP2040 firmware (Rust + `embassy-rp`) + serial driver (`synapse-hid-host`) + `act_combo` MCP tool. First game profile `minecraft.java` with HUD extractors + keymap. Profile permission gates enforced.
+RP2040 firmware (Rust + `embassy-rp`) + serial driver (`synapse-hid-host`) + `act_combo` MCP tool (the M3 reflex scheduler is reused — `act_combo` compiles to a `combo` reflex). First game profile `minecraft.java` with HUD extractors + keymap. Profile supported-use gates enforced.
 
 ## Demo gate
 
@@ -16,12 +27,14 @@ RP2040 firmware (Rust + `embassy-rp`) + serial driver (`synapse-hid-host`) + `ac
 
 ## Inputs
 
-- M3 demo gate passed
+- M3 demo gate passed; `v0.1.0-m3` tag cut
 - Hardware: 1× Raspberry Pi Pico (RP2040), USB-A cable, host PC with free USB port
 - Rust toolchain extension: `rustup target add thumbv6m-none-eabi`; `cargo install elf2uf2-rs`
 - Minecraft Java Edition installed (single-player creative/survival world for testing)
-- `embassy-rp` + `embassy-usb` resolvable; `serialport = "4.9.0"` available (workspace pin)
-- `firmware/pico-hid/` directory does **not yet exist** (excluded from workspace per root `Cargo.toml:21`). M4 work-item 1 creates it from scratch.
+- `embassy-rp` + `embassy-usb` resolvable; `serialport = "4.9.0"` already in `[workspace.dependencies]` at the repo root
+- `firmware/pico-hid/` directory does **not yet exist** (excluded from workspace per root `Cargo.toml:21`). M4 work-item 1 creates it from scratch with its own `Cargo.toml` (separate workspace targeting `thumbv6m-none-eabi`).
+- `synapse-hid-host` crate currently empty stub (1 LoC `lib.rs`); M4 fills it out.
+- `Backend::Hardware` already routes through `crates/synapse-action/src/backend/unavailable.rs` returning `ACTION_BACKEND_UNAVAILABLE` (verified at `crates/synapse-action/src/backend/mod.rs:57-60`); M4 replaces that route with a real `HardwareBackend` impl that proxies to `synapse-hid-host`.
 
 ---
 
@@ -240,4 +253,13 @@ SAFETY_OPERATOR_HOTKEY_FIRED
 
 ## Definition of Done
 
-M4 closed when both demos pass + acceptance gates green + `git tag v0.1.0-m4`. Bundled `pico-hid-x.y.z.uf2` published as part of the tag's release assets. Open next: `06_m5_production_polish.md`.
+M4 closed when:
+
+1. Both demos (primary software-backend Minecraft 5-min hands-off + bonus `--hardware-hid auto` RP2040) pass on a real Win11 box.
+2. Every acceptance gate above green; **manual FSV with source-of-truth read-back on every row**.
+3. Manual happy-path + edge-case test plan filled in by operator in the M4 release PR (write the plan as the first task once M4 starts; mirror the M3 §8 structure).
+4. `CHANGELOG.md` updated; `git tag v0.1.0-m4` cut; bundled `pico-hid-x.y.z.uf2` published as part of the tag's release assets.
+
+**FSV reminder:** every Minecraft test row asserts on a separate source-of-truth read (`fs::read_to_string` for the saved-world state where possible; UIA `ValuePattern` on the F3 debug screen for coords; `XInputGetState` for the gamepad path; `RecordingBackend` events for the software-backend path; external `WH_KEYBOARD_LL` hook for the hardware-backend path). No row is "ok by inspection" — `before` / `after` / separate read / `final_value=` log line for every primary path, ≥3 edge cases each.
+
+Open next: `06_m5_production_polish.md`.

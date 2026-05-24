@@ -1,6 +1,11 @@
 # 07 — Cross-cutting concerns
 
-Discipline applied across M0-M5, not owned by any single phase. Pointers to authoritative PRD sections; impplan adds enforcement rules.
+Discipline applied across M0-M5, not owned by any single phase. Pointers to authoritative PRD sections; impplan adds enforcement rules. State-tracking authority: git tags + `CHANGELOG.md` > codebase on `main` > GitHub Issues. **All M0/M1/M2 issues are closed** (244 total as of 2026-05-24); M3+ opens new issues with `phase:mN` + `area:*` labels.
+
+**Three operator-level invariants** that override anything below in case of conflict:
+1. No backwards compatibility (pre-v1). Fail fast with `error_codes::*`; no fallbacks/shims.
+2. No mocks gate completion. OS-bound work needs a real-OS integration test with source-of-truth read-back.
+3. Manual configured-host FSV is the shipping gate (issues #246/#247). CI is the regression safety net only.
 
 ---
 
@@ -260,3 +265,20 @@ Travel-time targets (default-resolution paths):
 > The model is the brain. Synapse is the body. (`00_vision_and_scope.md` §12)
 
 Every PR must preserve this. PRs that add planning, MCTS, GOAP, skill libraries, inner LLM, world model, or learning loops ⇒ rejected without ADR.
+
+---
+
+## 14. M2 lessons — apply at M3+
+
+| Lesson | Source | Apply how |
+|---|---|---|
+| 500 LoC cap erodes silently — emitter.rs ended at 1474, vigem.rs 1131, invoke.rs 653 | M2 carry-over | Reviewers enforce at ≤ 450 LoC during code review; M3 work-item A.0 splits the M2 over-cap files **before** building reflex on top |
+| Telemetry log GC at startup only → long-lived daemon exceeds 500 MB cap | #241 (partially landed in `615cd4f`) | Every long-running background task uses `tokio::interval` with explicit cadence; document the cadence in the work-item acceptance |
+| `fsv-*/` ephemeral run dirs leak into the worktree | #242 | Standardize on `.runs/` (gitignored) for any test that writes ad-hoc artifacts; never write into the repo root |
+| `bench_results/<sha>/` is committed per commit (8 dirs so far) | #243 | Migrate to `critcmp` / `bencher.dev` JSON tracked outside the repo; stop committing per-commit baselines (M3 work-item) |
+| M2 packaged-Notepad UIA `MenuBar` discovery is silently empty under `ControlView` walker | #244 | M3 work-item A.0c switches to `RawView`; future a11y work must include a UWP-packaged-app smoke test |
+| Coords are physical (DPI-aware) pixels — undocumented; trips DPI-unaware SoT readers | #239 | M3 work-item A.0g patches tool schema descriptions + `03_action.md`; future tools must document coord space explicitly |
+| `SoftwareBackend::mouse_move` reads cursor via Enigo (DPI-unaware) in a DPI-aware host | #234 | M3 work-item A.0d routes through Win32 `GetCursorPos` in DPI-aware mode; future cross-DPI tests must assert byte-equal end position |
+| Backend wiring no-op (#228) went undetected until #219 live FSV | M2 carry-over | every backend integration test must dispatch through the real `ActionEmitter` actor with a real backend, not via direct backend `execute` calls |
+| ViGEmBus 1.22.0 installer fails unattended (-536870911 no log) | #229 | M2 explicitly scoped to **operator's configured host** with ViGEmBus pre-installed; do not gate M3+ on unattended driver install |
+| `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT` and `SYNAPSE_MCP_FORCE_*` env flags are the FSV escape hatches for non-reachable code paths | shipped through M1+M2 | M3 adds parallel `SYNAPSE_MCP_FORCE_REFLEX_*` / `SYNAPSE_MCP_FORCE_AUDIO_*` env flags to drive every M3 error path that cannot otherwise be triggered deterministically |

@@ -1,10 +1,25 @@
-# 03 — M2: Action MVP (2 weeks) — ACTIVE
+# 03 — M2: Action MVP (2 weeks) — DONE (archival + post-tag carry-over)
 
-> Read this whole file before writing code. It is self-contained and assumes a
-> fresh AI coding agent context. Every claim about the existing codebase is
-> verified against the current `main` (2026-05-23). **Assume the task is
-> wrong.** If the codebase contradicts this document, the codebase wins —
-> patch this file in the same PR and call it out in the PR description.
+**Status:** Closed 2026-05-24 by release tag `v0.1.0-m2` (commit `51836fe`).
+GitHub context issue: #136. All M2 sub-issues (#137-#248) closed; shipped
+surface verified by 13 M2 FSV tests under `crates/synapse-mcp/tests/m2_*.rs`
+and 16 unit/proptest/bench files under `crates/synapse-action/tests/**`.
+
+**Carry-over for M3** (landed bugs / known limitations recorded after the
+tag) is the table at the bottom of `docs/impplan/README.md` (#244, #239,
+#234, #233, #231, #243, #242, #241, plus the M2 LoC overrun in `emitter.rs`,
+`vigem.rs`, `invoke.rs`, `software.rs`, `m2/click.rs`, `m2/press.rs`). M3
+either consumes them as-is or fixes them in a one-shot refactor PR before
+adding reflex work on top.
+
+> The rest of this file is preserved for onboarding so a fresh agent can see
+> how M2 was structured (the M2 file is the template for M3+ phase docs:
+> verbatim crate inventory, default-resolution table, FSV contract, manual
+> happy-path + edge-case plan, Occam's-razor recap, trigger→outcome map).
+> Every claim about the codebase was verified against `main` at tag time. If
+> a discrepancy now exists, the **codebase wins** — file a follow-up issue
+> with the `phase:m2` + `area:docs` labels and patch this file in the same
+> PR.
 
 PRD authority: `docs/computergames/03_action.md` (Action subsystem),
 `docs/computergames/05_mcp_tool_surface.md` §3.11-3.19 + §3.26 (MCP tool
