@@ -6,10 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+sled-backend = ["dep:sled"]
+
 [dependencies]
+rocksdb = { workspace = true, features = ["lz4", "zstd", "multi-threaded-cf"] }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sled = { workspace = true, optional = true }
 synapse-core = { version = "0.1.0", path = "../synapse-core" }
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [lints]
