@@ -47,7 +47,9 @@ fn periodic_gc_evicts_files_past_keep_days_fsv() -> Result<(), Box<dyn std::erro
     std::thread::sleep(Duration::from_millis(400));
 
     let post_periodic = stale_after_init.exists();
-    println!("source_of_truth=periodic_gc edge=mid_run after=stale_after_init_exists:{post_periodic}");
+    println!(
+        "source_of_truth=periodic_gc edge=mid_run after=stale_after_init_exists:{post_periodic}"
+    );
 
     drop(guard);
     assert!(

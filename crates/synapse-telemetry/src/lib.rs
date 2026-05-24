@@ -114,9 +114,7 @@ impl GcWorker {
                     match rx.recv_timeout(interval) {
                         Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {
-                            if let Err(err) =
-                                run_log_gc(&log_dir, keep_days, max_dir_bytes)
-                            {
+                            if let Err(err) = run_log_gc(&log_dir, keep_days, max_dir_bytes) {
                                 tracing::warn!(
                                     code = "TELEMETRY_GC_PERIODIC_FAILED",
                                     log_dir = %log_dir.display(),
@@ -235,12 +233,7 @@ pub fn init_tracing(cfg: TelemetryConfig) -> Result<TelemetryGuard, TelemetryErr
 
     let gc_interval = effective_gc_interval(cfg.gc_interval);
     let gc_worker = gc_interval.and_then(|interval| {
-        GcWorker::spawn(
-            log_dir.clone(),
-            cfg.keep_days,
-            cfg.max_dir_bytes,
-            interval,
-        )
+        GcWorker::spawn(log_dir.clone(), cfg.keep_days, cfg.max_dir_bytes, interval)
     });
 
     Ok(TelemetryGuard {
