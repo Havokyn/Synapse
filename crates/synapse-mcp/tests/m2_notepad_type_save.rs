@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 #[cfg(windows)]
 use serde_json::{Value, json};
 #[cfg(windows)]
-use synapse_core::{AccessibleNode, ElementId, Observation, Rect, UiaPattern};
+use synapse_core::{AccessibleNode, ElementId, Observation, Point, Rect, UiaPattern};
 #[cfg(windows)]
 use synapse_test_utils::{fixtures::launch_notepad, stdio_mcp_client::StdioMcpClient};
 #[cfg(windows)]
@@ -32,6 +32,10 @@ const EXPECTED_DISK_TEXT: &str = "Hello world.\r\nThis is Synapse.";
 const INVALID_SAVE_PATH: &str = r"Z:\nope\synapse-m2-invalid-dir.txt";
 #[cfg(windows)]
 const INVALID_EDGE_CLEANUP_FILE_NAME: &str = "synapse-m2-invalid-edge-cleanup.txt";
+#[cfg(windows)]
+const DOUBLE_CLICK_TEXT: &str = "abcdef";
+#[cfg(windows)]
+const DOUBLE_CLICK_CLEANUP_FILE_NAME: &str = "synapse-m2-double-click-cleanup.txt";
 
 #[cfg(windows)]
 #[tokio::test]
@@ -75,7 +79,8 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     );
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
 
-    let editor_id = editor_from_uia_snapshot(hwnd)?;
+    let editor_node = editor_node_from_uia_snapshot(hwnd)?;
+    let editor_id = editor_node.element_id.clone();
     match synapse_a11y::focus_window(hwnd) {
         Ok(()) => println!(
             "source_of_truth=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}"
@@ -295,7 +300,8 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     );
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
 
-    let editor_id = editor_from_uia_snapshot(hwnd)?;
+    let editor_node = editor_node_from_uia_snapshot(hwnd)?;
+    let editor_id = editor_node.element_id.clone();
     focus_editor(hwnd, &editor_id)?;
     println!("source_of_truth=editor_element edge=invalid_dir before_element_id={editor_id}");
     let click = client
@@ -551,6 +557,257 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
 }
 
 #[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
+// #189 keeps the click/copy/readback sequence linear so the clipboard SoT is
+// visibly tied to the exact double-click action that produced it.
+#[allow(clippy::too_many_lines)]
+async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -> anyhow::Result<()>
+{
+    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+    let cleanup_path = std::env::temp_dir().join(DOUBLE_CLICK_CLEANUP_FILE_NAME);
+    let cleanup = FileCleanup(cleanup_path.clone());
+    let stale_cleanup_before_exists = cleanup_path.exists();
+    let stale_cleanup_before_len = if stale_cleanup_before_exists {
+        Some(std::fs::metadata(&cleanup_path)?.len())
+    } else {
+        None
+    };
+    println!(
+        "source_of_truth=disk edge=double_click_stale_cleanup before_path={} before_exists={} before_len={:?}",
+        cleanup_path.display(),
+        stale_cleanup_before_exists,
+        stale_cleanup_before_len
+    );
+    if cleanup_path.exists() {
+        std::fs::remove_file(&cleanup_path)
+            .with_context(|| format!("remove stale cleanup file {}", cleanup_path.display()))?;
+    }
+    println!(
+        "source_of_truth=disk edge=double_click_select cleanup_before_path={} cleanup_before_exists={}",
+        cleanup_path.display(),
+        cleanup_path.exists()
+    );
+
+    let log_dir = TempDir::new()?;
+    let handle = launch_notepad()?;
+    let hwnd = handle.hwnd();
+    let pid = handle.pid();
+    println!(
+        "source_of_truth=NotepadHandle edge=double_click_select ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
+        handle.pid_preexisting()
+    );
+    let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
+
+    let original_clipboard = client
+        .tools_call("act_clipboard", json!({"verb": "read"}))
+        .await
+        .ok()
+        .and_then(|response| structured::<ActClipboardWireResponse>(&response).ok())
+        .and_then(|response| response.text);
+    println!(
+        "source_of_truth=clipboard edge=double_click_select before_text_len={:?}",
+        original_clipboard.as_ref().map(|text| text.chars().count())
+    );
+    let clear = client
+        .tools_call("act_clipboard", json!({"verb": "clear"}))
+        .await?;
+    let clear_response: ActClipboardWireResponse = structured(&clear)?;
+    println!(
+        "source_of_truth=clipboard edge=double_click_select clear_before after_ok:{} cleared:{}",
+        clear_response.ok, clear_response.cleared
+    );
+    assert!(clear_response.ok);
+    assert!(clear_response.cleared);
+
+    let editor_node = editor_node_from_uia_snapshot(hwnd)?;
+    let editor_id = editor_node.element_id.clone();
+    focus_editor(hwnd, &editor_id)?;
+    let word_point = Point {
+        x: editor_node.bbox.x.saturating_add(editor_node.bbox.w / 2),
+        y: editor_node.bbox.y.saturating_add(editor_node.bbox.h / 2),
+    };
+    println!(
+        "source_of_truth=editor_element edge=double_click_select before_element_id={editor_id} word_point={word_point:?}"
+    );
+    let click_focus = client
+        .tools_call(
+            "act_click",
+            json!({"target": {"x": word_point.x, "y": word_point.y}}),
+        )
+        .await?;
+    let click_focus_response: ActClickWireResponse = structured(&click_focus)?;
+    println!(
+        "source_of_truth=mcp_act_click edge=double_click_caret after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        click_focus_response.ok,
+        click_focus_response.used_invoke_pattern,
+        click_focus_response.backend_used,
+        click_focus_response.elapsed_ms
+    );
+    assert!(click_focus_response.ok);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let observe_before = observe(&mut client).await?;
+    println!(
+        "source_of_truth=mcp_observe edge=double_click_select before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
+        observe_before.foreground.window_title
+    );
+    assert_eq!(observe_before.foreground.hwnd, hwnd);
+    assert_eq!(observe_before.foreground.pid, pid);
+
+    let typed = client
+        .tools_call(
+            "act_type",
+            json!({
+                "text": DOUBLE_CLICK_TEXT,
+                "dynamics": "linear",
+                "linear_ms_per_char": 30
+            }),
+        )
+        .await?;
+    let typed_response: ActTypeWireResponse = structured(&typed)?;
+    println!(
+        "source_of_truth=mcp_act_type edge=double_click_select after=ok:{} chars_typed:{} elapsed_ms:{}",
+        typed_response.ok, typed_response.chars_typed, typed_response.elapsed_ms
+    );
+    assert!(typed_response.ok);
+    assert_eq!(typed_response.chars_typed as usize, DOUBLE_CLICK_TEXT.len());
+
+    println!(
+        "source_of_truth=windows_cursor edge=double_click_select before_point={word_point:?} expected_text={DOUBLE_CLICK_TEXT}"
+    );
+    let double_click = client
+        .tools_call(
+            "act_click",
+            json!({"target": {"x": word_point.x, "y": word_point.y}, "clicks": 2}),
+        )
+        .await?;
+    let double_click_response: ActClickWireResponse = structured(&double_click)?;
+    println!(
+        "source_of_truth=mcp_act_click edge=double_click_select after=ok:{} clicks:2 used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        double_click_response.ok,
+        double_click_response.used_invoke_pattern,
+        double_click_response.backend_used,
+        double_click_response.elapsed_ms
+    );
+    assert!(double_click_response.ok);
+
+    press_keys(&mut client, "double_click_copy", json!(["ctrl", "c"])).await?;
+    let read = client
+        .tools_call("act_clipboard", json!({"verb": "read"}))
+        .await?;
+    let read_response: ActClipboardWireResponse = structured(&read)?;
+    let selected_text = read_response.text.unwrap_or_default();
+    println!("source_of_truth=clipboard edge=double_click_select after_text={selected_text}");
+    let selection_matches = selected_text == DOUBLE_CLICK_TEXT;
+
+    if let Some(original_clipboard) = original_clipboard {
+        let restore = client
+            .tools_call(
+                "act_clipboard",
+                json!({"verb": "write", "text": original_clipboard}),
+            )
+            .await?;
+        let restore_response: ActClipboardWireResponse = structured(&restore)?;
+        println!(
+            "source_of_truth=clipboard edge=double_click_select restore_after_ok:{} written:{} text_len:{:?}",
+            restore_response.ok, restore_response.written, restore_response.text_len
+        );
+        assert!(restore_response.ok);
+    } else {
+        let clear = client
+            .tools_call("act_clipboard", json!({"verb": "clear"}))
+            .await?;
+        let clear_response: ActClipboardWireResponse = structured(&clear)?;
+        println!(
+            "source_of_truth=clipboard edge=double_click_select restore_clear_after_ok:{} cleared:{}",
+            clear_response.ok, clear_response.cleared
+        );
+        assert!(clear_response.ok);
+    }
+
+    press_keys(
+        &mut client,
+        "double_click_cleanup_save_chord",
+        json!(["ctrl", "s"]),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let cleanup_save_dialog = observe(&mut client).await?;
+    println!(
+        "source_of_truth=mcp_observe edge=double_click_cleanup_save_dialog after_title={:?} process={:?}",
+        cleanup_save_dialog.foreground.window_title, cleanup_save_dialog.foreground.process_name
+    );
+    let cleanup_path_text = cleanup_path.to_string_lossy().into_owned();
+    println!(
+        "source_of_truth=mcp_act_type edge=double_click_cleanup_filename before_path={} before_len={}",
+        cleanup_path_text,
+        cleanup_path_text.chars().count()
+    );
+    let cleanup_filename = client
+        .tools_call(
+            "act_type",
+            json!({
+                "text": cleanup_path_text,
+                "dynamics": "linear",
+                "linear_ms_per_char": 20
+            }),
+        )
+        .await?;
+    let cleanup_filename_response: ActTypeWireResponse = structured(&cleanup_filename)?;
+    println!(
+        "source_of_truth=mcp_act_type edge=double_click_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        cleanup_filename_response.ok,
+        cleanup_filename_response.chars_typed,
+        cleanup_filename_response.elapsed_ms
+    );
+    assert!(cleanup_filename_response.ok);
+    press_keys(
+        &mut client,
+        "double_click_cleanup_confirm",
+        json!(["enter"]),
+    )
+    .await?;
+    let cleanup_text = wait_for_file_text(&cleanup_path, Duration::from_secs(5))?;
+    println!(
+        "source_of_truth=disk edge=double_click_cleanup_save after_exists={} after_text={cleanup_text:?}",
+        cleanup_path.exists()
+    );
+    assert_eq!(cleanup_text, DOUBLE_CLICK_TEXT);
+
+    assert!(client.shutdown().await?.success());
+    let logs = read_logs(log_dir.path())?;
+    let contains_act_click = logs.contains("tool.invocation kind=act_click");
+    let contains_act_clipboard = logs.contains("tool.invocation kind=act_clipboard");
+    println!(
+        "source_of_truth=daemon_log edge=double_click_select after_bytes={} contains_act_click={} contains_act_clipboard={}",
+        logs.len(),
+        contains_act_click,
+        contains_act_clipboard
+    );
+    assert!(contains_act_click);
+    assert!(contains_act_clipboard);
+
+    handle.close()?;
+    println!(
+        "source_of_truth=NotepadHandle::close edge=double_click_select after=closed pid={pid}"
+    );
+    std::fs::remove_file(&cleanup_path)
+        .with_context(|| format!("cleanup double-click save file {}", cleanup_path.display()))?;
+    println!(
+        "source_of_truth=disk edge=double_click_select cleanup_after_exists={}",
+        cleanup_path.exists()
+    );
+    assert!(!cleanup_path.exists());
+    std::mem::forget(cleanup);
+    assert!(
+        selection_matches,
+        "double-click clipboard text mismatch: expected {DOUBLE_CLICK_TEXT:?}, got {selected_text:?}"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
 struct FileCleanup(PathBuf);
 
 #[cfg(windows)]
@@ -663,6 +920,11 @@ fn dialog_mentions_invalid_path(observation: &Observation) -> bool {
 
 #[cfg(windows)]
 fn editor_from_uia_snapshot(hwnd: i64) -> anyhow::Result<ElementId> {
+    Ok(editor_node_from_uia_snapshot(hwnd)?.element_id)
+}
+
+#[cfg(windows)]
+fn editor_node_from_uia_snapshot(hwnd: i64) -> anyhow::Result<AccessibleNode> {
     let window = synapse_a11y::window_from_hwnd(hwnd)
         .with_context(|| format!("resolve Notepad hwnd 0x{hwnd:x}"))?;
     let subtree = synapse_a11y::snapshot(&window, 4)
@@ -688,7 +950,7 @@ fn editor_from_uia_snapshot(hwnd: i64) -> anyhow::Result<ElementId> {
         target.bbox,
         target.patterns
     );
-    Ok(target.element_id)
+    Ok(target)
 }
 
 #[cfg(windows)]
@@ -798,4 +1060,14 @@ struct ActPressWireResponse {
     keys_pressed: u32,
     elapsed_ms: u32,
     backend_used: String,
+}
+
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+struct ActClipboardWireResponse {
+    ok: bool,
+    written: bool,
+    cleared: bool,
+    text: Option<String>,
+    text_len: Option<usize>,
 }
