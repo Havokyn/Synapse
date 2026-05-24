@@ -6,23 +6,23 @@ Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` �
 
 1. **No backwards compatibility (pre-v1).** Schema/API changes break callers. No fallbacks, no compatibility shims, no silent error swallowing. Fail fast with a structured `synapse_core::error_codes::*` code and a `tracing` line carrying that code so the failure is debuggable.
 2. **No mocks gate completion.** Unit fakes are fine for isolation. An OS-bound work-item is **not done** until a real-OS integration test exercises it and a separate source-of-truth read confirms the side effect landed.
-3. **Manual configured-host FSV is the shipping gate, not GitHub Actions** (issues #246/#247, operator decision 2026-05-24). CI is the regression safety net; do not block a tag on CI; do not attempt to wait on workflow runs to "ship" a phase.
+3. **Manual configured-host FSV is the shipping gate, not GitHub Actions** (issues #246/#247/#350, operator decision 2026-05-24). Use local checks for supporting evidence. Do not dispatch, wait on, or block a tag on GitHub Actions/CI.
 
 ---
 
-## 1. Hard code rules (CI-enforced)
+## 1. Hard code rules (locally enforced/reviewed)
 
 | Rule | Mechanism |
 |---|---|
 | `#![forbid(unsafe_code)]` workspace-wide | per-crate override only for `synapse-action` (Win32 SendInput batching), `synapse-capture` (DX FFI), `synapse-hid-host` (serial OS handle), `firmware/pico-hid` |
-| File ≤ 500 LoC, function ≤ 30 LoC, cyclomatic ≤ 10 | clippy + custom lint check in CI. **M2 left 6 files over cap** (emitter.rs 1474, vigem.rs 1131, invoke.rs 653, software.rs 586, m2/click.rs 506, m2/press.rs 545) — M3 work-item A.0a/A.0b splits them before building reflex on top. Reviewers must enforce at ≤ 450 LoC during code review to leave 50 LoC of margin. |
+| File ≤ 500 LoC, function ≤ 30 LoC, cyclomatic ≤ 10 | clippy + local/reviewer check. **M2 left 6 files over cap** (emitter.rs 1474, vigem.rs 1131, invoke.rs 653, software.rs 586, m2/click.rs 506, m2/press.rs 545) — M3 work-item A.0a/A.0b splits them before building reflex on top. Reviewers must enforce at ≤ 450 LoC during code review to leave 50 LoC of margin. |
 | `unwrap()` / `expect()` forbidden outside `#[cfg(test)]` | `#[deny(clippy::unwrap_used, clippy::expect_used)]` |
 | `anyhow` forbidden in library crates | manual review + workspace dep gating |
 | No `println!` / `eprintln!` | clippy lint + grep gate |
 | Public API constants are `pub const`, not magic strings | test asserts every CF name / error code matches its literal |
 | Error variants ⇒ `SCREAMING_SNAKE_CASE` code via `thiserror` impl with `.code()` | snapshot test (`13_testing_strategy.md` §3) |
-| Schema change pre-v1 ⇒ wipe DB, no migration shim | doc gate; CI runs sample wipe-and-rebuild |
-| Files referenced in docs exist | doc-link CI check |
+| Schema change pre-v1 ⇒ wipe DB, no migration shim | doc gate; local sample wipe-and-rebuild |
+| Files referenced in docs exist | `scripts/check_docs.ps1 -CheckAnchors` |
 
 ---
 
@@ -30,7 +30,7 @@ Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` �
 
 `synapse-core` ← zero internal deps (type/error/const root). Verified each PR via `cargo tree -p synapse-core --depth 1` showing only crates.io deps.
 
-Acyclic graph: `01_architecture.md` §5. CI fails if any new edge introduces a cycle.
+Acyclic graph: `01_architecture.md` §5. Local dependency-graph checks fail if any new edge introduces a cycle.
 
 Per-crate `Cargo.toml` scaffold from `14_build_and_packaging.md` §17. New crate via `scripts/new-crate.ps1 -Name synapse-<name>`.
 
@@ -79,7 +79,7 @@ Test pyramid: `13_testing_strategy.md` §2.
 | `cargo deny check` | every PR |
 | `cargo audit` | every PR + daily cron |
 | `insta review --check` | every PR |
-| `cargo bench` perf-regression (tracked benches only) | weekly + PR delta ≤ 20% gate |
+| `cargo bench` perf-regression (tracked benches only) | local configured-host run + exported `critcmp` JSON delta ≤ 20% |
 | E2E real Windows | nightly self-hosted |
 | Hardware-in-loop (RP2040) | weekly self-hosted |
 | Fuzz (`cargo-fuzz`) | nightly, 10 min/target |
@@ -117,7 +117,7 @@ Hot loops:
 - Action emit: ≤ 1 alloc (the `Vec<INPUT>` for `SendInput`)
 - Detection: pre-allocated tensors
 
-CI bench: `criterion` benches stored at `bench_results/<commit_sha>/`. PR delta > 20% on tracked benches blocks merge. Tracked list: `13_testing_strategy.md` §7.
+Benchmarks use local Criterion baselines and exported `critcmp` JSON stored outside git (`%LOCALAPPDATA%\synapse\benchmarks\baselines\` for durable baselines, `.runs\benchmarks\` for candidates). `scripts/check-bench-delta.ps1` fails when a candidate export is missing a tracked benchmark or regresses by more than 20%. Per #350, do not use GitHub Actions/CI or committed `bench_results/<sha>/` baselines as the performance source of truth.
 
 Spike check (`10_performance_budget.md` §15): subsystem > 2× p99 for > 5s ⇒ `synapse-performance-degraded` event + `health.subsystems.X.status = "degraded_latency"`.
 
@@ -176,9 +176,9 @@ No silent decisions. A code change that resolves an open question without an ADR
 
 ---
 
-## 11. Cross-doc consistency CI
+## 11. Cross-doc consistency check
 
-CI checks:
+Local checks:
 
 - Every `pub const` in `synapse-core::error_codes` listed in `06_data_schemas.md` §8
 - Every CF name listed in `07_storage_and_profiles.md` §4
@@ -206,7 +206,7 @@ Per `15_roadmap_and_milestones.md` §10 — repeated here for forcing function:
 
 1. M0-M5 demo gates all pass
 2. Perf budgets met on reference machine (RTX 3060 + 8-core)
-3. CI green 3 consecutive days on `main`
+3. Local configured-host verification green on the release candidate
 4. Soak 8 h clean
 5. Manual test plan signed off (`13_testing_strategy.md` §15)
 6. PRD docs internally consistent

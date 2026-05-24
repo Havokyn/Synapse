@@ -12,7 +12,7 @@ Doctrine: `docs2/compressionprompt.md` §0-13. Keep verbatim: paths, crate names
 2. **No mocks gate completion.** Unit fakes are fine for isolation. An OS-bound work-item is **not done** until a real-OS integration test exercises it against the real source of truth (UIA `ValuePattern`, `XInputGetState`, file on disk, RocksDB key, `GetClipboardData`, `GetCursorPos`, low-level keyboard hook, etc.).
 3. **Full-State Verification (FSV) is mandatory** for every test from M2 onward. Identify the source of truth, print `before`, execute, print `after` from a separate read, exercise ≥3 edge cases (empty / boundary / structurally invalid), and emit at least one `final_value=` log line. See `00_methodology.md` §5.
 4. **Natural-only motion (OQ-004 DECIDED 2026-05-22).** `Natural` curves + `Natural` keystroke dynamics tuned `FAST` (50 ms `Snap` travel, ~190 WPM typing with `mean_iki_ms=32, stddev=10, bigram_bias=true`) are the resolved default of every tool, profile, and reflex. No `Instant` jumps, no `Burst` typing as defaults. `Instant`/`Burst` remain in the enums for explicit caller opt-in only. See `07_cross_cutting.md` §12.
-5. **Manual FSV on the configured Windows host is the shipping gate, not CI** (operator decision 2026-05-24, issues #246/#247). GitHub Actions runs only the portable Linux/Windows test subset and serves as a regression safety net. Do not block a tag on CI; do not attempt to dispatch or wait on workflow runs to "ship" a phase.
+5. **Manual FSV on the configured Windows host is the shipping gate, not CI** (operator decision 2026-05-24, issues #246/#247/#350). Use local checks for supporting evidence. Do not dispatch, wait on, or block a tag on GitHub Actions/CI.
 
 ---
 
@@ -53,7 +53,7 @@ A work-item is "done" iff:
 
 - `cargo build --release --workspace` compiles
 - `cargo clippy --workspace --all-targets -- -D warnings` clean
-- `cargo test --workspace` green (Ubuntu + Windows CI matrix)
+- `cargo test --workspace` green locally on the configured host unless a focused issue-specific gate is documented
 - The work-item's specific acceptance bullet passes
 - Tracing instrumented; every error variant carries an `error_codes::*` code
 - No `unwrap()` / `expect()` outside `#[cfg(test)]`, no `unsafe` outside the allowed crates (`synapse-capture`, `synapse-hid-host`, `firmware/pico-hid`)
@@ -73,7 +73,7 @@ A work-item is "done" iff:
 ✓ Tracing spans on every non-trivial fn
 ✓ No mocks gate completion (real captures, real RocksDB, real SendInput, real ViGEm)
 ✓ Schema change ⇒ wipe-and-rebuild (pre-v1, no shim)
-✓ Bench delta ≤ 20% on tracked metrics (`docs/computergames/10_performance_budget.md` §14)
+✓ Bench delta ≤ 20% on tracked metrics via local exported `critcmp` JSON (`docs/dev-host-hygiene.md` §Benchmark baselines)
 ✓ Docs cross-refs intact (`scripts/check_docs.ps1`)
 ✓ FSV evidence in test stdout (see `00_methodology.md` §5)
 ```
@@ -116,7 +116,7 @@ These are landed-but-imperfect surfaces from M2. M3 either consumes them as-is o
 | #234 | `SoftwareBackend::mouse_move` uses Enigo `location()` under different DPI than callers | Cursor lands off by DPI scale factor | Patch to read cursor via direct Win32 `GetCursorPos` in DPI-aware mode |
 | #233 | `software::type_text` ignores `dynamics`, batches into single `SendInput` | Notepad drops chars past queue depth | Re-thread `dynamics` through `text_dispatch.rs` (partial fix landed in `ea70964`) |
 | #231 | held-key auto-release clears actor state but never dispatches backend `KeyUp` | Stuck-key telemetry fires; physical key never released | Auto-release path must call the same backend dispatch as a normal `KeyUp` |
-| #243 | bench_results dir bloat (8 per-commit subdirs committed) | Repo grows | Adopt `critcmp`/`bencher.dev`; stop committing per-commit baselines |
+| #243/#260 | bench_results dir bloat (8 per-commit subdirs committed) | Repo grows | Use local `critcmp` exports under `%LOCALAPPDATA%\synapse\benchmarks\baselines\` / `.runs\benchmarks\`; stop committing per-commit baselines |
 | #242 | `fsv-*/` ephemeral run dirs leak into the worktree | Untracked clutter | Standardize on `.runs/` + `.gitignore` |
 | #241 | Telemetry log GC runs only at startup | Long-lived daemon exceeds 500 MB cap | Move to `tokio::interval`; already partially landed in `615cd4f` |
 | **M2 LoC overrun** | `emitter.rs` 1474, `vigem.rs` 1131, `invoke.rs` 653, `software.rs` 586, `m2/click.rs` 506, `m2/press.rs` 545 — over the 500 LoC hard cap | Split before M3 builds reflex enqueue path on top, or land an ADR amending the rule with measurable justification | First M3 PR: file-split refactor with no behavior change |

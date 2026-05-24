@@ -5,7 +5,7 @@ Discipline applied across M0-M5, not owned by any single phase. Pointers to auth
 **Three operator-level invariants** that override anything below in case of conflict:
 1. No backwards compatibility (pre-v1). Fail fast with `error_codes::*`; no fallbacks/shims.
 2. No mocks gate completion. OS-bound work needs a real-OS integration test with source-of-truth read-back.
-3. Manual configured-host FSV is the shipping gate (issues #246/#247). CI is the regression safety net only.
+3. Manual configured-host FSV is the shipping gate (issues #246/#247/#350). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI.
 
 ---
 
@@ -13,7 +13,7 @@ Discipline applied across M0-M5, not owned by any single phase. Pointers to auth
 
 Per `10_performance_budget.md` + `13_testing_strategy.md` §7.
 
-Tracked benches (perf-regression CI):
+Tracked benches (local/manual perf-regression gate):
 
 | Bench | Target p99 | First defined in |
 |---|---|---|
@@ -29,7 +29,7 @@ Tracked benches (perf-regression CI):
 | `ocr_winrt_120x32` | ≤ 8 ms | M1 |
 | `serialize_observation_typical` | ≤ 5 ms | M1 |
 
-PR delta > 20% on any tracked bench ⇒ merge blocked until either (a) fix, (b) ADR amending the target with measurable justification.
+Candidate delta > 20% on any tracked bench ⇒ release/merge blocked until either (a) fix, (b) ADR amending the target with measurable justification. The source of truth is exported `critcmp` JSON outside git: durable baselines under `%LOCALAPPDATA%\synapse\benchmarks\baselines\`, candidate runs under `.runs\benchmarks\`, compared with `scripts/check-bench-delta.ps1`. Per #350, do not use GitHub Actions/CI or committed `bench_results/<sha>/` directories for this gate.
 
 Spike check active in production (`10 §15`): any subsystem > 2× p99 for > 5 s ⇒ `synapse-performance-degraded` event + `health.subsystems.X.status="degraded_latency"`.
 
@@ -83,7 +83,7 @@ Per `13_testing_strategy.md`.
 | Integration | every subsystem boundary | real OS where possible (capture, RocksDB, UIA on Win) |
 | Property | filter eval, aim curves, keystroke, coord transforms, binary-codec round-trip | `proptest` |
 | Snapshot | tool schemas, observation shape, error response shape | `insta` |
-| Bench | tracked perf bench list (§1 above) | `criterion`, regression PR gate |
+| Bench | tracked perf bench list (§1 above) | `criterion`, `critcmp`, local exported JSON delta gate |
 | E2E | each milestone's demo scenario | real Notepad, real Minecraft, real RP2040 |
 | Fuzz | protocol parsers (MCP JSON-RPC, HID serial, EventFilter, Profile TOML) | `cargo-fuzz` 10 min/target nightly |
 | Soak | weekly per `13 §12` | 8 h synthetic workload |
@@ -188,29 +188,29 @@ OQs not landing in a phase ⇒ deferred forward with explicit note in `16_open_q
 
 ---
 
-## 10. CI matrix authority
+## 10. Local check authority
 
 Per `13_testing_strategy.md` §14. Repeated for forcing function:
 
-| Job | OS | Trigger |
+| Check | Host | When |
 |---|---|---|
-| `cargo fmt --all --check` | ubuntu | every PR (`.github/workflows/ci.yml` `rust-ubuntu` job) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | ubuntu + windows | every PR (both `rust-ubuntu` and `rust-windows`) |
-| `cargo test --workspace` | ubuntu + windows | every PR |
-| `cargo test --workspace --no-default-features` | ubuntu + windows | every PR |
-| `cargo build --release --workspace` | ubuntu + windows | every PR |
-| `bash scripts/check_dep_graph.sh` | ubuntu | every PR (`rust-ubuntu` job) |
-| `cargo deny check` | ubuntu | every PR (`security-ubuntu` job) |
-| `cargo audit` | ubuntu | every PR + daily cron |
-| `insta review --check` | ubuntu | every PR |
-| `scripts/check_docs.ps1` | windows (powershell) | every PR (currently invoked manually pre-PR; CI integration TBD) |
-| `e2e-real-windows` | self-hosted windows | nightly |
-| `bench-regression` | self-hosted windows | weekly + PR delta gate |
-| `hardware-in-loop` | self-hosted w/ Pico | weekly |
-| `soak` | self-hosted windows | weekly |
-| `fuzz` | ubuntu | nightly, 10 min/target |
+| `cargo fmt --all --check` | configured host | before commit |
+| `cargo clippy --workspace --all-targets -- -D warnings` | configured host | before commit when code changes |
+| `cargo test --workspace` | configured host | before commit when feasible; focused gate allowed when issue-scoped |
+| `cargo test --workspace --no-default-features` | configured host | before commit when feature gates change |
+| `cargo build --release --workspace` | configured host | release candidate |
+| `bash scripts/check_dep_graph.sh` | local shell with bash | dependency-edge changes |
+| `cargo deny check` | configured host | dependency changes |
+| `cargo audit` | configured host | dependency changes / release candidate |
+| `insta review --check` | configured host | snapshot changes |
+| `scripts/check_docs.ps1` | configured host PowerShell | doc changes |
+| `e2e-real-windows` | configured Windows host | issue-specific FSV / release candidate |
+| `bench-regression` | configured Windows host | manual/local exported `critcmp` delta gate |
+| `hardware-in-loop` | configured host with Pico | hardware work-items / release candidate |
+| `soak` | configured Windows host | release candidate |
+| `fuzz` | configured host | parser/protocol changes |
 
-PR cannot merge without "every PR" jobs green. Nightly/weekly failures block the next phase tag.
+Do not use GitHub Actions/CI as a merge or phase-tag gate unless a later operator decision explicitly reverses #350. Local checks plus manual configured-host FSV are the required evidence.
 
 ---
 
@@ -275,7 +275,7 @@ Every PR must preserve this. PRs that add planning, MCTS, GOAP, skill libraries,
 | 500 LoC cap erodes silently — emitter.rs ended at 1474, vigem.rs 1131, invoke.rs 653 | M2 carry-over | Reviewers enforce at ≤ 450 LoC during code review; M3 work-item A.0 splits the M2 over-cap files **before** building reflex on top |
 | Telemetry log GC at startup only → long-lived daemon exceeds 500 MB cap | #241 (partially landed in `615cd4f`) | Every long-running background task uses `tokio::interval` with explicit cadence; document the cadence in the work-item acceptance |
 | `fsv-*/` ephemeral run dirs leak into the worktree | #242 | Standardize on `.runs/` (gitignored) for any test that writes ad-hoc artifacts; never write into the repo root |
-| `bench_results/<sha>/` is committed per commit (8 dirs so far) | #243 | Migrate to `critcmp` / `bencher.dev` JSON tracked outside the repo; stop committing per-commit baselines (M3 work-item) |
+| `bench_results/<sha>/` was committed per commit (8 dirs removed by #260) | #243/#260 | Use local `critcmp` JSON outside the repo; stop committing per-commit baselines |
 | M2 packaged-Notepad UIA `MenuBar` discovery is silently empty under `ControlView` walker | #244 | M3 work-item A.0c switches to `RawView`; future a11y work must include a UWP-packaged-app smoke test |
 | Coords are physical (DPI-aware) pixels — undocumented; trips DPI-unaware SoT readers | #239 | M3 work-item A.0g patches tool schema descriptions + `03_action.md`; future tools must document coord space explicitly |
 | `SoftwareBackend::mouse_move` reads cursor via Enigo (DPI-unaware) in a DPI-aware host | #234 | M3 work-item A.0d routes through Win32 `GetCursorPos` in DPI-aware mode; future cross-DPI tests must assert byte-equal end position |

@@ -126,7 +126,7 @@ set_perception_mode
 
 - Production target: configured Windows 11 host (DX11-capable GPU; ViGEmBus working).
 - Dev box: WSL2 on Win11. `rocksdb`/`wasapi` build on Linux + Windows; `windows`-feature deps stay Win-only.
-- **Manual configured-host FSV is the M3 shipping gate** (issues #246/#247). GitHub Actions is the regression safety net; do not block tags on CI.
+- **Manual configured-host FSV is the M3 shipping gate** (issues #246/#247/#350). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI.
 
 ### 1.6 Things that are NOT done at M3 (deferred ≥ M4)
 
@@ -596,7 +596,7 @@ Pick inputs whose expected outputs are unambiguous; tests assert on them exactly
 ✓ Every M3 error code (declared + new) thrown ≥ 1× in a test that asserts data.code
 ✓ tools/list snapshot updated to 25 tools (15 prior + 10 M3); `additionalProperties:false` on every schema
 ✓ No mocks gate completion — real RocksDB on real disk, real WASAPI on real device, real Notepad in E2E
-✓ Local supporting CI green; manual configured-host FSV is the shipping gate (issues #246/#247)
+✓ Local supporting checks green; manual configured-host FSV is the shipping gate (issues #246/#247/#350)
 ✓ FSV evidence: every passing test stdout contains ≥ 1 `final_value=` line + ≥ 1 `after_truth=` line per scenario
 ✓ Soak (1 h) clean: no memory growth > 50 MB, no deadlocks, no held-key leaks after `release_all`
 ✓ scripts/check_docs.ps1 green

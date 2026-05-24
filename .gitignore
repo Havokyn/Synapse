@@ -33,3 +33,6 @@ tracing-*.log
 /.runs/
 /fsv-*/
 
+# Criterion/critcmp benchmark exports are regenerated and stored off-tree.
+/bench_results/
+

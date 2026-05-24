@@ -269,7 +269,7 @@ Release shippable when all true:
 
 1. M0–M5 demos pass
 2. Performance budgets in `10_performance_budget.md` met on reference machine (RTX 3060 + 8-core CPU)
-3. CI green 3 consecutive days on `main` (no flakes)
+3. Local configured-host checks and manual FSV green on the release candidate (no flakes in the exercised gates)
 4. Soak test passes 8 hours
 5. Manual test plan in `13_testing_strategy.md` §15 signed off
 6. PRD internally consistent (no broken cross-refs)

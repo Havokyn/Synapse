@@ -97,12 +97,25 @@ The legacy `fsv-<NNN>/` pattern (e.g. `fsv-218/`) at the repo root is **deprecat
 
 A small `scripts/clean-runs.ps1` (tracked under #242) prunes `.runs/` subdirs older than 30 days.
 
-## Bench result retention (#243)
+## Benchmark baselines (#243 / #260 / #350)
 
-We have a `bench_results/<commit-hash>/` directory tracked in git. Per Criterion's own FAQ this is **not recommended** — baselines are regenerable, grow unboundedly, and per-commit references go stale fast.
+Do not commit Criterion baselines or raw benchmark exports. `bench_results/` is gitignored, and benchmark state is stored off-tree:
 
-Going forward (tracked under #243):
+* Durable release/tag baselines: `%LOCALAPPDATA%\synapse\benchmarks\baselines\`
+* Per-run candidate exports and FSV notes: `.runs\benchmarks\<run-id>\`
 
-* Use [`critcmp`](https://github.com/BurntSushi/critcmp) for local A/B compare of named baselines (no commit required)
-* Or wire CI to a benchmarking tracker ([Bencher](https://bencher.dev/) / self-hosted Conbench) with JSON exports
-* If we must keep baselines in-tree, pin to release tags only (`bench_results/v1.x.y/`), not per-commit hashes
+Use local Criterion baselines plus [`critcmp`](https://github.com/BurntSushi/critcmp); per #350, do not use GitHub Actions/CI or Bencher as a shipping gate unless a later operator decision explicitly reverses this.
+
+```powershell
+cargo install critcmp
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\synapse\benchmarks\baselines" ".runs\benchmarks" | Out-Null
+cargo bench --workspace --benches -- --save-baseline main
+critcmp --export main > "$env:LOCALAPPDATA\synapse\benchmarks\baselines\main.json"
+
+cargo bench --workspace --benches -- --save-baseline candidate
+critcmp --export candidate > ".runs\benchmarks\candidate.json"
+critcmp "$env:LOCALAPPDATA\synapse\benchmarks\baselines\main.json" ".runs\benchmarks\candidate.json"
+.\scripts\check-bench-delta.ps1 -BaselineJson "$env:LOCALAPPDATA\synapse\benchmarks\baselines\main.json" -CandidateJson ".runs\benchmarks\candidate.json"
+```
+
+`scripts/check-bench-delta.ps1` is the local 20% regression gate over exported `critcmp` JSON. It fails when a tracked benchmark is missing from the candidate export or when the candidate mean is more than 20% slower than the baseline. Manual FSV still reads the export JSON and command output directly; the script is a local comparator, not a substitute for source-of-truth inspection.

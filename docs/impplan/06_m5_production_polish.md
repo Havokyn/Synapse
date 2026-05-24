@@ -224,9 +224,9 @@ STORAGE_DISK_PRESSURE_LEVEL_4
 ✓ All M0-M5 demos still pass on `main` (regression gate)
 ✓ Soak 8 h clean (13 §12)
 ✓ All perf budgets met on reference machine (10 §2 / §3 / §4 / §12)
-✓ CI green 3 consecutive days (15 §10.3)
+✓ Local configured-host checks and manual FSV green on the release candidate (15 §10.3)
 ✓ Manual test plan signed off (13 §15)
-✓ PRD docs internally consistent (doc CI green)
+✓ PRD docs internally consistent (`scripts/check_docs.ps1 -CheckAnchors` green)
 ✓ cargo deny check clean (14 §14)
 ✓ No unsafe outside synapse-capture / synapse-hid-host / firmware/pico-hid
 ✓ No unwrap() outside test code

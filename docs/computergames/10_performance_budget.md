@@ -133,9 +133,9 @@ Reference script in `scripts/profile.ps1`:
 
 Scenarios live in `tests/scenarios/`. Encouraged when investigating a perf regression.
 
-### 7.2 Continuous regression detection
+### 7.2 Regression detection
 
-Subset of scenarios runs in CI weekly. CI machine has a known GPU; any p99 metric drifting > 20% triggers a release-blocking alert. CI records baseline numbers per release tag for retrospective analysis.
+Subset of scenarios runs locally on the configured Windows host before a release candidate. Any p99 metric drifting > 20% triggers a release-blocking finding unless fixed or accepted by ADR. Exported `critcmp` JSON records baseline numbers per release tag outside git for retrospective analysis.
 
 ---
 
@@ -162,7 +162,7 @@ In hot loops we do not allocate per iteration:
 - Action emit: at most one allocation (the `Vec<INPUT>` passed to `SendInput`); amortized.
 - Detection inference: pre-allocated input/output tensors reused per frame.
 
-CI runs `cargo bench` benchmarks asserting zero allocations in hot loops via `dhat` or `tracing-allocations`.
+Local benchmark runs on the configured Windows host assert zero allocations in hot loops via `dhat` or `tracing-allocations`. Manual FSV reads the benchmark export and allocation evidence directly; GitHub Actions/CI is not the source of truth.
 
 ---
 
@@ -266,7 +266,7 @@ SERVER-SIDE latencies, measured from request parse to response send. Network and
 - `bench_detection_yolov10n_640`: 8 ms p99 (GPU dependent)
 - `bench_ocr_winrt_120x32`: 8 ms p99
 
-Benches run weekly in CI. Regression > 20% blocks next release.
+Benches run locally on the configured Windows host with Criterion named baselines and exported `critcmp` JSON. Regression > 20% blocks next release unless fixed or accepted by ADR with measurable justification.
 
 ---
 

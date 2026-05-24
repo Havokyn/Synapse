@@ -113,7 +113,7 @@ CAPTURE_TARGET_INVALID
 | 10 | `feat(perception): WinRT OCR wrapper` | `read_text(region)` ≤ 8 ms p99 small region, ≤ 30 ms full screen |
 | 11 | `feat(perception): Observation assembler + auto-mode selector` | `observe()` with default `include` returns ≤ 6 KB JSON on Notepad |
 | 12 | `feat(mcp): observe + find + read_text + set_capture_target + set_perception_mode` | tools/list shows all 5; tool schemas match `05 §3.1-3.4, §3.9-3.10` |
-| 13 | `bench: observe_warm_a11y_only ≤ 10 ms; observe_warm_hybrid ≤ 30 ms` | criterion baseline committed to `bench_results/<sha>/` |
+| 13 | `bench: observe_warm_a11y_only ≤ 10 ms; observe_warm_hybrid ≤ 30 ms` | criterion baseline exported through local `critcmp` JSON outside git |
 | 14 | `test(e2e): notepad_observe` | spawn Notepad via tests/fixtures, agent observes editor, asserts role + bbox |
 
 ---

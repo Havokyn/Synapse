@@ -10,7 +10,7 @@ Synapse is hard to test because:
 - HID output is observable only by another OS process, not the test
 - Some components (hardware HID) require physical hardware
 
-We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests scope to subsystems with OS-layer fakes. E2E tests run against real Windows in opt-in CI jobs on self-hosted runners.
+We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests scope to subsystems with OS-layer fakes. E2E tests run against the configured Windows host for manual FSV and release candidates.
 
 "Hard to test" is never an excuse for not testing.
 
@@ -24,9 +24,9 @@ We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests
 | **Integration** | 100s | Workspace-level `tests/integration/` | Yes |
 | **Property-based** | 10s of properties | `proptest` in critical crates | Yes |
 | **Snapshot** | 10s | `insta` for stable outputs | Yes |
-| **Performance regression** | dozens of benches | `criterion`-based benches | Weekly CI |
-| **End-to-end on real Windows** | ~10 scenarios | `tests/e2e/` driven by `synapse-mcp` | Nightly self-hosted |
-| **Hardware-in-the-loop** | ~5 scenarios | RP2040 attached to runner | Weekly self-hosted |
+| **Performance regression** | dozens of benches | `criterion` + `critcmp` exported JSON | Local manual gate |
+| **End-to-end on real Windows** | ~10 scenarios | `tests/e2e/` driven by `synapse-mcp` | Configured-host FSV |
+| **Hardware-in-the-loop** | ~5 scenarios | RP2040 attached to host | Hardware work-items |
 | **Profile validation** | Per profile | Auto-generated from `profiles/*.toml` | Yes |
 
 ---
@@ -169,7 +169,7 @@ fn bench_observe_warm(c: &mut Criterion) {
 }
 ```
 
-Run weekly in CI on a known-hardware self-hosted runner. Results stored in `bench_results/<commit_sha>/`. PR perf-CI compares head vs main; flags >20% regression on a tracked benchmark.
+Run on the configured Windows host with Criterion named baselines and `critcmp`. Durable baseline exports live under `%LOCALAPPDATA%\synapse\benchmarks\baselines\`; candidate exports live under `.runs\benchmarks\`. `scripts/check-bench-delta.ps1` compares exported `critcmp` JSON and fails if a candidate is missing a tracked benchmark or is more than 20% slower. Per #350, do not commit `bench_results/<sha>/` directories or use GitHub Actions/CI as the benchmark source of truth.
 
 Tracked benches:
 
@@ -322,9 +322,9 @@ Builds a regression corpus from real bugs.
 
 ---
 
-## 14. CI matrix
+## 14. Automated-check reference
 
-GitHub Actions (or equivalent):
+Manual configured-host FSV is the shipping gate. Do not dispatch or wait on GitHub Actions/CI unless the operator explicitly reverses the no-CI decision. If automation is re-enabled later, the reference checks are:
 
 | Job | OS | Trigger |
 |---|---|---|
@@ -337,7 +337,7 @@ GitHub Actions (or equivalent):
 | `cargo audit` | ubuntu | every PR + daily cron |
 | `insta review --check` | ubuntu | every PR |
 | `e2e-real-windows` | self-hosted windows | nightly |
-| `bench-regression` | self-hosted windows | weekly |
+| `bench-regression` | configured Windows host | local `critcmp` export compare |
 | `hardware-in-loop` | self-hosted with Pico | weekly |
 | `soak` | self-hosted windows | weekly |
 | `fuzz` | ubuntu | nightly, 10min per target |
