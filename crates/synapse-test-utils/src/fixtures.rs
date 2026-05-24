@@ -222,13 +222,33 @@ mod platform {
             bail!("spawned notepad.exe without a process id");
         }
 
+        // On Win11 22H2+ packaged Notepad with session restore, a fresh `notepad.exe`
+        // launch may reopen the last-used document tab (e.g. `m2-demo.txt - Notepad`)
+        // and never produce an `Untitled - Notepad` window. If the initial wait times
+        // out, send Ctrl+N once via WScript.Shell to force an Untitled tab, then retry.
         let context = match wait_for_new_window_title_regex(pid, &title_regex, &excluded_hwnds) {
             Ok(context) => context,
-            Err(err) => {
-                let _ = terminate_process_tree(pid, true);
-                let _ = wait_for_child_exit(&mut child, FORCE_CLOSE_TIMEOUT);
-                return Err(err).context("Notepad did not reach the expected startup title");
-            }
+            Err(primary_err) => match send_ctrl_n_for_notepad_untitled_tab(&existing_notepad_pids) {
+                Ok(()) => match wait_for_new_window_title_regex(pid, &title_regex, &excluded_hwnds) {
+                    Ok(context) => context,
+                    Err(retry_err) => {
+                        let _ = terminate_process_tree(pid, true);
+                        let _ = wait_for_child_exit(&mut child, FORCE_CLOSE_TIMEOUT);
+                        return Err(retry_err).context(
+                            "Notepad did not reach the expected startup title even after \
+                             Ctrl+N fallback (UWP session restore likely intercepted launch)",
+                        );
+                    }
+                },
+                Err(ctrl_n_err) => {
+                    let _ = terminate_process_tree(pid, true);
+                    let _ = wait_for_child_exit(&mut child, FORCE_CLOSE_TIMEOUT);
+                    return Err(primary_err).context(format!(
+                        "Notepad did not reach the expected startup title; \
+                         Ctrl+N fallback also failed: {ctrl_n_err}"
+                    ));
+                }
+            },
         };
         let pid_preexisting = existing_notepad_pids.contains(&context.pid);
 
@@ -298,12 +318,57 @@ mod platform {
             .collect()
     }
 
+    /// Activate any newly-spawned Notepad PID and send Ctrl+N via WScript.Shell so
+    /// the packaged Win11 Notepad opens an `Untitled - Notepad` tab on top of any
+    /// auto-restored session tabs. Returns Ok even if no new PID is found yet — the
+    /// retry loop in `launch_notepad` will surface the timeout from the second wait.
+    fn send_ctrl_n_for_notepad_untitled_tab(
+        existing_pids: &HashSet<u32>,
+    ) -> anyhow::Result<()> {
+        let current = notepad_process_ids().context(
+            "snapshot notepad pids before Ctrl+N fallback",
+        )?;
+        let candidate = current
+            .into_iter()
+            .find(|pid| !existing_pids.contains(pid));
+        let Some(pid) = candidate else {
+            return Ok(());
+        };
+        let command_text = format!(
+            "$ErrorActionPreference='Stop'; \
+             Add-Type -AssemblyName Microsoft.VisualBasic; \
+             [Microsoft.VisualBasic.Interaction]::AppActivate([int]{pid}) | Out-Null; \
+             Start-Sleep -Milliseconds 350; \
+             $shell = New-Object -ComObject WScript.Shell; \
+             $shell.SendKeys('^n'); \
+             exit 0"
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &command_text])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("invoke WScript.Shell SendKeys ^n via PowerShell")?;
+        if !status.success() {
+            bail!(
+                "WScript.Shell SendKeys ^n exited with status {} (pid={pid})",
+                status
+            );
+        }
+        Ok(())
+    }
+
     fn notepad_process_ids() -> anyhow::Result<HashSet<u32>> {
+        // PowerShell 5.1 (powershell.exe) sets $LASTEXITCODE=1 when
+        // `Get-Process notepad -EA SilentlyContinue` finds nothing, even though
+        // SilentlyContinue suppresses the error text. Explicit `exit 0` makes
+        // an empty-snapshot a valid success.
         let output = Command::new("powershell.exe")
             .args([
                 "-NoProfile",
                 "-Command",
-                "Get-Process notepad -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Id }",
+                "Get-Process notepad -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Id }; exit 0",
             ])
             .stdin(Stdio::null())
             .output()
