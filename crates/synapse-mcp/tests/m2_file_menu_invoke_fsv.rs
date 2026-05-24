@@ -9,7 +9,9 @@
 //! from a child process. Any visible Notepad window has the same `File` menu;
 //! we use whichever one we can find or spawn.
 
+#[cfg(windows)]
 use anyhow::Context;
+#[cfg(windows)]
 use serde_json::{Value, json};
 #[cfg(windows)]
 use std::{
@@ -337,6 +339,7 @@ fn summarize_nodes(nodes: &[AccessibleNode]) -> String {
         .join(";")
 }
 
+#[cfg(windows)]
 #[derive(serde::Deserialize)]
 struct ClickWireResponse {
     ok: bool,
@@ -345,6 +348,7 @@ struct ClickWireResponse {
     elapsed_ms: u32,
 }
 
+#[cfg(windows)]
 fn structured<T: serde::de::DeserializeOwned>(resp: &Value) -> anyhow::Result<T> {
     let structured = resp
         .get("structuredContent")
