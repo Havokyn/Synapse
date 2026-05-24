@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+chrono.workspace = true
 crossbeam.workspace = true
 metrics.workspace = true
 serde.workspace = true
@@ -24,8 +25,24 @@ uuid.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
+criterion.workspace = true
 tempfile.workspace = true
 
-[lints]
-workspace = true
+[[bench]]
+name = "reflex_tick_jitter_idle"
+harness = false
+
+[[bench]]
+name = "reflex_tick_jitter_under_load"
+harness = false
+
+[lints.rust]
+unsafe_code = "allow"
+unused = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = "deny"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"

@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod bus;
 pub mod error;
+pub mod scheduler;
 
 use std::{path::Path, sync::Arc};
 
@@ -13,6 +14,10 @@ pub use bus::{
     PublishReport, SUBSCRIBER_QUEUE_CAPACITY, SubscriberHandle,
 };
 pub use error::{ReflexError, ReflexResult};
+pub use scheduler::{
+    MAX_SCHEDULED_REFLEXES, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex,
+    SchedulerConfig, SchedulerHandle, SchedulerTrigger, TickSample, p99_jitter_us,
+};
 
 /// Runtime handle for the M3 reflex subsystem.
 #[derive(Debug)]

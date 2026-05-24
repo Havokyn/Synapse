@@ -3504,6 +3504,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "chrono",
+ "criterion",
  "crossbeam",
  "metrics",
  "serde",
