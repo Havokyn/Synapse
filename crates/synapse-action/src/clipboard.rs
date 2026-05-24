@@ -68,7 +68,10 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use std::{ptr, slice};
+    use std::{
+        ptr, slice, thread,
+        time::{Duration, Instant},
+    };
 
     use windows::Win32::{
         Foundation::{GlobalFree, HANDLE, HGLOBAL},
@@ -85,6 +88,8 @@ mod platform {
 
     const CF_TEXT: u32 = 1;
     const CF_UNICODETEXT: u32 = 13;
+    const OPEN_CLIPBOARD_RETRY_TIMEOUT: Duration = Duration::from_millis(250);
+    const OPEN_CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(10);
 
     pub fn read_text(format: ClipboardFormat) -> ActionResult<String> {
         let _clipboard = ClipboardGuard::open("read")?;
@@ -137,13 +142,32 @@ mod platform {
 
     impl ClipboardGuard {
         fn open(context: &'static str) -> ActionResult<Self> {
-            unsafe {
-                // SAFETY: Passing None makes the current task the clipboard owner for
-                // the duration guarded by Drop, which closes the clipboard exactly once.
-                OpenClipboard(None)
+            let started = Instant::now();
+            let mut attempts = 0_u32;
+            loop {
+                attempts += 1;
+                let result = unsafe {
+                    // SAFETY: Passing None preserves the existing M2 clipboard-owner
+                    // behavior; the guard closes the clipboard exactly once on success.
+                    OpenClipboard(None)
+                };
+                match result {
+                    Ok(()) => return Ok(Self),
+                    Err(err) if started.elapsed() < OPEN_CLIPBOARD_RETRY_TIMEOUT => {
+                        tracing::debug!(
+                            code = "ACTION_CLIPBOARD_OPEN_RETRY",
+                            context,
+                            attempts,
+                            error = %err,
+                            "source_of_truth=windows_clipboard open_retry"
+                        );
+                        thread::sleep(OPEN_CLIPBOARD_RETRY_DELAY);
+                    }
+                    Err(err) => {
+                        return Err(windows_open_error(context, attempts, started, &err));
+                    }
+                }
             }
-            .map_err(|err| windows_error(context, &err))?;
-            Ok(Self)
         }
     }
 
@@ -292,6 +316,20 @@ mod platform {
     fn windows_error(context: &'static str, err: &windows::core::Error) -> ActionError {
         ActionError::BackendUnavailable {
             detail: format!("{context} failed for Windows clipboard: {err}"),
+        }
+    }
+
+    fn windows_open_error(
+        context: &'static str,
+        attempts: u32,
+        started: Instant,
+        err: &windows::core::Error,
+    ) -> ActionError {
+        ActionError::BackendUnavailable {
+            detail: format!(
+                "{context} failed for Windows clipboard after {attempts} open attempts over {} ms: {err}",
+                started.elapsed().as_millis()
+            ),
         }
     }
 }
