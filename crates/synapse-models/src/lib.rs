@@ -379,10 +379,10 @@ impl SessionFactory for OrtSessionFactory {
                         ))),
                     });
                 }
-                Err(ModelError::LoadFailed { .. }) if *provider == ModelBackend::Cpu => {
+                Err(ModelError::LoadFailed { detail, .. }) if *provider == ModelBackend::Cpu => {
                     return Err(ModelError::LoadFailed {
                         path: descriptor.path.clone(),
-                        detail: "CPU provider rejected verified model".to_owned(),
+                        detail: format!("CPU provider rejected verified model: {detail}"),
                     });
                 }
                 Err(err) => backend_failures.push((*provider, err.to_string())),
@@ -407,6 +407,29 @@ fn create_ort_session(
         path: descriptor.path.clone(),
         detail: err.to_string(),
     })?;
+    if descriptor.id == "whisper_tiny_int8" {
+        if let Some(library) = local_ort_extensions_library() {
+            builder =
+                builder
+                    .with_operator_library(&library)
+                    .map_err(|err| ModelError::LoadFailed {
+                        path: descriptor.path.clone(),
+                        detail: format!(
+                            "failed to register ONNX Runtime extensions library {}: {err}",
+                            library.display()
+                        ),
+                    })?;
+        } else {
+            builder = builder
+                .with_extensions()
+                .map_err(|err| ModelError::LoadFailed {
+                    path: descriptor.path.clone(),
+                    detail: format!(
+                        "ONNX Runtime extensions unavailable and no local extension library found: {err}"
+                    ),
+                })?;
+        }
+    }
     let execution_provider = match provider {
         ModelBackend::Cuda => ep::CUDA::default().build().error_on_failure(),
         ModelBackend::DirectMl => ep::DirectML::default().build().error_on_failure(),
@@ -485,4 +508,28 @@ fn hex_lower(bytes: &[u8]) -> String {
         output.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     output
+}
+
+#[cfg(feature = "ort")]
+fn local_ort_extensions_library() -> Option<PathBuf> {
+    let dir = default_model_dir()
+        .join("ort-extensions")
+        .join("wheel")
+        .join("onnxruntime_extensions");
+    let mut candidates = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("_extensions_pydll"))
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pyd"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next()
 }

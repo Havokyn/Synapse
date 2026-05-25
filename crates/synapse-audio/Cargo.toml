@@ -12,11 +12,14 @@ metrics.workspace = true
 ort.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 synapse-core = { version = "0.1.0", path = "../synapse-core" }
+synapse-models = { version = "0.1.0", path = "../synapse-models", features = ["directml"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 wasapi.workspace = true

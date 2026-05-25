@@ -2,9 +2,11 @@ pub mod detectors;
 pub mod error;
 pub mod loopback;
 pub mod ring;
+pub mod stt;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use synapse_core::Event;
@@ -12,6 +14,7 @@ use synapse_core::Event;
 pub use error::{AudioError, AudioResult};
 pub use loopback::LoopbackStatus;
 pub use ring::{AudioFormat, AudioRing, AudioWindow};
+pub use stt::{Transcription, WhisperTinyStt};
 
 pub const DEFAULT_RING_SECONDS: u32 = 5;
 pub const MAX_RING_SECONDS: u32 = 5;
@@ -47,6 +50,7 @@ pub struct AudioRuntime {
     ring: Arc<AudioRing>,
     detector_state: detectors::SharedDetectorState,
     loopback: Option<loopback::LoopbackHandle>,
+    stt: Mutex<WhisperTinyStt>,
 }
 
 impl AudioRuntime {
@@ -86,11 +90,13 @@ impl AudioRuntime {
         } else {
             None
         };
+        let stt = Mutex::new(WhisperTinyStt::new(config.stt_model_path.clone()));
         Ok(Self {
             config,
             ring,
             detector_state,
             loopback,
+            stt,
         })
     }
 
@@ -129,6 +135,59 @@ impl AudioRuntime {
     #[tracing::instrument(skip_all, fields(component = "audio_runtime", seconds))]
     pub fn tail_seconds(&self, seconds: f32) -> AudioResult<AudioWindow> {
         self.ring.tail_seconds(seconds)
+    }
+
+    /// Transcribes the most recent audio samples in the ring.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AUDIO_STT_MODEL_NOT_LOADED` when the pinned Whisper model is
+    /// absent, `MODEL_HASH_MISMATCH` when the local model bytes do not match
+    /// the pinned digest, or a structured model load/inference error when ORT
+    /// rejects the model.
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime", seconds))]
+    pub fn transcribe_tail(
+        &self,
+        seconds: f32,
+        language: impl AsRef<str>,
+    ) -> AudioResult<Transcription> {
+        let window = self.tail_seconds(seconds)?;
+        self.stt
+            .lock()
+            .map_err(|_| AudioError::ModelLoadFailed {
+                path: self
+                    .config
+                    .stt_model_path
+                    .clone()
+                    .unwrap_or_else(stt::default_model_path),
+                detail: "STT runtime lock was poisoned".to_owned(),
+            })?
+            .transcribe_window(&window, language)
+    }
+
+    /// Transcribes an audio fixture or captured clip file directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same structured errors as [`Self::transcribe_tail`], plus a
+    /// read error if the supplied audio path cannot be opened.
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
+    pub fn transcribe_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        language: impl AsRef<str>,
+    ) -> AudioResult<Transcription> {
+        self.stt
+            .lock()
+            .map_err(|_| AudioError::ModelLoadFailed {
+                path: self
+                    .config
+                    .stt_model_path
+                    .clone()
+                    .unwrap_or_else(stt::default_model_path),
+                detail: "STT runtime lock was poisoned".to_owned(),
+            })?
+            .transcribe_file(path, language)
     }
 
     #[must_use]
