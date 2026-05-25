@@ -36,6 +36,8 @@ struct Cli {
     mode: Mode,
     #[arg(long, default_value = "127.0.0.1:7700", env = "SYNAPSE_BIND")]
     bind: String,
+    #[arg(long, env = "SYNAPSE_ALLOW_NON_LOOPBACK")]
+    allow_non_loopback: bool,
     #[arg(long, env = "SYNAPSE_DB")]
     db: Option<PathBuf>,
     #[arg(long, env = "SYNAPSE_PROFILE_DIR")]
@@ -72,7 +74,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     match cli.mode {
         Mode::Stdio => run_stdio(telemetry_guard).await,
         Mode::Http => {
-            let code = http::serve(&cli.bind).await?;
+            let code = http::serve(&cli.bind, cli.allow_non_loopback).await?;
             drop(telemetry_guard);
             Ok(code)
         }

@@ -40,6 +40,53 @@ async fn http_mode_serves_health_until_shutdown() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn http_mode_refuses_non_loopback_without_flag() -> anyhow::Result<()> {
+    let dir = TempDir::new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
+        .args(["--mode", "http", "--bind", "0.0.0.0:0"])
+        .env("SYNAPSE_LOG_DIR", dir.path())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .await?;
+
+    assert_eq!(output.status.code(), Some(2));
+    let logs = read_logs(dir.path())?;
+    assert!(logs.contains("HTTP_BIND_NON_LOOPBACK_REFUSED"), "{logs}");
+    assert!(logs.contains("0.0.0.0:0"), "{logs}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_mode_allows_non_loopback_with_explicit_flag() -> anyhow::Result<()> {
+    let dir = TempDir::new()?;
+    let port = free_loopback_port()?;
+    let bind = format!("0.0.0.0:{port}");
+    let connect = format!("127.0.0.1:{port}");
+    let token = "cli-mode-non-loopback-token";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
+        .args(["--mode", "http", "--bind", &bind, "--allow-non-loopback"])
+        .env("SYNAPSE_LOG_DIR", dir.path())
+        .env("SYNAPSE_BEARER_TOKEN", token)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    let response = wait_for_health_with_origin(&connect, Some(token), "http://127.0.0.1").await;
+    stop_child(&mut child).await?;
+
+    let response = response?;
+    let logs = read_logs(dir.path())?;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        logs.contains("MCP_HTTP_NON_LOOPBACK_BIND_ALLOWED"),
+        "{logs}"
+    );
+    assert!(logs.contains(&bind), "{logs}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn stdio_mode_reaches_transport_path_on_closed_stdin() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
@@ -55,13 +102,7 @@ async fn stdio_mode_reaches_transport_path_on_closed_stdin() -> anyhow::Result<(
         .context("timed out waiting for stdio closed-stdin exit")??;
     assert!(status.success());
 
-    let mut logs = String::new();
-    for entry in std::fs::read_dir(dir.path())? {
-        let entry = entry?;
-        if entry.metadata()?.is_file() {
-            logs.push_str(&std::fs::read_to_string(entry.path())?);
-        }
-    }
+    let logs = read_logs(dir.path())?;
     assert!(logs.contains("MCP_STDIO_STARTED"));
     Ok(())
 }
@@ -88,10 +129,33 @@ fn free_loopback_bind() -> anyhow::Result<String> {
     Ok(addr.to_string())
 }
 
+fn free_loopback_port() -> anyhow::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
 async fn wait_for_health(bind: &str, token: Option<&str>) -> anyhow::Result<String> {
+    wait_for_health_inner(bind, token, None).await
+}
+
+async fn wait_for_health_with_origin(
+    bind: &str,
+    token: Option<&str>,
+    origin: &str,
+) -> anyhow::Result<String> {
+    wait_for_health_inner(bind, token, Some(origin)).await
+}
+
+async fn wait_for_health_inner(
+    bind: &str,
+    token: Option<&str>,
+    origin: Option<&str>,
+) -> anyhow::Result<String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match read_health_once(bind, token).await {
+        match read_health_once_inner(bind, token, origin).await {
             Ok(response) => return Ok(response),
             Err(error) if tokio::time::Instant::now() < deadline => {
                 let _last_error = error;
@@ -103,12 +167,21 @@ async fn wait_for_health(bind: &str, token: Option<&str>) -> anyhow::Result<Stri
 }
 
 async fn read_health_once(bind: &str, token: Option<&str>) -> anyhow::Result<String> {
+    read_health_once_inner(bind, token, None).await
+}
+
+async fn read_health_once_inner(
+    bind: &str,
+    token: Option<&str>,
+    origin: Option<&str>,
+) -> anyhow::Result<String> {
     let mut stream = TcpStream::connect(bind).await?;
     let auth = token.map_or(String::new(), |token| {
         format!("Authorization: Bearer {token}\r\n")
     });
+    let origin = origin.map_or(String::new(), |origin| format!("Origin: {origin}\r\n"));
     let request =
-        format!("GET /health HTTP/1.1\r\nHost: {bind}\r\n{auth}Connection: close\r\n\r\n");
+        format!("GET /health HTTP/1.1\r\nHost: {bind}\r\n{auth}{origin}Connection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
@@ -121,4 +194,15 @@ async fn stop_child(child: &mut Child) -> anyhow::Result<()> {
         .await
         .context("timed out waiting for http-mode child shutdown")??;
     Ok(())
+}
+
+fn read_logs(path: &std::path::Path) -> anyhow::Result<String> {
+    let mut logs = String::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.metadata()?.is_file() {
+            logs.push_str(&std::fs::read_to_string(entry.path())?);
+        }
+    }
+    Ok(logs)
 }

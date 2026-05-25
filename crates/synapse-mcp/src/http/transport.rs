@@ -22,11 +22,26 @@ struct HttpState {
     health_service: Arc<SynapseService>,
 }
 
-pub(super) async fn serve(bind: &str) -> anyhow::Result<ExitCode> {
+pub(super) async fn serve(bind: &str, allow_non_loopback: bool) -> anyhow::Result<ExitCode> {
     synapse_action::install_panic_hook();
     let addr = bind
         .parse::<SocketAddr>()
         .with_context(|| format!("parse HTTP bind address {bind}"))?;
+    if !addr.ip().is_loopback() {
+        if !allow_non_loopback {
+            tracing::error!(
+                code = synapse_core::error_codes::HTTP_BIND_NON_LOOPBACK_REFUSED,
+                bind = %addr,
+                "refusing non-loopback HTTP bind without --allow-non-loopback"
+            );
+            return Ok(ExitCode::from(2));
+        }
+        tracing::warn!(
+            code = "MCP_HTTP_NON_LOOPBACK_BIND_ALLOWED",
+            bind = %addr,
+            "non-loopback HTTP bind allowed by explicit operator flag"
+        );
+    }
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind HTTP MCP transport to {addr}"))?;
