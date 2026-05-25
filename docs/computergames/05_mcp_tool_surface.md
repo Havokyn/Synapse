@@ -292,6 +292,8 @@ Returns:
 ### 3.8 `subscribe`
 
 Opens a push stream (SSE) of filtered events. Returns immediately with `subscription_id`; events arrive as MCP notifications.
+Per ADR-0007, Synapse emits one notification per event and does not batch at
+the EventBus or SSE layer.
 
 ```json
 {
@@ -313,7 +315,8 @@ Returns:
 {"subscription_id": "...", "snapshot_observation_seq": 12345}
 ```
 
-Push events arrive as JSON-RPC notifications with method `synapse/event` and params containing the `Event` value.
+Push events arrive as JSON-RPC notifications with method `synapse/event` and
+params containing one `Event` value.
 
 To cancel: `mcp/cancelled` JSON-RPC notification with original request id. Also exposes `subscribe_cancel(subscription_id)` for explicit teardown.
 
@@ -934,7 +937,7 @@ Closing the session (or process exit) cancels all subscriptions and reflexes, re
 
 ## 7. Push event format
 
-On subscription fire, server emits:
+On subscription fire, server emits one notification/SSE frame per event:
 
 ```json
 {
@@ -942,6 +945,8 @@ On subscription fire, server emits:
   "method": "synapse/event",
   "params": {
     "subscription_id": "...",
+    "stream_seq": 1,
+    "lossy": false,
     "event": {
       "seq": 123456,
       "at": "2026-05-22T15:00:00Z",
@@ -954,8 +959,14 @@ On subscription fire, server emits:
 ```
 
 Agent's MCP client must implement notification handling (most do natively).
+`stream_seq` is the per-subscription SSE resume sequence. `event.seq` remains
+the domain event sequence.
 
-For resumability over HTTP, each SSE event carries `id: <seq>`. On reconnect, client sends `Last-Event-ID: <seq>` and server replays buffered events from there. Buffer depth: 4096 events per subscription.
+For resumability over HTTP, each SSE event carries `id: <stream_seq>`. On
+reconnect, client sends `Last-Event-ID: <stream_seq>` and server replays
+buffered events from there. Buffer depth: 4096 events per subscription. If a
+gap or overflow is detected, Synapse sends a `subscription_started` frame with
+`lossy: true` before continuing event delivery.
 
 ---
 

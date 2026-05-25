@@ -218,6 +218,8 @@ impl SseState {
 
     fn publish_events(&self, events: Vec<Event>) -> PublishReport {
         let mut total = PublishReport::default();
+        // ADR-0007: the manual HTTP route accepts a JSON array for operator
+        // convenience, but every item is still published as an individual event.
         for event in events {
             let report = self.inner.event_bus.publish(event);
             total.matched = total.matched.saturating_add(report.matched);

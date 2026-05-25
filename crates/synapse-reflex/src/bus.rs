@@ -169,7 +169,10 @@ impl EventBus {
         })
     }
 
-    /// Publishes an event to every matching subscriber without blocking.
+    /// Publishes one event to every matching subscriber without blocking.
+    ///
+    /// ADR-0007 keeps batching out of the bus so publishers do not wait to
+    /// accumulate events. Downstream subscribers may batch after delivery.
     #[must_use]
     #[tracing::instrument(skip_all, fields(event_kind = %event.kind, event_seq = event.seq))]
     pub fn publish(&self, event: Event) -> PublishReport {

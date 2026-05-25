@@ -94,7 +94,13 @@ pub struct Subscriber {
 
 - Publishers: perception (capture/a11y/audio), action emitter (completion notifications), reflex scheduler (own state changes for observability).
 - Subscribers: reflex scheduler (filtered by reflex bindings), MCP push-event subscribers (per-agent filter), storage writer (writes every event to `CF_EVENTS`).
-- Backpressure: each subscriber has a bounded channel. Slow subscriber backs up → bus drops the event for that subscriber, increments `events_dropped_for_subscriber{id}` metric. Never blocks the publisher.
+- Delivery discipline: per ADR-0007, the bus publishes one event at a time and
+  never waits to form a batch. Subscribers/clients may batch downstream after
+  receiving individual events.
+- Backpressure: each subscriber has a bounded channel. Slow subscriber backs up
+  → bus drops the oldest queued event for that subscriber, enqueues the newest
+  event, marks the subscription lossy, and increments
+  `events_dropped_for_subscriber{id}`. Never blocks the publisher.
 
 Bus capacity per subscriber: 4096 events. At typical 100–1000 events/s perception rate, this is many seconds of buffer.
 

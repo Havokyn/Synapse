@@ -346,15 +346,16 @@ the next tick, and `REFLEX_RECURSION_LIMIT` is emitted/audited.
 
 ---
 
-## OQ-029 — Notifications channel discipline
+## OQ-029 — Notifications channel discipline — DECIDED 2026-05-25
 
-**Q.** Pushing 100 events/sec to subscribing client: one notification per event, or batch?
+→ decided in ADR-0007.
 
-**Trade-off.** Per-event: lower latency, chatty. Batched: fewer round trips, latency jitter.
-
-**Default.** Per-event; client batches if needed. Synapse never delays delivery.
-
-**Target.** M3 perf testing. Batch in 10 ms windows if throughput bottleneck.
+**Decision.** Synapse delivers notifications per event. The EventBus never
+waits to form a batch, and HTTP SSE emits one `synapse/event` frame per
+buffered event. Subscribers/clients may batch downstream after receipt, but
+that batching must not delay internal producer-to-subscriber delivery. Slow
+subscribers use bounded queues/rings with drop-oldest backpressure and explicit
+`lossy` state.
 
 ---
 
