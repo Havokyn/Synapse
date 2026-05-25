@@ -18,7 +18,9 @@ use axum::{
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use synapse_core::{Event, EventFilter};
-use synapse_reflex::{EventBus, PublishReport, SUBSCRIBER_QUEUE_CAPACITY, SubscriberHandle};
+use synapse_reflex::{
+    EventBus, EventBusError, PublishReport, SUBSCRIBER_QUEUE_CAPACITY, SubscriberHandle,
+};
 
 const LAST_EVENT_ID: &str = "Last-Event-ID";
 const SUBSCRIPTION_ID_HEADER: &str = "Synapse-Subscription-Id";
@@ -26,7 +28,7 @@ const MANUAL_ENV: &str = "SYNAPSE_HTTP_SSE_MANUAL";
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug)]
-pub(super) struct SseState {
+pub struct SseState {
     inner: Arc<SseStateInner>,
 }
 
@@ -108,8 +110,15 @@ enum SseOpenError {
     SubscribeUnavailable(&'static str),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SseSubscribeError {
+    CapReached { limit: usize },
+    FilterInvalid { detail: String },
+    StateUnavailable,
+}
+
 impl SseState {
-    pub(super) fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self {
             inner: Arc::new(SseStateInner {
                 event_bus: EventBus::default(),
@@ -130,6 +139,16 @@ impl SseState {
         };
         let frames = Self::frames_after(&subscription, last_event_id);
         Self::sse_response(subscription, frames, last_event_id)
+    }
+
+    pub(crate) fn subscribe(
+        &self,
+        filter: EventFilter,
+        kinds: Vec<String>,
+        snapshot_first: bool,
+    ) -> Result<String, SseSubscribeError> {
+        self.create_subscription_with(filter, kinds, snapshot_first)
+            .map(|subscription| subscription.id().to_owned())
     }
 
     pub(super) fn publish(&self, request: PublishRequest) -> Response {
@@ -240,16 +259,21 @@ impl SseState {
     }
 
     fn create_subscription(&self) -> Result<Arc<Subscription>, SseOpenError> {
-        let handle = match self
+        self.create_subscription_with(EventFilter::All, Vec::new(), false)
+            .map_err(|error| SseOpenError::SubscribeUnavailable(error.code()))
+    }
+
+    fn create_subscription_with(
+        &self,
+        filter: EventFilter,
+        kinds: Vec<String>,
+        snapshot_first: bool,
+    ) -> Result<Arc<Subscription>, SseSubscribeError> {
+        let handle = self
             .inner
             .event_bus
-            .subscribe(EventFilter::All, Vec::new(), false)
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                return Err(SseOpenError::SubscribeUnavailable(error.code()));
-            }
-        };
+            .subscribe(filter, kinds, snapshot_first)
+            .map_err(SseSubscribeError::from)?;
         let id = handle.id().to_owned();
         let subscription = Arc::new(Subscription {
             handle,
@@ -257,7 +281,12 @@ impl SseState {
             dropped_total: AtomicU64::new(0),
             lossy_pending: AtomicBool::new(false),
         });
-        if let Ok(mut subscriptions) = self.inner.subscriptions.lock() {
+        {
+            let mut subscriptions = self
+                .inner
+                .subscriptions
+                .lock()
+                .map_err(|_| SseSubscribeError::StateUnavailable)?;
             subscriptions.insert(id, Arc::clone(&subscription));
         }
         Ok(subscription)
@@ -400,6 +429,35 @@ impl SseOpenError {
             Self::SubscribeUnavailable(code) => {
                 (StatusCode::SERVICE_UNAVAILABLE, code).into_response()
             }
+        }
+    }
+}
+
+impl SseSubscribeError {
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::CapReached { .. } => synapse_core::error_codes::SUBSCRIPTION_CAP_REACHED,
+            Self::FilterInvalid { .. } => synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            Self::StateUnavailable => synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::CapReached { limit } => {
+                format!("subscription cap reached: limit {limit}")
+            }
+            Self::FilterInvalid { detail } => format!("event filter invalid: {detail}"),
+            Self::StateUnavailable => "subscription state lock poisoned".to_owned(),
+        }
+    }
+}
+
+impl From<EventBusError> for SseSubscribeError {
+    fn from(value: EventBusError) -> Self {
+        match value {
+            EventBusError::SubscriptionCapReached { limit } => Self::CapReached { limit },
+            EventBusError::FilterInvalid { detail } => Self::FilterInvalid { detail },
         }
     }
 }

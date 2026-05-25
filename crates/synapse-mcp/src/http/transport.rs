@@ -59,10 +59,12 @@ pub(super) async fn serve(bind: &str, allow_non_loopback: bool) -> anyhow::Resul
         .context("read HTTP listener address")?;
     let shutdown_cancel = CancellationToken::new();
     let connection_closed_cancel = CancellationToken::new();
+    let sse_state = SseState::from_env();
     let app = router(
         shutdown_cancel.clone(),
         connection_closed_cancel.clone(),
         local_addr,
+        sse_state,
     )
     .context("build HTTP MCP router")?;
 
@@ -95,6 +97,7 @@ fn router(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
     bind_addr: SocketAddr,
+    sse_state: SseState,
 ) -> anyhow::Result<Router> {
     let auth = Arc::new(HttpAuth::load(bind_addr).context("load HTTP bearer token")?);
     tracing::info!(
@@ -103,14 +106,19 @@ fn router(
         "HTTP bearer token configured"
     );
     let health_service = Arc::new(
-        http_service(shutdown_cancel.clone(), connection_closed_cancel.clone())
-            .context("initialize HTTP health service state")?,
+        http_service(
+            shutdown_cancel.clone(),
+            connection_closed_cancel.clone(),
+            sse_state.clone(),
+        )
+        .context("initialize HTTP health service state")?,
     );
-    let mcp_service = streamable_service(shutdown_cancel, connection_closed_cancel)
-        .context("initialize HTTP MCP session state")?;
+    let mcp_service =
+        streamable_service(shutdown_cancel, connection_closed_cancel, sse_state.clone())
+            .context("initialize HTTP MCP session state")?;
     let state = HttpState {
         health_service,
-        sse_state: SseState::from_env(),
+        sse_state,
     };
     Ok(Router::new()
         .route("/health", get(health))
@@ -128,6 +136,7 @@ fn router(
 fn streamable_service(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
+    sse_state: SseState,
 ) -> anyhow::Result<McpHttpService> {
     let config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown_cancel.child_token());
@@ -135,7 +144,13 @@ fn streamable_service(
     session_manager.session_config =
         session::load_session_config().context("load HTTP session config")?;
     Ok(StreamableHttpService::new(
-        move || http_service(shutdown_cancel.clone(), connection_closed_cancel.clone()),
+        move || {
+            http_service(
+                shutdown_cancel.clone(),
+                connection_closed_cancel.clone(),
+                sse_state.clone(),
+            )
+        },
         Arc::new(session_manager),
         config,
     ))
@@ -144,9 +159,15 @@ fn streamable_service(
 fn http_service(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
+    sse_state: SseState,
 ) -> io::Result<SynapseService> {
-    SynapseService::try_with_m2_shutdown_reason(shutdown_cancel, "http", connection_closed_cancel)
-        .map_err(|error| io::Error::other(format!("{error:#}")))
+    SynapseService::try_with_m2_shutdown_reason_and_sse_state(
+        shutdown_cancel,
+        "http",
+        connection_closed_cancel,
+        sse_state,
+    )
+    .map_err(|error| io::Error::other(format!("{error:#}")))
 }
 
 async fn health(State(state): State<HttpState>) -> Json<Health> {

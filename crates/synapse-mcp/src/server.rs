@@ -19,6 +19,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    http::sse::SseState,
     m1::{
         FindParams, FindResponse, M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams,
         SetCaptureTargetResponse, SetPerceptionModeParams, SetPerceptionModeResponse,
@@ -42,6 +43,8 @@ use crate::{
             activate_profile, list_profiles,
         },
         shared_m3_state_from_env, shared_m3_state_from_env_with_shutdown_reason,
+        shared_m3_state_from_env_with_shutdown_reason_and_sse_state,
+        subscribe::{SubscribeParams, SubscribeResponse, subscribe_to_events},
     },
 };
 
@@ -97,6 +100,30 @@ impl SynapseService {
                 shutdown_cancel,
                 shutdown_reason,
                 Some(connection_closed_cancel),
+            )?,
+        })
+    }
+
+    pub fn try_with_m2_shutdown_reason_and_sse_state(
+        shutdown_cancel: CancellationToken,
+        shutdown_reason: &'static str,
+        connection_closed_cancel: CancellationToken,
+        sse_state: SseState,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            started_at: Instant::now(),
+            tool_router: Self::tool_router(),
+            m1_state: SharedM1State::default(),
+            m2_state: shared_m2_state_from_env_with_shutdown_reason(
+                shutdown_cancel.clone(),
+                shutdown_reason,
+                Some(connection_closed_cancel.clone()),
+            ),
+            m3_state: shared_m3_state_from_env_with_shutdown_reason_and_sse_state(
+                shutdown_cancel,
+                shutdown_reason,
+                Some(connection_closed_cancel),
+                sse_state,
             )?,
         })
     }
@@ -244,6 +271,18 @@ impl SynapseService {
             })?
             .ensure_profile_runtime()
             .map_err(|error| mcp_error(error.code(), error.to_string()))
+    }
+
+    fn sse_state(&self) -> Result<SseState, ErrorData> {
+        self.m3_state
+            .lock()
+            .map(|state| state.sse_state.clone())
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned",
+                )
+            })
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -569,6 +608,23 @@ impl SynapseService {
         release_all_with_handles(handle, snapshot_handle, params.0)
             .await
             .map(Json)
+    }
+
+    #[tool(description = "Subscribe to filtered event notifications")]
+    pub async fn subscribe(
+        &self,
+        params: Parameters<SubscribeParams>,
+    ) -> Result<Json<SubscribeResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "subscribe",
+            kinds_count = params.0.kinds.len(),
+            snapshot_first = params.0.snapshot_first,
+            buffer_size = params.0.buffer_size,
+            "tool.invocation kind=subscribe"
+        );
+        let sse_state = self.sse_state()?;
+        subscribe_to_events(&sse_state, &params.0).map(Json)
     }
 
     #[tool(description = "List loaded profiles")]

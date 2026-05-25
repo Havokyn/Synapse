@@ -1,6 +1,6 @@
 mod auth;
 mod session;
-mod sse;
+pub mod sse;
 mod transport;
 
 pub async fn serve(bind: &str, allow_non_loopback: bool) -> anyhow::Result<std::process::ExitCode> {
