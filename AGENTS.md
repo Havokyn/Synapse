@@ -24,6 +24,11 @@ For every shipped change, the agent must:
 Automated tests, property tests, benchmarks, scripts, and build checks are
 supporting regression evidence only. They are not FSV and must not be named or
 presented as FSV. Do not add new `*_fsv` tests, FSV harnesses, or FSV scripts.
+When Synapse exposes a real runtime surface for the behavior under review,
+including MCP tools or daemon endpoints, manual FSV must trigger that real
+surface and then inspect the separate physical source of truth/state it
+produced. Scripts must not stand in for that runtime trigger or source-of-truth
+readback.
 
 ## No GitHub Actions / CI Gate
 

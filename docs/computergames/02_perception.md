@@ -267,21 +267,35 @@ pub struct HudReading {
 
 ### Loopback capture
 
-Uses `wasapi` crate, system-default audio render device, loopback mode. Buffers last N seconds (default 5s) in a ring buffer.
+Uses the system-default audio render device through WASAPI loopback on Windows. The M3 MCP audio tools require `--enable-audio` / `SYNAPSE_ENABLE_AUDIO=true`; the runtime is initialized lazily when `audio_tail` or `audio_transcribe` needs it. When audio is enabled, loopback capture starts by default unless `SYNAPSE_AUDIO_LOOPBACK=0` / `false`. Buffers the last N seconds in a ring buffer; M3 supports 1-5 seconds and defaults to 5s.
 
 ```rust
-pub fn start_loopback() -> Result<AudioHandle>;
-pub fn tail_seconds(seconds: f32) -> Result<AudioWindow>;
-pub fn subscribe_audio_events() -> impl Stream<Item = AudioEvent>;
+pub struct AudioConfig {
+    pub ring_seconds: u32,
+    pub start_loopback: bool,
+    pub detectors_enabled: bool,
+    pub stt_model_path: Option<PathBuf>,
+}
+
+impl AudioRuntime {
+    pub fn spawn(config: AudioConfig) -> AudioResult<Self>;
+    pub fn tail_seconds(&self, seconds: f32) -> AudioResult<AudioWindow>;
+    pub fn estimate_direction_tail(&self, seconds: f32) -> AudioResult<DirectionEstimate>;
+    pub fn transcribe_tail(&self, seconds: f32, language: impl AsRef<str>) -> AudioResult<Transcription>;
+    pub fn detector_snapshot(&self) -> DetectorSnapshot;
+    pub fn loopback_status(&self) -> LoopbackStatus;
+}
+
+pub fn start_loopback(ring: Arc<AudioRing>, detectors: Option<DetectorProcessor>) -> AudioResult<LoopbackHandle>;
 ```
 
-`AudioWindow` is interleaved stereo f32 at the device's native sample rate (typically 48 kHz).
+`AudioWindow` stores interleaved f32 samples with the active loopback format. The MCP `audio_tail` response converts the requested window to padded `s16le`, reports the sample rate and channel count, and returns an empty PCM buffer for `seconds = 0` without initializing the runtime.
 
 ### STT
 
-Whisper-tiny-int8 ONNX (~40 MB). Runs on demand when agent calls `audio_transcribe()`. Latency ~150 ms for 5-second window on CPU; ~50 ms with DirectML.
+Whisper-tiny-int8 ONNX is the pinned M3 model family. It runs on demand when the agent calls `audio_transcribe()`. The tool accepts only English (`"en"` or empty/default), transcribes the requested ring window, and returns `{ text, confidence, latency_ms, model_id: "whisper_tiny_int8" }`.
 
-Not run continuously by default; only on call. Optional per-profile flag enables continuous transcription with rate limiting.
+Continuous transcription and per-profile transcription flags are not live M3 behavior; adding them requires a later profile/runtime change.
 
 ### Spatial direction estimate
 
@@ -298,14 +312,14 @@ Sufficient for FPS footstep direction at v1. Steam Audio (audionimbus crate) is 
 
 ### Audio events
 
-Continuous detector for common audio events (runs on audio thread at low priority):
+When `detectors_enabled` is true, the loopback thread runs the current heuristic detector processor and publishes events to the event bus. M3 wires the MCP runtime with detectors disabled by default; detector state is still exposed through `detector_snapshot()` for runtime paths that enable it.
 
 | Event | Trigger heuristic |
 |---|---|
 | `loud_transient` | RMS exceeds 5× moving average (gunshots, impacts) |
-| `speech_started` | VAD pass through Silero VAD model (small, ~2 MB ONNX) |
-| `speech_ended` | VAD passes silent for 500ms |
-| `music_started` / `music_ended` | Spectral flatness threshold |
+| `speech_started` | RMS crosses the speech start threshold |
+| `speech_ended` | RMS stays below the speech end threshold for 500ms |
+| `music_started` / `music_ended` | RMS plus crest-factor heuristic |
 
 Events pushed to the event bus.
 

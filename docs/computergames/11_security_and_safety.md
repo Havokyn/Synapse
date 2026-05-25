@@ -15,8 +15,8 @@ Synapse runs locally with operator authority, exposes a powerful surface to its 
 
 ## 2. Foundational properties
 
-1. **Local-first.** Listens on `127.0.0.1` by default. No remote ports without explicit `--bind 0.0.0.0`.
-2. **Single user / single session by default.** Multi-client HTTP is opt-in, per-client token.
+1. **Local-first.** Listens on `127.0.0.1` by default. Non-loopback HTTP binds require both a non-loopback `--bind` value and `--allow-non-loopback`.
+2. **Single user by default.** HTTP mode uses bearer auth plus MCP session headers for `/mcp`; `/health` and `/events` stay sessionless but still require HTTP auth/security checks.
 3. **No exfiltration without consent.** Telemetry stays local unless OTLP is configured.
 4. **No background updates.** Never auto-updates.
 5. **Logs and replay redact secrets.** Built-in patterns; operator-extensible.
@@ -35,15 +35,15 @@ stdio inherits trust from the parent process (typically Claude Desktop / Codex C
 
 When `--mode http`, Synapse listens on TCP (default `127.0.0.1:7700`):
 
-- **Bearer token required.** Generated at first start, stored in `%APPDATA%\synapse\token.txt` with `chmod 0600`-equivalent (Windows ACL: SYSTEM + current user only). Clients pass `Authorization: Bearer <token>`. Missing/invalid → 401.
-- **Origin / Host header check.** Reject requests whose `Host` does not match bind address (defeats DNS rebinding from a malicious local browser tab).
-- **Loopback-only by default.** Non-loopback binds require `--allow-non-loopback` AND startup warning prompt.
-- **No CORS by default.** Cross-origin browser requests rejected unless `--allow-origin <pattern>` is set.
-- **TLS optional.** For non-loopback, `--tls-cert <path> --tls-key <path>` is enforced (refuses to start non-loopback without TLS). Self-signed accepted at operator's risk.
+- **Bearer token required.** M3 loads `%APPDATA%\synapse\token.txt` when that file exists; otherwise it requires `SYNAPSE_BEARER_TOKEN`. Empty or missing startup token refuses startup. Clients pass `Authorization: Bearer <token>`. Missing, malformed, or invalid request tokens return 401 `HTTP_TOKEN_INVALID`.
+- **Origin / Host header check.** `Host` must be one of `127.0.0.1`, `localhost`, or `::1`. `Origin` is optional for loopback binds; when present it must be `http://` with one of those loopback hosts. Non-loopback binds require an `Origin` header, and refused origin/host checks return 403 `HTTP_ORIGIN_REFUSED`.
+- **Loopback-only by default.** Non-loopback binds require `--allow-non-loopback`; without it the process logs `HTTP_BIND_NON_LOOPBACK_REFUSED` and exits with code 2.
+- **HTTP routes.** `/health`, `/events`, and `/events/stats` require bearer/origin/host checks but do not require an MCP session header. `/mcp` requires `Mcp-Session-Id` after initialize; initial JSON-RPC `initialize` POST may omit it, while missing or unknown sessions return 404 `HTTP_SESSION_INVALID`.
+- **No CORS/TLS flags in M3.** `--allow-origin`, `--tls-cert`, and `--tls-key` are not live M3 flags; adding browser CORS policy or TLS termination requires a later transport change.
 
 ### 3.3 Token rotation
 
-`synapse-mcp token rotate` generates a new bearer token and overwrites `token.txt`. Existing sessions invalidated immediately; clients must re-auth.
+Token rotation and first-run token file generation are M5 packaging/wizard work. In M3, the operator provisions `%APPDATA%\synapse\token.txt` or `SYNAPSE_BEARER_TOKEN`; changing that source and restarting the daemon is the supported rotation path.
 
 ---
 

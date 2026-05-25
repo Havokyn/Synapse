@@ -384,6 +384,9 @@ pub enum DataPredicate {
 ```
 
 `path` is JSON-Pointer style: `/track_id`, `/field`, `/bbox/x`. Evaluator in `synapse-core::filter`.
+Validation lives on `EventFilter::validate()`: `And` and `Or` require at least one
+argument, and filter trees deeper than `EVENT_FILTER_MAX_DEPTH` (`8`) are
+rejected before registration/subscription.
 
 Example: "low HP event":
 

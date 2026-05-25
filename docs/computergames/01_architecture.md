@@ -207,9 +207,12 @@ Uses `synapse-models` for ONNX runtime.
 WASAPI loopback capture, small STT model (Whisper-tiny ONNX), naive spatial-direction estimator (L/R channel energy + cross-correlation lag).
 
 ```rust
-pub fn start_loopback(sink: impl AudioSink) -> Result<AudioHandle>;
-pub fn transcribe_last(seconds: f32) -> Result<TranscriptResult>;
-pub fn direction_estimate(seconds: f32) -> Result<Option<DirectionEstimate>>;
+pub fn start_loopback(ring: Arc<AudioRing>, detectors: Option<DetectorProcessor>) -> AudioResult<LoopbackHandle>;
+impl AudioRuntime {
+    pub fn tail_seconds(&self, seconds: f32) -> AudioResult<AudioWindow>;
+    pub fn transcribe_tail(&self, seconds: f32, language: impl AsRef<str>) -> AudioResult<Transcription>;
+    pub fn estimate_direction_tail(&self, seconds: f32) -> AudioResult<DirectionEstimate>;
+}
 ```
 
 ### synapse-action
