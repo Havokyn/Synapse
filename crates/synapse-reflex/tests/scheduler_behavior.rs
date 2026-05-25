@@ -2,11 +2,15 @@ use std::{error::Error, io, time::Duration};
 
 use serde_json::json;
 use synapse_action::{ACTION_QUEUE_CAPACITY, ActionHandle};
-use synapse_core::{Action, Event, EventFilter, EventSource, error_codes};
-use synapse_reflex::{
-    EventBus, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex, SchedulerConfig,
-    SchedulerTrigger,
+use synapse_core::{
+    Action, Event, EventFilter, EventSource, SCHEMA_VERSION, StoredReflexAudit, error_codes,
 };
+use synapse_reflex::{
+    EventBus, REFLEX_RECURSION_LIMIT_KIND, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex,
+    SchedulerConfig, SchedulerTrigger,
+};
+use synapse_storage::{Db, cf, decode_json};
+use tempfile::tempdir;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -64,6 +68,90 @@ fn on_event_reflex_pulls_bus_event_and_dispatches() -> Result<(), Box<dyn Error>
 
     assert!(pulled >= 1);
     assert_eq!(dispatched, 1);
+    assert_eq!(action_rx.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn on_event_recursion_guard_limits_same_tick_firings_and_audits() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = std::sync::Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
+    let bus = EventBus::default();
+    let recursion_events = bus.subscribe(
+        EventFilter::Kind {
+            kind: REFLEX_RECURSION_LIMIT_KIND.to_owned(),
+        },
+        Vec::new(),
+        false,
+    )?;
+    let (action_handle, action_rx) = ActionHandle::channel();
+    let reflex = ScheduledReflex::on_event(
+        "reflex-recursion",
+        EventFilter::Kind {
+            kind: "loop".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+    let mut scheduler = ReflexScheduler::spawn_with_audit_db(
+        bus.clone(),
+        action_handle,
+        vec![reflex],
+        slow_one_tick_config(),
+        std::sync::Arc::clone(&db),
+    )?;
+    for seq in 1..=5 {
+        let _report = bus.publish(event(seq, "loop"));
+    }
+    let samples = scheduler.wait_for_samples(1, WAIT_TIMEOUT);
+    scheduler.stop()?;
+    db.flush()?;
+
+    let audits = db
+        .scan_cf(cf::CF_REFLEX_AUDIT)?
+        .iter()
+        .map(|(_key, value)| decode_json::<StoredReflexAudit>(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fired = audits
+        .iter()
+        .filter(|audit| audit.error_code.is_none())
+        .count();
+    let limited = audits
+        .iter()
+        .filter(|audit| audit.error_code.as_deref() == Some(error_codes::REFLEX_RECURSION_LIMIT))
+        .count();
+
+    assert_eq!(samples.len(), 1);
+    assert_eq!(action_rx.len(), 4);
+    assert_eq!(recursion_events.drain().len(), 1);
+    assert_eq!(fired, 4);
+    assert_eq!(limited, 1);
+    Ok(())
+}
+
+#[test]
+fn on_event_debounce_suppresses_same_tick_duplicates() -> Result<(), Box<dyn Error>> {
+    let bus = EventBus::default();
+    let (action_handle, action_rx) = ActionHandle::channel();
+    let reflex = ScheduledReflex::on_event_with_debounce(
+        "reflex-debounced",
+        EventFilter::Kind {
+            kind: "debounced".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+        Duration::from_secs(1),
+    );
+    let mut scheduler = ReflexScheduler::spawn(
+        bus.clone(),
+        action_handle,
+        vec![reflex],
+        slow_one_tick_config(),
+    )?;
+    let _report = bus.publish(event(1, "debounced"));
+    let _report = bus.publish(event(2, "debounced"));
+    let samples = scheduler.wait_for_samples(1, WAIT_TIMEOUT);
+    scheduler.stop()?;
+
+    assert_eq!(samples.len(), 1);
     assert_eq!(action_rx.len(), 1);
     Ok(())
 }
@@ -163,6 +251,7 @@ fn scheduler_rejects_invalid_trigger_filter() {
         trigger: SchedulerTrigger::OnEvent(EventFilter::And { args: Vec::new() }),
         then: vec![Action::ReleaseAll],
         priority: 0,
+        debounce: Duration::ZERO,
     };
     assert_eq!(action_rx.len(), 0);
 
@@ -188,5 +277,16 @@ fn event(seq: u64, kind: &str) -> Event {
         kind: kind.to_owned(),
         data: json!({ "seq": seq, "kind": kind }),
         correlations: Vec::new(),
+    }
+}
+
+const fn slow_one_tick_config() -> SchedulerConfig {
+    SchedulerConfig {
+        target_interval: Duration::from_millis(50),
+        fallback_interval: Duration::from_millis(50),
+        late_after: Duration::from_millis(250),
+        sample_limit: 16,
+        max_ticks: Some(1),
+        force_degraded: false,
     }
 }

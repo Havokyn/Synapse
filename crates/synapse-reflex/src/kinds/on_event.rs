@@ -1,0 +1,209 @@
+use std::time::{Duration, Instant};
+
+use chrono::Utc;
+use serde_json::json;
+use synapse_core::{
+    Action, Event, EventRef, EventSource, ReflexId, ReflexState, SCHEMA_VERSION, StoredReflexAudit,
+    StoredReflexStep, error_codes,
+};
+use synapse_storage::Db;
+use uuid::Uuid;
+
+use crate::{EventBus, write_audit};
+
+pub const MAX_ON_EVENT_FIRINGS_PER_TICK: usize = 4;
+pub const REFLEX_FIRED_KIND: &str = "reflex_fired";
+pub const REFLEX_RECURSION_LIMIT_KIND: &str = "reflex_recursion_limit";
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OnEventState {
+    last_fire: Option<Instant>,
+}
+
+impl OnEventState {
+    #[must_use]
+    pub(crate) fn allows_fire(&self, now: Instant, debounce: Duration) -> bool {
+        self.last_fire
+            .is_none_or(|last_fire| now.duration_since(last_fire) >= debounce)
+    }
+
+    pub(crate) const fn mark_fired(&mut self, now: Instant) {
+        self.last_fire = Some(now);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OnEventTickGuard {
+    fired_count: usize,
+    limit_reported: bool,
+}
+
+impl OnEventTickGuard {
+    #[must_use]
+    pub(crate) const fn can_fire(&self) -> bool {
+        self.fired_count < MAX_ON_EVENT_FIRINGS_PER_TICK
+    }
+
+    pub(crate) const fn record_fire(&mut self) {
+        self.fired_count = self.fired_count.saturating_add(1);
+    }
+
+    pub(crate) fn report_limit_once(
+        &mut self,
+        event_bus: &EventBus,
+        audit_db: Option<&Db>,
+        reflex_id: &ReflexId,
+        tick_index: u64,
+        trigger_event: &Event,
+    ) {
+        if self.limit_reported {
+            return;
+        }
+        self.limit_reported = true;
+        publish_limit_event(event_bus, reflex_id, tick_index, trigger_event);
+        let audit = recursion_limit_audit(reflex_id, tick_index, trigger_event);
+        write_audit_if_configured(audit_db, &audit);
+    }
+}
+
+pub(crate) fn publish_fired(
+    event_bus: &EventBus,
+    audit_db: Option<&Db>,
+    reflex_id: &ReflexId,
+    tick_index: u64,
+    trigger_event: &Event,
+    actions: &[Action],
+) {
+    let event = Event {
+        seq: tick_index,
+        at: Utc::now(),
+        source: EventSource::Reflex,
+        kind: REFLEX_FIRED_KIND.to_owned(),
+        data: json!({
+            "reflex_id": reflex_id,
+            "trigger_seq": trigger_event.seq,
+            "trigger_kind": trigger_event.kind.as_str(),
+            "action_count": actions.len(),
+        }),
+        correlations: trigger_correlation(trigger_event),
+    };
+    let _report = event_bus.publish(event);
+    let audit = fired_audit(reflex_id, tick_index, trigger_event, actions);
+    write_audit_if_configured(audit_db, &audit);
+}
+
+fn publish_limit_event(
+    event_bus: &EventBus,
+    reflex_id: &ReflexId,
+    tick_index: u64,
+    trigger_event: &Event,
+) {
+    let event = Event {
+        seq: tick_index,
+        at: Utc::now(),
+        source: EventSource::Reflex,
+        kind: REFLEX_RECURSION_LIMIT_KIND.to_owned(),
+        data: json!({
+            "code": error_codes::REFLEX_RECURSION_LIMIT,
+            "reflex_id": reflex_id,
+            "limit": MAX_ON_EVENT_FIRINGS_PER_TICK,
+            "tick_index": tick_index,
+            "trigger_seq": trigger_event.seq,
+            "trigger_kind": trigger_event.kind.as_str(),
+        }),
+        correlations: trigger_correlation(trigger_event),
+    };
+    let _report = event_bus.publish(event);
+}
+
+fn fired_audit(
+    reflex_id: &ReflexId,
+    tick_index: u64,
+    trigger_event: &Event,
+    actions: &[Action],
+) -> StoredReflexAudit {
+    StoredReflexAudit {
+        schema_version: SCHEMA_VERSION,
+        audit_id: Uuid::now_v7().to_string(),
+        reflex_id: reflex_id.clone(),
+        ts_ns: now_ts_ns(),
+        status: ReflexState::Active,
+        event_id: Some(trigger_event.seq.to_string()),
+        steps: completed_steps(actions),
+        error_code: None,
+        details: json!({
+            "kind": REFLEX_FIRED_KIND,
+            "tick_index": tick_index,
+            "trigger_kind": trigger_event.kind.as_str(),
+        }),
+        redacted: false,
+        redactions: Vec::new(),
+    }
+}
+
+fn recursion_limit_audit(
+    reflex_id: &ReflexId,
+    tick_index: u64,
+    trigger_event: &Event,
+) -> StoredReflexAudit {
+    StoredReflexAudit {
+        schema_version: SCHEMA_VERSION,
+        audit_id: Uuid::now_v7().to_string(),
+        reflex_id: reflex_id.clone(),
+        ts_ns: now_ts_ns(),
+        status: ReflexState::Active,
+        event_id: Some(trigger_event.seq.to_string()),
+        steps: Vec::new(),
+        error_code: Some(error_codes::REFLEX_RECURSION_LIMIT.to_owned()),
+        details: json!({
+            "kind": REFLEX_RECURSION_LIMIT_KIND,
+            "limit": MAX_ON_EVENT_FIRINGS_PER_TICK,
+            "tick_index": tick_index,
+            "trigger_kind": trigger_event.kind.as_str(),
+        }),
+        redacted: false,
+        redactions: Vec::new(),
+    }
+}
+
+fn completed_steps(actions: &[Action]) -> Vec<StoredReflexStep> {
+    actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| StoredReflexStep {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            action: action.clone(),
+            status: "completed".to_owned(),
+            error_code: None,
+        })
+        .collect()
+}
+
+fn write_audit_if_configured(audit_db: Option<&Db>, audit: &StoredReflexAudit) {
+    let Some(db) = audit_db else {
+        return;
+    };
+    if let Err(error) = write_audit(db, audit) {
+        tracing::warn!(
+            component = "reflex_on_event",
+            reflex_id = %audit.reflex_id,
+            audit_id = %audit.audit_id,
+            detail = %error,
+            "reflex audit write failed"
+        );
+    }
+}
+
+fn trigger_correlation(trigger_event: &Event) -> Vec<EventRef> {
+    vec![EventRef {
+        seq: trigger_event.seq,
+        relation: "trigger".to_owned(),
+    }]
+}
+
+fn now_ts_ns() -> u64 {
+    Utc::now()
+        .timestamp_nanos_opt()
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or_default()
+}

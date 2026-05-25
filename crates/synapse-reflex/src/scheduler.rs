@@ -8,17 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
-use serde_json::json;
 use synapse_action::ActionHandle;
-use synapse_core::{Action, Event, EventFilter, EventSource, ReflexId, error_codes};
+use synapse_core::{Action, EventFilter, ReflexId};
+use synapse_storage::Db;
 
 use crate::{
     EventBus, SubscriberHandle,
     error::{ReflexError, ReflexResult},
-    kinds::combo::ComboController,
+    kinds::{combo::ComboController, on_event::OnEventState},
 };
-use scheduler_combo::{dispatch_reflex_action, step_active_combos};
+use scheduler_tick::tick;
 
 pub const MAX_SCHEDULED_REFLEXES: usize = 32;
 pub const REFLEX_TICK_LATE_KIND: &str = "reflex_tick_late";
@@ -81,6 +80,7 @@ pub struct ScheduledReflex {
     pub trigger: SchedulerTrigger,
     pub then: Vec<Action>,
     pub priority: u32,
+    pub debounce: Duration,
 }
 
 impl ScheduledReflex {
@@ -91,6 +91,7 @@ impl ScheduledReflex {
             trigger: SchedulerTrigger::EveryTick,
             then,
             priority: 0,
+            debounce: Duration::ZERO,
         }
     }
 
@@ -105,6 +106,23 @@ impl ScheduledReflex {
             trigger: SchedulerTrigger::OnEvent(filter),
             then,
             priority: 0,
+            debounce: Duration::ZERO,
+        }
+    }
+
+    #[must_use]
+    pub fn on_event_with_debounce(
+        reflex_id: impl Into<ReflexId>,
+        filter: EventFilter,
+        then: Vec<Action>,
+        debounce: Duration,
+    ) -> Self {
+        Self {
+            reflex_id: reflex_id.into(),
+            trigger: SchedulerTrigger::OnEvent(filter),
+            then,
+            priority: 0,
+            debounce,
         }
     }
 }
@@ -126,13 +144,6 @@ impl SchedulerTrigger {
                         detail: error.to_string(),
                     })
             }
-        }
-    }
-
-    fn fires(&self, events: &[Event]) -> bool {
-        match self {
-            Self::EveryTick => true,
-            Self::OnEvent(filter) => events.iter().any(|event| filter.matches(event)),
         }
     }
 }
@@ -210,6 +221,31 @@ impl ReflexScheduler {
         reflexes: Vec<ScheduledReflex>,
         config: SchedulerConfig,
     ) -> ReflexResult<SchedulerHandle> {
+        Self::spawn_inner(event_bus, action_handle, reflexes, config, None)
+    }
+
+    /// Spawns the scheduler and writes reflex audit rows into `audit_db`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same setup errors as [`Self::spawn`].
+    pub fn spawn_with_audit_db(
+        event_bus: EventBus,
+        action_handle: ActionHandle,
+        reflexes: Vec<ScheduledReflex>,
+        config: SchedulerConfig,
+        audit_db: Arc<Db>,
+    ) -> ReflexResult<SchedulerHandle> {
+        Self::spawn_inner(event_bus, action_handle, reflexes, config, Some(audit_db))
+    }
+
+    fn spawn_inner(
+        event_bus: EventBus,
+        action_handle: ActionHandle,
+        reflexes: Vec<ScheduledReflex>,
+        config: SchedulerConfig,
+        audit_db: Option<Arc<Db>>,
+    ) -> ReflexResult<SchedulerHandle> {
         config.validate()?;
         validate_reflexes(&reflexes)?;
         let subscription = event_bus
@@ -221,16 +257,22 @@ impl ReflexScheduler {
         let samples = Arc::new(Mutex::new(VecDeque::with_capacity(config.sample_limit)));
         let mut reflexes = reflexes;
         reflexes.sort_by_key(|reflex| std::cmp::Reverse(reflex.priority));
+        let on_event_states = reflexes
+            .iter()
+            .map(|_| OnEventState::default())
+            .collect::<Vec<_>>();
 
         let runtime = RuntimeState {
             event_bus,
             action_handle,
             reflexes,
             active_combos: Vec::new(),
+            on_event_states,
             subscription,
             stop: Arc::clone(&stop),
             samples: Arc::clone(&samples),
             config,
+            audit_db,
             tick_index: 0,
         };
 
@@ -254,10 +296,12 @@ struct RuntimeState {
     action_handle: ActionHandle,
     reflexes: Vec<ScheduledReflex>,
     active_combos: Vec<ComboController>,
+    on_event_states: Vec<OnEventState>,
     subscription: SubscriberHandle,
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<VecDeque<TickSample>>>,
     config: SchedulerConfig,
+    audit_db: Option<Arc<Db>>,
     tick_index: u64,
 }
 
@@ -352,120 +396,6 @@ fn should_tick(runtime: &RuntimeState) -> bool {
         .is_none_or(|max_ticks| runtime.tick_index < max_ticks)
 }
 
-fn tick(runtime: &mut RuntimeState, elapsed: Duration, degraded: bool) {
-    let events = runtime.subscription.drain();
-    let mut dispatched_actions = 0_usize;
-    let mut dispatch_blocked = false;
-    step_active_combos(
-        runtime,
-        elapsed,
-        &mut dispatched_actions,
-        &mut dispatch_blocked,
-    );
-
-    if !dispatch_blocked {
-        for index in 0..runtime.reflexes.len() {
-            let (reflex_id, actions) = {
-                let reflex = &runtime.reflexes[index];
-                if !reflex.trigger.fires(&events) {
-                    continue;
-                }
-                (reflex.reflex_id.clone(), reflex.then.clone())
-            };
-            for action in actions {
-                match dispatch_reflex_action(runtime, &reflex_id, action) {
-                    Ok(actions) => {
-                        dispatched_actions = dispatched_actions.saturating_add(actions);
-                    }
-                    Err(error) => {
-                        dispatch_blocked = true;
-                        tracing::warn!(
-                            component = "reflex_scheduler",
-                            reflex_id = %reflex_id,
-                            error_code = error.code(),
-                            detail = %error,
-                            "reflex action dispatch blocked"
-                        );
-                        break;
-                    }
-                }
-            }
-            if dispatch_blocked {
-                break;
-            }
-        }
-    }
-
-    let elapsed_us = duration_us(elapsed);
-    let target_us = duration_us(runtime.config.target_interval);
-    let jitter_us = elapsed_us.abs_diff(target_us);
-    let deadline_late = elapsed > runtime.config.late_after;
-    let late = deadline_late || dispatch_blocked;
-    if late {
-        let reason = if dispatch_blocked {
-            "dispatch_blocked"
-        } else {
-            "deadline_miss"
-        };
-        emit_tick_late(runtime, elapsed_us, jitter_us, reason);
-    }
-
-    let sample = TickSample {
-        tick_index: runtime.tick_index,
-        elapsed_us,
-        jitter_us,
-        target_us,
-        pulled_events: events.len(),
-        dispatched_actions,
-        late,
-        degraded,
-    };
-    tracing::info!(
-        component = "reflex_scheduler",
-        tick_index = sample.tick_index,
-        elapsed_us = sample.elapsed_us,
-        jitter_us = sample.jitter_us,
-        target_us = sample.target_us,
-        pulled_events = sample.pulled_events,
-        dispatched_actions = sample.dispatched_actions,
-        late = sample.late,
-        degraded = sample.degraded,
-        "reflex scheduler tick"
-    );
-    push_sample(&runtime.samples, runtime.config.sample_limit, sample);
-    runtime.tick_index = runtime.tick_index.saturating_add(1);
-}
-
-fn emit_tick_late(runtime: &RuntimeState, elapsed_us: u64, jitter_us: u64, reason: &str) {
-    let event = Event {
-        seq: runtime.tick_index,
-        at: Utc::now(),
-        source: EventSource::Reflex,
-        kind: REFLEX_TICK_LATE_KIND.to_owned(),
-        data: json!({
-            "code": error_codes::REFLEX_TICK_LATE,
-            "elapsed_us": elapsed_us,
-            "jitter_us": jitter_us,
-            "target_us": duration_us(runtime.config.target_interval),
-            "reason": reason,
-        }),
-        correlations: Vec::new(),
-    };
-    let _report = runtime.event_bus.publish(event);
-}
-
-fn push_sample(
-    samples: &Arc<Mutex<VecDeque<TickSample>>>,
-    sample_limit: usize,
-    sample: TickSample,
-) {
-    let mut samples = lock_samples(samples);
-    if samples.len() >= sample_limit {
-        let _oldest = samples.pop_front();
-    }
-    samples.push_back(sample);
-}
-
 fn lock_samples(
     samples: &Arc<Mutex<VecDeque<TickSample>>>,
 ) -> std::sync::MutexGuard<'_, VecDeque<TickSample>> {
@@ -475,16 +405,15 @@ fn lock_samples(
     }
 }
 
-fn duration_us(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
 #[path = "scheduler_stats.rs"]
 mod scheduler_stats;
 pub use scheduler_stats::p99_jitter_us;
 
 #[path = "scheduler_combo.rs"]
 mod scheduler_combo;
+
+#[path = "scheduler_tick.rs"]
+mod scheduler_tick;
 
 #[cfg(windows)]
 #[path = "scheduler_windows.rs"]

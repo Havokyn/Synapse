@@ -264,15 +264,14 @@ configured Windows host.
 
 ---
 
-## OQ-022 — Reflex `on_event` recursion guard
+## OQ-022 — Reflex `on_event` recursion guard — DECIDED 2026-05-25
 
-**Q.** Can `on_event` reflex action emit event triggering another `on_event` reflex? What prevents infinite loops?
+→ decided in ADR-0003.
 
-**Trade-off.** Allowing chained reflexes: powerful. Without guards: footgun.
-
-**Default.** Allowed. Per-tick guard: max 4 reflex firings per tick across all reflexes. Exceeded → `REFLEX_RECURSION_LIMIT` event, skip remaining until next tick.
-
-**Target.** M3 implementation; revisit if guard insufficient.
+**Decision.** Chained `on_event` reflexes are allowed, but the scheduler permits
+at most four successful `on_event` firings per tick across all active reflexes.
+A fifth same-tick match is skipped, the remaining event-driven firings wait for
+the next tick, and `REFLEX_RECURSION_LIMIT` is emitted/audited.
 
 ---
 

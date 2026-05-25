@@ -31,6 +31,9 @@ pub use kinds::hold_lifetime::{
     HoldLifetimeContext, HoldReleaseReason, REFLEX_LIFETIME_EXPIRED_KIND,
 };
 pub use kinds::hold_move::{HoldMoveController, HoldMoveOutput, HoldMoveParams, HoldMovePhase};
+pub use kinds::on_event::{
+    MAX_ON_EVENT_FIRINGS_PER_TICK, REFLEX_FIRED_KIND, REFLEX_RECURSION_LIMIT_KIND,
+};
 pub use scheduler::{
     MAX_SCHEDULED_REFLEXES, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex,
     SchedulerConfig, SchedulerHandle, SchedulerTrigger, TickSample, p99_jitter_us,
