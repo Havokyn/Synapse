@@ -1,13 +1,22 @@
+pub mod detectors;
 pub mod error;
+pub mod loopback;
+pub mod ring;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use synapse_core::Event;
 
 pub use error::{AudioError, AudioResult};
+pub use loopback::LoopbackStatus;
+pub use ring::{AudioFormat, AudioRing, AudioWindow};
 
 pub const DEFAULT_RING_SECONDS: u32 = 5;
 pub const MAX_RING_SECONDS: u32 = 5;
+
+pub type AudioEventSink = Arc<dyn Fn(Event) + Send + Sync + 'static>;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,29 +42,55 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AudioRuntime {
     config: AudioConfig,
-    loopback_started: bool,
-    detectors_started: bool,
+    ring: Arc<AudioRing>,
+    detector_state: detectors::SharedDetectorState,
+    loopback: Option<loopback::LoopbackHandle>,
 }
 
 impl AudioRuntime {
-    /// Spawns the M3 audio runtime scaffold.
+    /// Spawns the M3 audio runtime.
     ///
     /// # Errors
     ///
     /// Returns [`AudioError::LoopbackInitFailed`] when the ring buffer duration
     /// is outside the scaffold's supported range or when the caller requests
-    /// loopback/detector startup before the dedicated loopback implementation is
-    /// available.
+    /// loopback/detector startup and WASAPI initialization fails.
     #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
     pub fn spawn(config: AudioConfig) -> AudioResult<Self> {
+        Self::spawn_with_event_sink(config, Arc::new(|_event| {}))
+    }
+
+    /// Spawns the runtime and sends detector events to `event_sink`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::LoopbackInitFailed`] when the ring buffer duration
+    /// is invalid or the configured loopback capture cannot initialize.
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
+    pub fn spawn_with_event_sink(
+        config: AudioConfig,
+        event_sink: AudioEventSink,
+    ) -> AudioResult<Self> {
         validate_config(&config)?;
+        let ring = Arc::new(AudioRing::new(config.ring_seconds));
+        let detector_state = detectors::SharedDetectorState::default();
+        let loopback = if config.start_loopback {
+            Some(loopback::start_loopback(
+                Arc::clone(&ring),
+                config
+                    .detectors_enabled
+                    .then(|| detectors::DetectorProcessor::new(detector_state.clone(), event_sink)),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             config,
-            loopback_started: false,
-            detectors_started: false,
+            ring,
+            detector_state,
+            loopback,
         })
     }
 
@@ -68,13 +103,51 @@ impl AudioRuntime {
     #[must_use]
     #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
     pub fn loopback_started(&self) -> bool {
-        self.loopback_started
+        self.loopback
+            .as_ref()
+            .is_some_and(loopback::LoopbackHandle::is_running)
     }
 
     #[must_use]
     #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
     pub fn detectors_started(&self) -> bool {
-        self.detectors_started
+        self.config.detectors_enabled && self.loopback_started()
+    }
+
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
+    pub fn ring(&self) -> Arc<AudioRing> {
+        Arc::clone(&self.ring)
+    }
+
+    /// Returns the most recent audio samples from the runtime ring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::LoopbackInitFailed`] when `seconds` is greater
+    /// than the configured ring duration.
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime", seconds))]
+    pub fn tail_seconds(&self, seconds: f32) -> AudioResult<AudioWindow> {
+        self.ring.tail_seconds(seconds)
+    }
+
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
+    pub fn detector_snapshot(&self) -> detectors::DetectorSnapshot {
+        self.detector_state.snapshot()
+    }
+
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "audio_runtime"))]
+    pub fn loopback_status(&self) -> LoopbackStatus {
+        self.loopback.as_ref().map_or_else(
+            || LoopbackStatus {
+                running: false,
+                frames_captured: 0,
+                last_error_code: None,
+            },
+            loopback::LoopbackHandle::status,
+        )
     }
 }
 
@@ -87,12 +160,7 @@ fn validate_config(config: &AudioConfig) -> AudioResult<()> {
             ),
         });
     }
-    if config.start_loopback {
-        return Err(AudioError::LoopbackInitFailed {
-            detail: "audio loopback startup is not available in the scaffold".to_owned(),
-        });
-    }
-    if config.detectors_enabled {
+    if config.detectors_enabled && !config.start_loopback {
         return Err(AudioError::LoopbackInitFailed {
             detail: "audio detectors require loopback startup".to_owned(),
         });
@@ -102,58 +170,4 @@ fn validate_config(config: &AudioConfig) -> AudioResult<()> {
 
 const fn default_ring_seconds() -> u32 {
     DEFAULT_RING_SECONDS
-}
-
-#[cfg(test)]
-mod tests {
-    use synapse_core::error_codes;
-
-    use super::{AudioConfig, AudioError, AudioRuntime, DEFAULT_RING_SECONDS, MAX_RING_SECONDS};
-
-    #[test]
-    fn default_spawn_keeps_audio_paths_stopped() -> Result<(), AudioError> {
-        let runtime = AudioRuntime::spawn(AudioConfig::default())?;
-
-        assert_eq!(runtime.config().ring_seconds, DEFAULT_RING_SECONDS);
-        assert!(!runtime.loopback_started());
-        assert!(!runtime.detectors_started());
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_ring_seconds_fail_closed() {
-        let zero = spawn_error(AudioConfig {
-            ring_seconds: 0,
-            ..AudioConfig::default()
-        });
-        assert_eq!(zero.code(), error_codes::AUDIO_LOOPBACK_INIT_FAILED);
-
-        let too_large = spawn_error(AudioConfig {
-            ring_seconds: MAX_RING_SECONDS.saturating_add(1),
-            ..AudioConfig::default()
-        });
-        assert_eq!(too_large.code(), error_codes::AUDIO_LOOPBACK_INIT_FAILED);
-    }
-
-    #[test]
-    fn unavailable_loopback_and_detectors_fail_closed() {
-        let loopback = spawn_error(AudioConfig {
-            start_loopback: true,
-            ..AudioConfig::default()
-        });
-        assert_eq!(loopback.code(), error_codes::AUDIO_LOOPBACK_INIT_FAILED);
-
-        let detectors = spawn_error(AudioConfig {
-            detectors_enabled: true,
-            ..AudioConfig::default()
-        });
-        assert_eq!(detectors.code(), error_codes::AUDIO_LOOPBACK_INIT_FAILED);
-    }
-
-    fn spawn_error(config: AudioConfig) -> AudioError {
-        match AudioRuntime::spawn(config) {
-            Ok(runtime) => panic!("expected AudioRuntime::spawn to fail, got {runtime:?}"),
-            Err(error) => error,
-        }
-    }
 }

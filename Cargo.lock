@@ -3194,14 +3194,18 @@ dependencies = [
 name = "synapse-audio"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "metrics",
  "ort",
  "serde",
+ "serde_json",
  "sha2",
  "synapse-core",
  "thiserror",
  "tokio",
  "tracing",
  "wasapi",
+ "windows 0.62.2",
 ]
 
 [[package]]
