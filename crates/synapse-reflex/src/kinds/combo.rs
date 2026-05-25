@@ -1,0 +1,325 @@
+use std::time::Duration;
+
+use chrono::Utc;
+use serde_json::json;
+use synapse_action::ActionHandle;
+use synapse_core::{Action, Backend, ComboInput, ComboStep, Event, EventSource, ReflexId};
+
+use crate::{EventBus, ReflexError, ReflexResult};
+
+pub const REFLEX_COMBO_COMPLETED_KIND: &str = "reflex_combo_completed";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComboParams {
+    pub steps: Vec<ComboStep>,
+    pub backend: Backend,
+}
+
+impl ComboParams {
+    #[must_use]
+    pub const fn new(steps: Vec<ComboStep>, backend: Backend) -> Self {
+        Self { steps, backend }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ComboPhase {
+    Pending,
+    Running,
+    Completed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComboContext {
+    pub tick_elapsed: Duration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ComboOutput {
+    Started {
+        actions: usize,
+        remaining: usize,
+    },
+    Dispatched {
+        actions: usize,
+        elapsed_ms: u128,
+        remaining: usize,
+    },
+    Completed {
+        scheduled_actions: usize,
+        dispatched_actions: usize,
+        actions: usize,
+    },
+    Idle {
+        reason: &'static str,
+    },
+}
+
+impl ComboOutput {
+    #[must_use]
+    pub const fn action_count(&self) -> usize {
+        match self {
+            Self::Started { actions, .. }
+            | Self::Dispatched { actions, .. }
+            | Self::Completed { actions, .. } => *actions,
+            Self::Idle { .. } => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TimedComboAction {
+    due_ms: u32,
+    sequence: usize,
+    action: Action,
+}
+
+#[derive(Clone, Debug)]
+pub struct ComboController {
+    reflex_id: ReflexId,
+    scheduled: Vec<TimedComboAction>,
+    cursor: usize,
+    elapsed: Duration,
+    phase: ComboPhase,
+    completion_emitted: bool,
+}
+
+impl ComboController {
+    #[must_use]
+    pub fn new(reflex_id: impl Into<ReflexId>, params: ComboParams) -> Self {
+        Self {
+            reflex_id: reflex_id.into(),
+            scheduled: build_schedule(params),
+            cursor: 0,
+            elapsed: Duration::ZERO,
+            phase: ComboPhase::Pending,
+            completion_emitted: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> ComboPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn is_completed(&self) -> bool {
+        matches!(self.phase, ComboPhase::Completed)
+    }
+
+    /// Starts a combo and dispatches all actions due at trigger offset `0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `REFLEX_PARAMS_INVALID` when the shared action queue cannot
+    /// accept a due primitive action.
+    pub fn start_dispatch(
+        &mut self,
+        action_handle: &ActionHandle,
+        event_bus: &EventBus,
+    ) -> ReflexResult<ComboOutput> {
+        match self.phase {
+            ComboPhase::Pending => {
+                self.phase = ComboPhase::Running;
+                let actions = self.dispatch_due(action_handle)?;
+                if self.finish_if_complete(event_bus) {
+                    return Ok(self.completed_output(actions));
+                }
+                Ok(ComboOutput::Started {
+                    actions,
+                    remaining: self.remaining(),
+                })
+            }
+            ComboPhase::Running => Ok(ComboOutput::Idle {
+                reason: "already_running",
+            }),
+            ComboPhase::Completed => Ok(ComboOutput::Idle {
+                reason: "already_completed",
+            }),
+        }
+    }
+
+    /// Advances elapsed time and dispatches every newly due combo action.
+    ///
+    /// # Errors
+    ///
+    /// Returns `REFLEX_PARAMS_INVALID` when the shared action queue cannot
+    /// accept a due primitive action.
+    pub fn step_dispatch(
+        &mut self,
+        context: &ComboContext,
+        action_handle: &ActionHandle,
+        event_bus: &EventBus,
+    ) -> ReflexResult<ComboOutput> {
+        match self.phase {
+            ComboPhase::Pending => self.start_dispatch(action_handle, event_bus),
+            ComboPhase::Running => {
+                self.elapsed = self.elapsed.saturating_add(context.tick_elapsed);
+                let actions = self.dispatch_due(action_handle)?;
+                if self.finish_if_complete(event_bus) {
+                    return Ok(self.completed_output(actions));
+                }
+                Ok(ComboOutput::Dispatched {
+                    actions,
+                    elapsed_ms: self.elapsed.as_millis(),
+                    remaining: self.remaining(),
+                })
+            }
+            ComboPhase::Completed => Ok(ComboOutput::Idle {
+                reason: "already_completed",
+            }),
+        }
+    }
+
+    fn dispatch_due(&mut self, action_handle: &ActionHandle) -> ReflexResult<usize> {
+        let mut dispatched = 0_usize;
+        while self
+            .scheduled
+            .get(self.cursor)
+            .is_some_and(|action| u128::from(action.due_ms) <= self.elapsed.as_millis())
+        {
+            let scheduled = &self.scheduled[self.cursor];
+            action_handle
+                .try_execute(scheduled.action.clone())
+                .map_err(|error| ReflexError::ParamsInvalid {
+                    detail: format!(
+                        "combo action dispatch failed at due_ms={} sequence={}: {error}",
+                        scheduled.due_ms, scheduled.sequence
+                    ),
+                })?;
+            self.cursor = self.cursor.saturating_add(1);
+            dispatched = dispatched.saturating_add(1);
+        }
+        Ok(dispatched)
+    }
+
+    fn finish_if_complete(&mut self, event_bus: &EventBus) -> bool {
+        if self.cursor < self.scheduled.len() {
+            return false;
+        }
+        self.phase = ComboPhase::Completed;
+        self.emit_completed(event_bus);
+        true
+    }
+
+    fn emit_completed(&mut self, event_bus: &EventBus) {
+        if self.completion_emitted {
+            return;
+        }
+        self.completion_emitted = true;
+        let event = Event {
+            seq: 0,
+            at: Utc::now(),
+            source: EventSource::Reflex,
+            kind: REFLEX_COMBO_COMPLETED_KIND.to_owned(),
+            data: json!({
+                "reflex_id": self.reflex_id,
+                "status": "completed",
+                "scheduled_actions": self.scheduled.len(),
+                "dispatched_actions": self.cursor,
+                "elapsed_ms": self.elapsed.as_millis(),
+            }),
+            correlations: Vec::new(),
+        };
+        let _report = event_bus.publish(event);
+    }
+
+    const fn remaining(&self) -> usize {
+        self.scheduled.len().saturating_sub(self.cursor)
+    }
+
+    const fn completed_output(&self, actions: usize) -> ComboOutput {
+        ComboOutput::Completed {
+            scheduled_actions: self.scheduled.len(),
+            dispatched_actions: self.cursor,
+            actions,
+        }
+    }
+}
+
+fn build_schedule(params: ComboParams) -> Vec<TimedComboAction> {
+    let mut scheduled = Vec::new();
+    let mut sequence = 0_usize;
+    for step in params.steps {
+        append_step(&mut scheduled, &mut sequence, step, params.backend);
+    }
+    scheduled.sort_by_key(|action| (action.due_ms, action.sequence));
+    scheduled
+}
+
+fn append_step(
+    scheduled: &mut Vec<TimedComboAction>,
+    sequence: &mut usize,
+    step: ComboStep,
+    backend: Backend,
+) {
+    let due_ms = step.at_ms;
+    match step.input {
+        ComboInput::KeyDown { key } => {
+            let action = Action::KeyDown { key, backend };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+        ComboInput::KeyUp { key } => {
+            let action = Action::KeyUp { key, backend };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+        ComboInput::KeyPress { key, hold_ms } => {
+            let down = Action::KeyDown {
+                key: key.clone(),
+                backend,
+            };
+            push_action(scheduled, due_ms, sequence, down);
+            let up = Action::KeyUp { key, backend };
+            push_action(
+                scheduled,
+                due_ms.saturating_add(u32::from(hold_ms)),
+                sequence,
+                up,
+            );
+        }
+        ComboInput::MouseButton { button, action } => {
+            let action = Action::MouseButton {
+                button,
+                action,
+                hold_ms: 0,
+                backend,
+            };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+        ComboInput::MouseMoveRel { dx, dy } => {
+            let action = Action::MouseMoveRelative { dx, dy, backend };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+        ComboInput::PadButton {
+            pad,
+            button,
+            action,
+        } => {
+            let action = Action::PadButton {
+                pad,
+                button,
+                action,
+                hold_ms: 0,
+            };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+        ComboInput::PadStick { pad, stick, x, y } => {
+            let action = Action::PadStick { pad, stick, x, y };
+            push_action(scheduled, due_ms, sequence, action);
+        }
+    }
+}
+
+fn push_action(
+    scheduled: &mut Vec<TimedComboAction>,
+    due_ms: u32,
+    sequence: &mut usize,
+    action: Action,
+) {
+    scheduled.push(TimedComboAction {
+        due_ms,
+        sequence: *sequence,
+        action,
+    });
+    *sequence = sequence.saturating_add(1);
+}

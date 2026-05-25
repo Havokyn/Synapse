@@ -16,7 +16,9 @@ use synapse_core::{Action, Event, EventFilter, EventSource, ReflexId, error_code
 use crate::{
     EventBus, SubscriberHandle,
     error::{ReflexError, ReflexResult},
+    kinds::combo::ComboController,
 };
+use scheduler_combo::{dispatch_reflex_action, step_active_combos};
 
 pub const MAX_SCHEDULED_REFLEXES: usize = 32;
 pub const REFLEX_TICK_LATE_KIND: &str = "reflex_tick_late";
@@ -224,6 +226,7 @@ impl ReflexScheduler {
             event_bus,
             action_handle,
             reflexes,
+            active_combos: Vec::new(),
             subscription,
             stop: Arc::clone(&stop),
             samples: Arc::clone(&samples),
@@ -250,6 +253,7 @@ struct RuntimeState {
     event_bus: EventBus,
     action_handle: ActionHandle,
     reflexes: Vec<ScheduledReflex>,
+    active_combos: Vec<ComboController>,
     subscription: SubscriberHandle,
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<VecDeque<TickSample>>>,
@@ -352,28 +356,43 @@ fn tick(runtime: &mut RuntimeState, elapsed: Duration, degraded: bool) {
     let events = runtime.subscription.drain();
     let mut dispatched_actions = 0_usize;
     let mut dispatch_blocked = false;
-    for reflex in &runtime.reflexes {
-        if !reflex.trigger.fires(&events) {
-            continue;
-        }
-        for action in &reflex.then {
-            match runtime.action_handle.try_execute(action.clone()) {
-                Ok(()) => dispatched_actions = dispatched_actions.saturating_add(1),
-                Err(error) => {
-                    dispatch_blocked = true;
-                    tracing::warn!(
-                        component = "reflex_scheduler",
-                        reflex_id = %reflex.reflex_id,
-                        error_code = error.code(),
-                        detail = %error,
-                        "reflex action dispatch blocked"
-                    );
-                    break;
+    step_active_combos(
+        runtime,
+        elapsed,
+        &mut dispatched_actions,
+        &mut dispatch_blocked,
+    );
+
+    if !dispatch_blocked {
+        for index in 0..runtime.reflexes.len() {
+            let (reflex_id, actions) = {
+                let reflex = &runtime.reflexes[index];
+                if !reflex.trigger.fires(&events) {
+                    continue;
+                }
+                (reflex.reflex_id.clone(), reflex.then.clone())
+            };
+            for action in actions {
+                match dispatch_reflex_action(runtime, &reflex_id, action) {
+                    Ok(actions) => {
+                        dispatched_actions = dispatched_actions.saturating_add(actions);
+                    }
+                    Err(error) => {
+                        dispatch_blocked = true;
+                        tracing::warn!(
+                            component = "reflex_scheduler",
+                            reflex_id = %reflex_id,
+                            error_code = error.code(),
+                            detail = %error,
+                            "reflex action dispatch blocked"
+                        );
+                        break;
+                    }
                 }
             }
-        }
-        if dispatch_blocked {
-            break;
+            if dispatch_blocked {
+                break;
+            }
         }
     }
 
@@ -463,6 +482,9 @@ fn duration_us(duration: Duration) -> u64 {
 #[path = "scheduler_stats.rs"]
 mod scheduler_stats;
 pub use scheduler_stats::p99_jitter_us;
+
+#[path = "scheduler_combo.rs"]
+mod scheduler_combo;
 
 #[cfg(windows)]
 #[path = "scheduler_windows.rs"]

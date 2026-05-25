@@ -20,6 +20,10 @@ pub use kinds::aim_track::{
     DEFAULT_EMA_ALPHA, DEFAULT_MAX_SPEED_PX_PER_TICK, REFLEX_TRACK_LOST_KIND, ResolvedElementBox,
     TRACK_LOST_AFTER,
 };
+pub use kinds::combo::{
+    ComboContext, ComboController, ComboOutput, ComboParams, ComboPhase,
+    REFLEX_COMBO_COMPLETED_KIND,
+};
 pub use kinds::hold_button::{
     HoldButtonController, HoldButtonOutput, HoldButtonParams, HoldButtonPhase,
 };
