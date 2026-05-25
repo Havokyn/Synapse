@@ -309,16 +309,23 @@ impl SynapseService {
     fn reflex_runtime(&self) -> Result<Arc<Mutex<synapse_reflex::ReflexRuntime>>, ErrorData> {
         let event_bus = self.sse_state()?.event_bus();
         let (action_handle, _recording, _connection_closed_cancel) = self.m2_action_context()?;
-        self.m3_state
-            .lock()
-            .map_err(|_err| {
-                mcp_error(
-                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
-                    "M3 service state lock poisoned",
-                )
-            })?
-            .ensure_reflex_runtime(action_handle, event_bus)
-            .map_err(|error| m3_state_error(&error))
+        let mut state = self.m3_state.lock().map_err(|_err| {
+            mcp_error(
+                synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                "M3 service state lock poisoned",
+            )
+        })?;
+        let runtime = state
+            .ensure_reflex_runtime(action_handle, event_bus.clone())
+            .map_err(|error| m3_state_error(&error))?;
+        state.ensure_a11y_event_bridge(event_bus).map_err(|error| {
+            mcp_error(
+                synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                error.to_string(),
+            )
+        })?;
+        drop(state);
+        Ok(runtime)
     }
 
     #[allow(clippy::significant_drop_tightening)]

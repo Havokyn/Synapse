@@ -62,16 +62,11 @@ pub async fn act_type_with_handle(
     recording: Option<Arc<RecordingBackend>>,
     params: ActTypeParams,
 ) -> Result<ActTypeResponse, ErrorData> {
-    validate_type_params(&params)?;
     let started = Instant::now();
-    let text = emitted_text(&params);
-    let chars_typed = char_count(&text)?;
-    let action = Action::TypeText {
-        text,
-        dynamics: params
-            .dynamics
-            .to_keystroke_dynamics(params.linear_ms_per_char),
-        backend: params.backend.to_backend(),
+    let action = action_from_type_params(&params)?;
+    let chars_typed = match &action {
+        Action::TypeText { text, .. } => char_count(text)?,
+        _ => unreachable!("act_type builds only TypeText actions"),
     };
 
     if let Some(recording) = recording {
@@ -87,6 +82,17 @@ pub async fn act_type_with_handle(
         ok: true,
         chars_typed,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+    })
+}
+
+pub fn action_from_type_params(params: &ActTypeParams) -> Result<Action, ErrorData> {
+    validate_type_params(params)?;
+    Ok(Action::TypeText {
+        text: emitted_text(params),
+        dynamics: params
+            .dynamics
+            .to_keystroke_dynamics(params.linear_ms_per_char),
+        backend: params.backend.to_backend(),
     })
 }
 

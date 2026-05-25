@@ -3264,6 +3264,7 @@ dependencies = [
  "futures-util",
  "hyper",
  "insta",
+ "regex",
  "rmcp",
  "schemars",
  "serde",

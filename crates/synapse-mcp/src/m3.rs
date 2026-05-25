@@ -1,3 +1,4 @@
+mod a11y_events;
 pub mod audio;
 pub mod profile;
 pub mod reflex;
@@ -18,6 +19,7 @@ use synapse_reflex::{EventBus, ReflexError, ReflexRuntime};
 use synapse_storage::Db;
 use tokio_util::sync::CancellationToken;
 
+use self::a11y_events::A11yEventBridge;
 use crate::http::sse::SseState;
 
 const DB_ENV: &str = "SYNAPSE_DB";
@@ -67,7 +69,7 @@ impl M3ServiceConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct M3State {
     pub db_path: Option<PathBuf>,
     pub profile_dir: Option<PathBuf>,
@@ -80,6 +82,7 @@ pub struct M3State {
     pub profile_runtime: Option<Arc<ProfileRuntime>>,
     pub sse_state: SseState,
     pub reflex_runtime: Option<Arc<Mutex<ReflexRuntime>>>,
+    pub a11y_event_bridge: Option<A11yEventBridge>,
     pub audio_runtime: Option<Arc<AudioRuntime>>,
 }
 
@@ -164,6 +167,7 @@ impl M3State {
             profile_runtime: None,
             sse_state,
             reflex_runtime: None,
+            a11y_event_bridge: None,
             audio_runtime: None,
         })
     }
@@ -212,6 +216,18 @@ impl M3State {
         )?));
         self.reflex_runtime = Some(Arc::clone(&runtime));
         Ok(runtime)
+    }
+
+    pub fn ensure_a11y_event_bridge(&mut self, event_bus: EventBus) -> Result<()> {
+        if self.a11y_event_bridge.is_some() {
+            return Ok(());
+        }
+        let bridge =
+            A11yEventBridge::start(event_bus).map_err(|error| ReflexError::ParamsInvalid {
+                detail: format!("a11y event bridge start failed: {error}"),
+            })?;
+        self.a11y_event_bridge = Some(bridge);
+        Ok(())
     }
 
     pub fn ensure_audio_runtime(&mut self) -> std::result::Result<Arc<AudioRuntime>, AudioError> {

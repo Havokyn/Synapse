@@ -24,7 +24,6 @@ pub async fn act_press_with_handle(
     connection_closed_cancel: Option<CancellationToken>,
     params: ActPressParams,
 ) -> Result<ActPressResponse, ErrorData> {
-    validate_hold_ms(params.hold_ms)?;
     let started = Instant::now();
     let keys = keys::normalized_keys(&params.keys)?;
     let key_count = u32::try_from(keys.len()).map_err(|_err| {
@@ -34,6 +33,7 @@ pub async fn act_press_with_handle(
         )
     })?;
     let backend = params.backend.to_backend();
+    validate_hold_ms(params.hold_ms)?;
     let action = press_action(keys.clone(), params.hold_ms, backend);
 
     if let Some(recording) = recording {
@@ -55,6 +55,16 @@ pub async fn act_press_with_handle(
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
         backend_used: backend_used_name(backend).to_owned(),
     })
+}
+
+pub fn action_from_press_params(params: &ActPressParams) -> Result<Action, ErrorData> {
+    validate_hold_ms(params.hold_ms)?;
+    let keys = keys::normalized_keys(&params.keys)?;
+    Ok(press_action(
+        keys,
+        params.hold_ms,
+        params.backend.to_backend(),
+    ))
 }
 
 fn validate_hold_ms(hold_ms: u32) -> Result<(), ErrorData> {

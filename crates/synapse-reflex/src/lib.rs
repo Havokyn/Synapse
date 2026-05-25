@@ -299,6 +299,11 @@ impl ReflexRuntime {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        self.db
+            .flush()
+            .map_err(|error| ReflexError::ParamsInvalid {
+                detail: format!("reflex audit flush before scan failed: {error}"),
+            })?;
 
         let rows = reflex_id
             .map_or_else(

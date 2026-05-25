@@ -4,12 +4,15 @@ use rmcp::ErrorData;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use synapse_core::{
-    Action, Backend, EventFilter, ReflexLifetime, ReflexStatus, ReflexThen, StoredReflexAudit,
-    error_codes, new_reflex_id,
+    Action, Backend, DataPredicate, EventFilter, ReflexLifetime, ReflexStatus, ReflexThen,
+    StoredReflexAudit, error_codes, new_reflex_id,
 };
 use synapse_reflex::{ReflexCancelOutcome, ReflexError, ReflexRuntime, ScheduledReflex};
 
-use crate::m1::mcp_error;
+use crate::{
+    m1::mcp_error,
+    m2::{ActPressParams, ActTypeParams, action_from_press_params, action_from_type_params},
+};
 
 use super::M3ToolStub;
 
@@ -48,8 +51,8 @@ pub struct ReflexRegisterParams {
     #[schemars(schema_with = "reflex_kind_schema")]
     pub kind: String,
     #[serde(default)]
-    pub when: Option<EventFilter>,
-    pub then: ReflexThen,
+    pub when: Option<ReflexWhenParam>,
+    pub then: ReflexThenParam,
     #[serde(default = "default_reflex_priority")]
     #[schemars(default = "default_reflex_priority", range(min = 0, max = 1000))]
     pub priority: u32,
@@ -61,6 +64,43 @@ pub struct ReflexRegisterParams {
     pub backend: Backend,
     #[serde(default)]
     pub exclusive: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ReflexWhenParam {
+    Filter(EventFilter),
+    WindowEvent(WindowEventWhen),
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WindowEventWhen {
+    pub kind: String,
+    #[serde(default, rename = "match")]
+    pub match_clause: WindowEventMatch,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WindowEventMatch {
+    #[serde(default)]
+    pub window_title_regex: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ReflexThenParam {
+    Core(ReflexThen),
+    Steps { steps: Vec<ReflexThenStep> },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReflexThenStep {
+    pub action: String,
+    #[serde(default = "empty_params")]
+    pub params: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -252,12 +292,13 @@ fn scheduled_reflex_from_params(
     params: ReflexRegisterParams,
 ) -> Result<ScheduledReflex, ReflexError> {
     let reflex_id = new_reflex_id();
-    let actions = actions_from_then(params.then, params.backend);
+    let actions = actions_from_then(params.then, params.backend)?;
     match params.kind.as_str() {
         "on_event" => {
             let when = params.when.ok_or_else(|| ReflexError::ParamsInvalid {
                 detail: "on_event reflex requires when filter".to_owned(),
             })?;
+            let when = when.into_event_filter()?;
             Ok(ScheduledReflex::on_event(reflex_id, when, actions)
                 .with_priority(params.priority)
                 .with_lifetime(params.lifetime)
@@ -275,22 +316,121 @@ fn scheduled_reflex_from_params(
     }
 }
 
-fn actions_from_then(then: ReflexThen, backend: Backend) -> Vec<Action> {
+impl ReflexWhenParam {
+    fn into_event_filter(self) -> Result<EventFilter, ReflexError> {
+        match self {
+            Self::Filter(filter) => Ok(filter),
+            Self::WindowEvent(when) => when.into_event_filter(),
+        }
+    }
+}
+
+impl WindowEventWhen {
+    fn into_event_filter(self) -> Result<EventFilter, ReflexError> {
+        let kind = normalize_window_event_kind(&self.kind)?;
+        let mut filters = vec![EventFilter::Kind { kind }];
+        if let Some(pattern) = self.match_clause.window_title_regex {
+            validate_regex(&pattern)?;
+            filters.push(EventFilter::Data {
+                path: "/window_title".to_owned(),
+                predicate: DataPredicate::Regex { pattern },
+            });
+        }
+        if filters.len() == 1 {
+            Ok(filters.remove(0))
+        } else {
+            Ok(EventFilter::And { args: filters })
+        }
+    }
+}
+
+fn normalize_window_event_kind(raw: &str) -> Result<String, ReflexError> {
+    let kind = raw.trim().replace('_', "-").to_ascii_lowercase();
+    if kind.is_empty() {
+        return Err(ReflexError::ParamsInvalid {
+            detail: "window event kind must not be empty".to_owned(),
+        });
+    }
+    Ok(kind)
+}
+
+fn validate_regex(pattern: &str) -> Result<(), ReflexError> {
+    if pattern.trim().is_empty() {
+        return Err(ReflexError::ParamsInvalid {
+            detail: "window_title_regex must not be empty".to_owned(),
+        });
+    }
+    regex::Regex::new(pattern).map_err(|error| ReflexError::ParamsInvalid {
+        detail: format!("window_title_regex is invalid: {error}"),
+    })?;
+    Ok(())
+}
+
+fn actions_from_then(then: ReflexThenParam, backend: Backend) -> Result<Vec<Action>, ReflexError> {
     let mut actions = match then {
-        ReflexThen::Action { action } => vec![action],
-        ReflexThen::Actions { actions } => actions,
-        ReflexThen::Combo {
+        ReflexThenParam::Core(ReflexThen::Action { action }) => vec![action],
+        ReflexThenParam::Core(ReflexThen::Actions { actions }) => actions,
+        ReflexThenParam::Core(ReflexThen::Combo {
             steps,
             backend: combo_backend,
-        } => vec![Action::Combo {
+        }) => vec![Action::Combo {
             steps,
             backend: combo_backend,
         }],
+        ReflexThenParam::Steps { steps } => actions_from_demo_steps(steps)?,
     };
     for action in &mut actions {
         apply_backend_default(action, backend);
     }
-    actions
+    Ok(actions)
+}
+
+fn actions_from_demo_steps(steps: Vec<ReflexThenStep>) -> Result<Vec<Action>, ReflexError> {
+    if steps.is_empty() {
+        return Err(ReflexError::ParamsInvalid {
+            detail: "then.steps must contain at least one action".to_owned(),
+        });
+    }
+    steps
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| action_from_demo_step(index, step))
+        .collect()
+}
+
+fn action_from_demo_step(index: usize, step: ReflexThenStep) -> Result<Action, ReflexError> {
+    match step.action.trim() {
+        "act_type" => {
+            let params = serde_json::from_value::<ActTypeParams>(step.params).map_err(|error| {
+                ReflexError::ParamsInvalid {
+                    detail: format!("then.steps[{index}].act_type params invalid: {error}"),
+                }
+            })?;
+            action_from_type_params(&params).map_err(|error| ReflexError::ParamsInvalid {
+                detail: format!("then.steps[{index}].act_type params invalid: {error}"),
+            })
+        }
+        "act_press" => {
+            let params =
+                serde_json::from_value::<ActPressParams>(step.params).map_err(|error| {
+                    ReflexError::ParamsInvalid {
+                        detail: format!("then.steps[{index}].act_press params invalid: {error}"),
+                    }
+                })?;
+            action_from_press_params(&params).map_err(|error| ReflexError::ParamsInvalid {
+                detail: format!("then.steps[{index}].act_press params invalid: {error}"),
+            })
+        }
+        other => Err(ReflexError::ParamsInvalid {
+            detail: format!(
+                "then.steps[{index}].action {other:?} is unsupported; supported actions: act_type, act_press"
+            ),
+        }),
+    }
+}
+
+fn empty_params() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 fn apply_backend_default(action: &mut Action, fallback: Backend) {
@@ -331,5 +471,116 @@ fn apply_backend_default(action: &mut Action, fallback: Backend) {
         | Action::PadTrigger { .. }
         | Action::PadReport { .. }
         | Action::ReleaseAll => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use synapse_core::{
+        Action, DataPredicate, EventFilter, KeyCode, KeystrokeDynamics, ReflexLifetime,
+    };
+    use synapse_reflex::SchedulerTrigger;
+
+    use super::{ReflexRegisterParams, scheduled_reflex_from_params};
+
+    #[test]
+    fn demo_gate_shape_maps_to_event_filter_and_actions() {
+        let params: ReflexRegisterParams = serde_json::from_value(json!({
+            "kind": "on_event",
+            "when": {
+                "kind": "element-appeared",
+                "match": { "window_title_regex": "^Save As$" }
+            },
+            "then": {
+                "steps": [
+                    {
+                        "action": "act_type",
+                        "params": {
+                            "text": "m3-demo.txt",
+                            "dynamics": "linear",
+                            "linear_ms_per_char": 20
+                        }
+                    },
+                    {
+                        "action": "act_press",
+                        "params": { "keys": ["enter"] }
+                    }
+                ]
+            },
+            "lifetime": { "kind": "one_shot" }
+        }))
+        .expect("demo shape should deserialize");
+
+        let reflex =
+            scheduled_reflex_from_params(params).expect("demo shape should build a reflex");
+
+        let SchedulerTrigger::OnEvent(EventFilter::And { args }) = reflex.trigger else {
+            panic!("demo when should map to a compound on_event filter");
+        };
+        assert!(args.contains(&EventFilter::Kind {
+            kind: "element-appeared".to_owned()
+        }));
+        assert!(args.contains(&EventFilter::Data {
+            path: "/window_title".to_owned(),
+            predicate: DataPredicate::Regex {
+                pattern: "^Save As$".to_owned()
+            }
+        }));
+        assert_eq!(reflex.lifetime, ReflexLifetime::OneShot);
+        assert_eq!(reflex.then.len(), 2);
+        match &reflex.then[0] {
+            Action::TypeText { text, dynamics, .. } => {
+                assert_eq!(text, "m3-demo.txt");
+                assert_eq!(dynamics, &KeystrokeDynamics::Linear { ms_per_char: 20 });
+            }
+            other => panic!("first demo step should map to TypeText, got {other:?}"),
+        }
+        match &reflex.then[1] {
+            Action::KeyPress { key, hold_ms, .. } => {
+                assert_eq!(*hold_ms, 33);
+                assert_eq!(
+                    &key.code,
+                    &KeyCode::Named {
+                        value: "enter".to_owned()
+                    }
+                );
+            }
+            other => panic!("second demo step should map to KeyPress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demo_gate_shape_rejects_invalid_regex() {
+        let params: ReflexRegisterParams = serde_json::from_value(json!({
+            "kind": "on_event",
+            "when": {
+                "kind": "element-appeared",
+                "match": { "window_title_regex": "[" }
+            },
+            "then": { "steps": [{ "action": "act_press", "params": { "keys": ["enter"] } }] }
+        }))
+        .expect("invalid regex still deserializes before validation");
+
+        let error = scheduled_reflex_from_params(params)
+            .expect_err("invalid window_title_regex should fail closed");
+        assert!(
+            error.to_string().contains("window_title_regex is invalid"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn demo_gate_shape_rejects_unknown_action() {
+        let params: ReflexRegisterParams = serde_json::from_value(json!({
+            "kind": "on_event",
+            "when": { "kind": "element-appeared" },
+            "then": { "steps": [{ "action": "act_launch", "params": {} }] }
+        }))
+        .expect("unknown action still deserializes before validation");
+
+        let error = scheduled_reflex_from_params(params)
+            .expect_err("unsupported reflex step should fail closed");
+        assert!(error.to_string().contains("unsupported"), "{error}");
     }
 }

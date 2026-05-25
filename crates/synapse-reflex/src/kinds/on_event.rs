@@ -90,6 +90,15 @@ pub(crate) fn publish_fired(
     let _report = event_bus.publish(event);
     let audit = fired_audit(reflex_id, tick_index, trigger_event, actions);
     write_audit_if_configured(audit_db, &audit);
+    tracing::info!(
+        code = "REFLEX_FIRED",
+        reflex_id = %reflex_id,
+        trigger_seq = trigger_event.seq,
+        trigger_kind = %trigger_event.kind,
+        action_count = actions.len(),
+        tick_index,
+        "reflex fired"
+    );
 }
 
 fn publish_limit_event(
