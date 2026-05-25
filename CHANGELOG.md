@@ -6,6 +6,28 @@
   agent with direct source-of-truth readback; automated tests, scripts,
   benchmarks, GitHub Actions, and CI are supporting evidence only.
 
+## v0.1.0-m3 - 2026-05-25
+
+M3 adds the reflex, storage, profile, audio, replay, and HTTP/SSE runtime
+surface for Synapse, shipping from manual configured-host FSV rather than CI.
+
+- Added the M3 MCP tools: `subscribe`, `subscribe_cancel`,
+  `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`,
+  `profile_get`, `profile_set_active`, `replay_record`, `audio_tail`, and
+  `audio_transcribe`.
+- Filled the M3 crates `synapse-reflex`, `synapse-storage`,
+  `synapse-profiles`, and `synapse-audio` with the runtime implementations
+  used by the daemon.
+- Added streamable HTTP transport and manual SSE event routes with bearer-token
+  auth plus Origin and Host enforcement.
+- Added the M3 error families `REFLEX_RECURSION_LIMIT`, `HTTP_*`,
+  `STORAGE_DISK_PRESSURE_LEVEL_1` through `STORAGE_DISK_PRESSURE_LEVEL_4`, and
+  `REPLAY_*`.
+- Carried forward M2 fixes for #244, #234, #233, #231, and #239, including the
+  LoC splits needed to keep M2 action modules maintainable.
+- Recorded the M3 operating doctrine: manual FSV must use the real Synapse
+  runtime surface where available, then separately inspect the physical SoT.
+
 ## v0.1.0-m2 - 2026-05-24
 
 M2 adds the action MVP for the configured Windows host with manual FSV as the
