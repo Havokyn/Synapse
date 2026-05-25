@@ -1,0 +1,55 @@
+---
+source: crates/synapse-mcp/tests/m3_audio_transcribe_tool.rs
+expression: shape
+---
+{
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "language": {
+        "default": "en",
+        "type": "string"
+      },
+      "seconds": {
+        "default": 5,
+        "format": "uint32",
+        "maximum": 5,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "title": "AudioTranscribeParams",
+    "type": "object"
+  },
+  "name": "audio_transcribe",
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "confidence": {
+        "format": "float",
+        "type": "number"
+      },
+      "latency_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "model_id": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "text",
+      "confidence",
+      "latency_ms",
+      "model_id"
+    ],
+    "title": "AudioTranscribeResponse",
+    "type": "object"
+  }
+}

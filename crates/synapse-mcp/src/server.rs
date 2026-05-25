@@ -38,7 +38,10 @@ use crate::{
     },
     m3::{
         M3ServiceConfig, SharedM3State,
-        audio::{AudioTailParams, AudioTailResponse, tail_audio},
+        audio::{
+            AudioTailParams, AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse,
+            tail_audio, transcribe_audio,
+        },
         profile::{
             ProfileActivateParams, ProfileActivateResponse, ProfileListParams, ProfileListResponse,
             activate_profile, list_profiles,
@@ -802,6 +805,21 @@ impl SynapseService {
             "tool.invocation kind=audio_tail"
         );
         tail_audio(&self.m3_state, &params.0).map(Json)
+    }
+
+    #[tool(description = "Transcribe the latest loopback audio tail with Whisper tiny")]
+    pub async fn audio_transcribe(
+        &self,
+        params: Parameters<AudioTranscribeParams>,
+    ) -> Result<Json<AudioTranscribeResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "audio_transcribe",
+            seconds = params.0.seconds,
+            language = %params.0.language,
+            "tool.invocation kind=audio_transcribe"
+        );
+        transcribe_audio(&self.m3_state, &params.0).map(Json)
     }
 }
 
