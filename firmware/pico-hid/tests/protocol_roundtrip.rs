@@ -195,7 +195,7 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let telemetry = frame(13, HostCommand::GetTelemetry, &[]);
     let telemetry_outcome = dispatch_frame(&mut state, telemetry, identify);
     assert_eq!(telemetry_outcome.command, DeviceCommand::TelemetryResp);
-    assert_eq!(telemetry_outcome.payload_len, 20);
+    assert_eq!(telemetry_outcome.payload_len, 24);
     assert_eq!(
         u32::from_le_bytes([
             telemetry_outcome.payload[0],

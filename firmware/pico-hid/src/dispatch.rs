@@ -1,5 +1,6 @@
 use crate::protocol::{DeviceCommand, Frame, HostCommand, NakReason};
 use crate::reports::{BootKeyboardReport, BootMouseReport, GAMEPAD_REPORT_LEN, GamepadReport};
+use crate::safety::DEFAULT_WATCHDOG_TIMEOUT_MS;
 
 pub const MAX_RESPONSE_PAYLOAD_LEN: usize = 32;
 pub const FW_VERSION_MAJOR: u8 = 0;
@@ -69,11 +70,11 @@ impl DispatchState {
             keyboard: BootKeyboardReport::neutral(),
             gamepad: GamepadReport::neutral(),
             telemetry: Telemetry::new(),
-            watchdog_timeout_ms: 1000,
+            watchdog_timeout_ms: DEFAULT_WATCHDOG_TIMEOUT_MS,
         }
     }
 
-    fn release_all(&mut self) {
+    pub(crate) fn release_all(&mut self) {
         self.mouse = BootMouseReport::neutral();
         self.keyboard = BootKeyboardReport::neutral();
         self.gamepad = GamepadReport::neutral();
@@ -93,6 +94,7 @@ pub struct Telemetry {
     pub frames_dropped: u32,
     pub link_errors: u32,
     pub commands_executed: u32,
+    pub watchdog_fires: u32,
 }
 
 impl Telemetry {
@@ -103,6 +105,7 @@ impl Telemetry {
             frames_dropped: 0,
             link_errors: 0,
             commands_executed: 0,
+            watchdog_fires: 0,
         }
     }
 
@@ -112,7 +115,8 @@ impl Telemetry {
         out[8..12].copy_from_slice(&self.frames_dropped.to_le_bytes());
         out[12..16].copy_from_slice(&self.link_errors.to_le_bytes());
         out[16..20].copy_from_slice(&self.commands_executed.to_le_bytes());
-        20
+        out[20..24].copy_from_slice(&self.watchdog_fires.to_le_bytes());
+        24
     }
 }
 

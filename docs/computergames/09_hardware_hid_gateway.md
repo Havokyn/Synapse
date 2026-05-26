@@ -192,7 +192,7 @@ Binary, framed, with explicit acks. Parseable with no allocations on firmware si
 | 0x30 | `PAD_REPORT` | `[14 bytes raw report]` | apply pad report |
 | 0x40 | `RELEASE_ALL` | empty | all mouse buttons up, all keys up, pad neutral |
 | 0x50 | `WATCHDOG_KICK` | `[u32 timeout_ms]` | reset watchdog with new timeout |
-| 0x60 | `GET_TELEMETRY` | empty | replies with `TELEMETRY_RESP { uptime_ms, frames_received, frames_dropped, link_errors }` |
+| 0x60 | `GET_TELEMETRY` | empty | replies with `TELEMETRY_RESP { uptime_ms, frames_received, frames_dropped, link_errors, commands_executed, watchdog_fires }` |
 | 0xF0 | `RESET_TO_BOOTLOADER` | empty | enters UF2 bootloader (for re-flashing) |
 
 ### 5.3 Responses (firmware → host)
