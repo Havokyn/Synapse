@@ -90,7 +90,7 @@ fn keyboard_mouse_and_release_actions_emit_firmware_commands() {
     backend
         .execute(
             &Action::KeyPress {
-                key: hid_key(0x04),
+                key: named_key("a"),
                 hold_ms: 0,
                 backend: Backend::Hardware,
             },
@@ -321,10 +321,69 @@ fn combo_steps_emit_expected_firmware_sequence() {
 }
 
 #[test]
+fn named_symbol_and_text_keys_emit_hid_usage_payloads() {
+    let gateway = StubGateway::default();
+    let records = gateway.clone();
+    let backend = HardwareBackend::with_gateway(gateway);
+    let mut state = EmitState::new();
+
+    backend
+        .execute(
+            &Action::KeyPress {
+                key: named_key("right"),
+                hold_ms: 0,
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("named arrow should emit: {error}"));
+    backend
+        .execute(
+            &Action::KeyPress {
+                key: symbol_key('?'),
+                hold_ms: 0,
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("US-layout symbol should emit: {error}"));
+    backend
+        .execute(
+            &Action::TypeText {
+                text: "az0- ".to_owned(),
+                dynamics: synapse_core::KeystrokeDynamics::Burst,
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("US-layout text should emit: {error}"));
+
+    assert_eq!(
+        records.commands(),
+        vec![
+            (HOST_COMMAND_KEY_DOWN, vec![0x4F]),
+            (HOST_COMMAND_KEY_UP, vec![0x4F]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x38]),
+            (HOST_COMMAND_KEY_UP, vec![0x38]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x04]),
+            (HOST_COMMAND_KEY_UP, vec![0x04]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x1D]),
+            (HOST_COMMAND_KEY_UP, vec![0x1D]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x27]),
+            (HOST_COMMAND_KEY_UP, vec![0x27]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x2D]),
+            (HOST_COMMAND_KEY_UP, vec![0x2D]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x2C]),
+            (HOST_COMMAND_KEY_UP, vec![0x2C]),
+        ]
+    );
+}
+
+#[test]
 fn unsupported_or_later_scoped_variants_fail_closed_without_commands() {
     let cases = [
         Action::TypeText {
-            text: "a".to_owned(),
+            text: "€".to_owned(),
             dynamics: synapse_core::KeystrokeDynamics::Burst,
             backend: Backend::Hardware,
         },
@@ -355,7 +414,7 @@ fn unsupported_or_later_scoped_variants_fail_closed_without_commands() {
         Action::KeyDown {
             key: Key {
                 code: KeyCode::Named {
-                    value: "ctrl".to_owned(),
+                    value: "not-a-hid-key".to_owned(),
                 },
                 use_scancode: false,
             },
@@ -380,8 +439,7 @@ fn unsupported_or_later_scoped_variants_fail_closed_without_commands() {
         },
     ];
 
-    for (case_index, action) in cases.into_iter().enumerate() {
-        let observed_case_index = case_index;
+    for action in cases {
         let gateway = StubGateway::default();
         let records = gateway.clone();
         let backend = HardwareBackend::with_gateway(gateway);
@@ -398,7 +456,6 @@ fn unsupported_or_later_scoped_variants_fail_closed_without_commands() {
         let after_button_count = after_snapshot.held_buttons.len();
         let after_pad_count = after_snapshot.pad_state.len();
         assert!(result_is_err);
-        assert!(observed_case_index < 8);
         assert!(before_commands.is_empty());
         assert_eq!(before_snapshot, EmitState::new().snapshot());
         assert!(after_commands.is_empty());
@@ -422,5 +479,21 @@ fn hid_key(value: u8) -> Key {
     Key {
         code: KeyCode::HidCode { value },
         use_scancode: true,
+    }
+}
+
+fn named_key(value: &str) -> Key {
+    Key {
+        code: KeyCode::Named {
+            value: value.to_owned(),
+        },
+        use_scancode: false,
+    }
+}
+
+fn symbol_key(value: char) -> Key {
+    Key {
+        code: KeyCode::Symbol { value },
+        use_scancode: false,
     }
 }

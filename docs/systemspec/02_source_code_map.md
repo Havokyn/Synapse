@@ -184,7 +184,9 @@ crates/synapse-action/
         ├── mouse_coordinates.rs    # Screen→virtual desktop coord conversion
         ├── text_dispatch.rs        # Text-input dispatch (clipboard paste vs synthesized keystrokes)
         ├── hardware.rs             # HardwareBackend public facade
-        ├── hardware/keyboard.rs    # Key to HID usage encoding
+        ├── hardware/keyboard.rs    # Keyboard action helpers
+        ├── hardware/keymap.rs      # Synapse key to USB HID Keyboard/Keypad usage mapping
+        ├── hardware/keymap_tests.rs # HID usage mapping regression checks
         ├── hardware/mouse.rs       # Relative mouse/button/wheel command encoding
         ├── hardware/pad.rs         # Gamepad report command encoding
         ├── hardware/tests.rs       # HardwareBackend command/state tests

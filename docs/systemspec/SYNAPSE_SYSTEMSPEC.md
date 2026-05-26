@@ -577,7 +577,9 @@ crates/synapse-action/
         ├── mouse_coordinates.rs    # Screen→virtual desktop coord conversion
         ├── text_dispatch.rs        # Text-input dispatch (clipboard paste vs synthesized keystrokes)
         ├── hardware.rs             # HardwareBackend public facade
-        ├── hardware/keyboard.rs    # Key to HID usage encoding
+        ├── hardware/keyboard.rs    # Keyboard action helpers
+        ├── hardware/keymap.rs      # Synapse key to USB HID Keyboard/Keypad usage mapping
+        ├── hardware/keymap_tests.rs # HID usage mapping regression checks
         ├── hardware/mouse.rs       # Relative mouse/button/wheel command encoding
         ├── hardware/pad.rs         # Gamepad report command encoding
         ├── hardware/tests.rs       # HardwareBackend command/state tests
@@ -2621,7 +2623,7 @@ Each M2 tool wrapper builds one or more `synapse_core::Action`s and dispatches t
 
 ## 17. What is NOT covered
 
-- **Remaining hardware HID gaps.** The live `Backend::Hardware` path is enabled by `--hardware-hid <port|auto>`, but named-key usage mapping (#394), modifier/6KRO handling (#395), absolute-mouse fallback (#396), and broader supported-use gates remain M4 work.
+- **Remaining hardware HID gaps.** The live `Backend::Hardware` path is enabled by `--hardware-hid <port|auto>` and maps Synapse keys to USB HID Keyboard/Keypad usage IDs, but modifier/6KRO handling (#395), shifted hardware text, absolute-mouse fallback (#396), and broader supported-use gates remain M4 work.
 - **Modifiers on `act_click`.** The schema accepts `Vec<ClickModifier>` but emitting a non-empty list currently returns `ACTION_BACKEND_UNAVAILABLE` with the message "act_click modifiers are not wired in the M2 click schema slice".
 - **Element-target aim and drag**. `act_aim` with an `Element` target returns `ACTION_BACKEND_UNAVAILABLE` ("requires the dedicated target resolution issue"); same for `Track` targets. `act_drag` supports `Element` targets via UIA bbox resolution.
 

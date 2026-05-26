@@ -1,7 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use synapse_core::{Action, ComboInput, Key};
+use synapse_core::{Action, ComboInput, Key, KeystrokeDynamics};
 use synapse_hid_host::{
     HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_UP, HOST_COMMAND_RELEASE_ALL, HidError, HidGateway,
 };
@@ -9,6 +9,9 @@ use synapse_hid_host::{
 use crate::{ActionBackend, ActionError, EmitState};
 
 mod keyboard;
+mod keymap;
+#[cfg(test)]
+mod keymap_tests;
 mod mouse;
 mod pad;
 
@@ -89,10 +92,7 @@ where
         Action::KeyDown { key, .. } => key_down(gateway, key, state),
         Action::KeyUp { key, .. } => key_up(gateway, key, state),
         Action::KeyChord { keys, hold_ms, .. } => key_chord(gateway, keys, *hold_ms, state),
-        Action::TypeText { .. } => Err(ActionError::UnsupportedKey {
-            detail: "hardware text typing requires the HID usage keymap from issue #394"
-                .to_owned(),
-        }),
+        Action::TypeText { text, dynamics, .. } => type_text(gateway, text, dynamics, state),
         Action::MouseMove { .. } | Action::MouseDrag { .. } | Action::AimAt { .. } => {
             Err(ActionError::TargetInvalid {
                 detail:
@@ -177,6 +177,28 @@ where
     sleep_ms(hold_ms);
     for key in keys.iter().rev() {
         key_up(gateway, key, state)?;
+    }
+    Ok(())
+}
+
+fn type_text<G>(
+    gateway: &mut G,
+    text: &str,
+    dynamics: &KeystrokeDynamics,
+    state: &mut EmitState,
+) -> Result<(), ActionError>
+where
+    G: HardwareGateway,
+{
+    for event in crate::sample_typing_schedule(text, dynamics, None) {
+        sleep_ms(event.iki_ms_before);
+        let key = Key {
+            code: synapse_core::KeyCode::HidCode {
+                value: keyboard::hid_text_key_code(event.r#char)?,
+            },
+            use_scancode: true,
+        };
+        key_press(gateway, &key, 0, state)?;
     }
     Ok(())
 }

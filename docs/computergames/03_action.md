@@ -288,7 +288,7 @@ Smoothing: by default, stick deltas >0.5 in 16ms snap immediately (game-driven s
 
 When `--hardware-hid <port|auto>` is set and `synapse-hid-host` connects and completes `IDENTIFY`, the hardware back-end routes to `HardwareBackend`. Without explicit hardware HID enablement, `Backend::Hardware` fails closed through `HardwareUnavailableBackend` with `ACTION_BACKEND_UNAVAILABLE`; it never silently downgrades to software or ViGEm.
 
-The live hardware route talks to an RP2040 board running our firmware (`firmware/pico-hid/`) through the serial-protocol driver in `synapse-hid-host`.
+The live hardware route talks to an RP2040 board running our firmware (`firmware/pico-hid/`) through the serial-protocol driver in `synapse-hid-host`. Keyboard actions map Synapse `KeyCode::Named`, US-layout `KeyCode::Symbol`, and defined `KeyCode::HidCode` values to USB HID Keyboard/Keypad usage IDs. Hardware `act_type` emits unmodified US-layout characters; shifted characters and non-US-layout text fail closed with `ACTION_UNSUPPORTED_KEY` until modifier/6KRO handling lands.
 
 The board enumerates as generic HID composite device (mouse + keyboard + gamepad). PC sees a real USB peripheral. No `SendInput`, no virtual driver, no signal interception possible.
 
