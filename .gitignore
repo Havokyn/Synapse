@@ -36,3 +36,5 @@ tracing-*.log
 # Criterion/critcmp benchmark exports are regenerated and stored off-tree.
 /bench_results/
 
+# Playwright MCP session artifacts (console logs, page snapshots).
+.playwright-mcp/
