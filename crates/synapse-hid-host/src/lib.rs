@@ -27,8 +27,9 @@ pub use protocol::{
     HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_MODS, HOST_COMMAND_KEY_UP, HOST_COMMAND_MOUSE_BUTTON,
     HOST_COMMAND_MOUSE_MOVE_REL, HOST_COMMAND_MOUSE_WHEEL, HOST_COMMAND_PAD_REPORT,
     HOST_COMMAND_PING, HOST_COMMAND_RELEASE_ALL, HOST_COMMAND_RESET_TO_BOOTLOADER,
-    HOST_COMMAND_WATCHDOG_KICK, HOST_MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, encode_device_frame,
-    encode_host_frame, encode_identify_frame, parse_device_frame, parse_device_frame_prefix,
+    HOST_COMMAND_WATCHDOG_KICK, HOST_MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, ParseError,
+    crc16_ccitt_false, encode_device_frame, encode_host_frame, encode_identify_frame,
+    parse_device_frame, parse_device_frame_prefix,
 };
 pub use reconnect::{
     HidReconnectGateway, HidReconnectTarget, RECONNECT_INTERVAL_MS, ReconnectConnector,
