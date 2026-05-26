@@ -370,6 +370,9 @@ host OS, shell, browser, package-manager, and device-management workflows. Do
 not ask the operator to download or install something while reversible local
 acquisition/setup remains possible. Read the authoritative SoT directly before
 shipping.
+Do not stop at "missing." If the operator could make the prerequisite real from
+this computer, the agent must do the reversible local work through Synapse and
+host workflows, then inspect the physical SoT.
 Only hard-to-reverse external actions such as spending money, private
 credentials, billing, or external account changes require narrow operator
 approval, and every reversible local step must be complete before asking.

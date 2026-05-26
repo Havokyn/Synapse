@@ -38,6 +38,13 @@ No external components. Power and data over the same USB.
 Hardware sourcing and BOOTSEL setup details live in
 [`../hardware/procurement.md`](../hardware/procurement.md).
 
+If any M4 hardware, cable, driver, firmware artifact, build tool, serial port,
+or host surface is missing, the agent must make the real prerequisite happen on
+this configured host when reversible local steps exist. Do not stop at
+"missing"; use Synapse and local OS/browser/package/device workflows, then read
+the physical source of truth (`RPI-RP2` volume, `Get-PnpDevice`, COM port,
+driver/service inventory, artifact hash, or equivalent).
+
 ---
 
 ## 3. Device identity

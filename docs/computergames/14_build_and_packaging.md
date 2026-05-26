@@ -50,6 +50,9 @@ workflows, to download, install, connect, configure, generate, flash, launch,
 or inspect the missing prerequisite when those steps are reversible and local to
 the configured host. Do not ask the operator to download or install something
 while reversible local acquisition/setup remains possible.
+Do not stop at "missing." If the operator could do it from this computer, the
+agent must use Synapse and host workflows to make it happen, then inspect the
+physical source of truth.
 
 The source of truth is the physical place the prerequisite should appear:
 package inventory, Rust target list, driver/service list, `Get-PnpDevice`,

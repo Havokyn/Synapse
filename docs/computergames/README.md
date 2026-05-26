@@ -17,6 +17,9 @@ device-management workflows, to make missing tools, drivers, models, files,
 services, account state, firmware, and hardware surfaces real. They must then
 read the physical source of truth directly and ask only before hard-to-reverse
 external actions.
+Do not stop at "missing": if the operator could do it from this computer, the
+agent must use Synapse/local host control to make it happen, then inspect the
+resulting source of truth.
 
 ---
 

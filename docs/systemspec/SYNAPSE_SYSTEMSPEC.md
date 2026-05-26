@@ -59,6 +59,8 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
   Missing configured-host prerequisites are acquisition/setup work: agents use
   Synapse/local control as the operator-equivalent host control surface to make
   reversible local prerequisites real, then read the physical source of truth.
+  Do not stop at "missing"; if the operator could do it from this computer,
+  the agent must do it through Synapse/local host workflows and inspect the SoT.
 - For the contract-level PRD, see `docs/computergames/` (numbered 00–17).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).
 
@@ -109,7 +111,7 @@ Source files covered:
 
 Synapse is a Rust [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that exposes a Windows 11/10 host's local desktop and game state as low-token structured JSON, accepts high-level action intents (click, type, aim, press, drag, combo), and runs sub-frame reflex controllers so model latency never costs a frame. The shipping binary is `synapse-mcp` (`crates/synapse-mcp/src/main.rs`); MCP clients (Claude Desktop/Code, Codex, custom runners) connect over **stdio** (newline-delimited JSON-RPC) or **streamable HTTP** (loopback by default, bearer-auth required).
 
-The repository operates under the doctrine in `AGENTS.md`: manual Full State Verification (FSV) on the configured Windows host is the shipping gate; GitHub Actions, CI, scripts, tests, and benches are supporting evidence only; missing configured-host prerequisites are acquisition/setup work where the agent figures out where the thing must come from, where it must physically appear, uses Synapse/local control as the operator-equivalent host control surface to make it happen when reversible local steps exist, and verifies the real source of truth; and agent commits include `[skip ci]`.
+The repository operates under the doctrine in `AGENTS.md`: manual Full State Verification (FSV) on the configured Windows host is the shipping gate; GitHub Actions, CI, scripts, tests, and benches are supporting evidence only; missing configured-host prerequisites are acquisition/setup work where the agent figures out where the thing must come from, where it must physically appear, uses Synapse/local control as the operator-equivalent host control surface to make it happen when reversible local steps exist, does not stop at "missing" when the operator could do it from this computer, and verifies the real source of truth; and agent commits include `[skip ci]`.
 
 ## 2. Architecture map
 
@@ -3581,6 +3583,7 @@ These are doctrine — **NEVER violate**:
 3. **Full-State Verification (FSV) is mandatory and manual.** The agent reads the SoT before, executes the trigger, performs a separate read for "after", exercises ≥3 edge cases (empty/boundary/structurally-invalid), and records actual state. **Scripts, tests, benchmarks, harnesses, GitHub Actions, and CI are supporting evidence only.** They never count as FSV. Do not add `*_fsv` tests, FSV harnesses, or FSV scripts.
 4. **Natural-only motion (OQ-004 DECIDED 2026-05-22).** `Natural` curves + `Natural` keystroke dynamics tuned `FAST` are the resolved default of every tool, profile, and reflex. `Instant`/`Burst` exist for explicit opt-in only.
 5. **Manual FSV on the configured Windows host is the shipping gate, not CI** (operator decision 2026-05-24, issues #246/#247/#350/#351). Do not dispatch, wait on, or block a tag on GitHub Actions/CI. Do not add `*_fsv` tests.
+6. **Missing configured-host prerequisites are agent work, not blockers.** Do not stop at "missing." If the operator could download, install, connect, configure, generate, flash, launch, or inspect it from this computer, the agent must use Synapse/local host control to make it happen and then inspect the physical SoT. Ask only for narrow approval on hard-to-reverse external actions after reversible local work is exhausted.
 
 `AGENTS.md` reinforces these and pins **`[skip ci]` on every agent commit**.
 

@@ -17,6 +17,9 @@ use Synapse/local computer control as an operator-equivalent host control
 surface, plus normal OS, shell, browser, package-manager, and device-management
 workflows, to make the missing thing real and then read the physical source of
 truth directly. Ask only before hard-to-reverse external actions.
+Do not stop at "missing": if the operator could do it from this computer,
+the agent must use Synapse and local host workflows to make it happen, then
+inspect the source of truth.
 
 ## Status: M1
 

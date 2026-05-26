@@ -51,6 +51,11 @@ normal OS, shell, browser, package-manager, and device-management workflows.
 Do not ask the operator to download or install something while reversible local
 acquisition/setup remains possible.
 
+Operationally: do not stop at "missing." Use the same local host control the
+operator has through Synapse. If it can be done from this computer, do it and
+then inspect the resulting source of truth. Missing configured-host state is
+never a blocker by itself.
+
 Missing prerequisites become concrete work items with source-of-truth readback:
 identify what is missing, identify the authoritative place it should appear,
 perform the acquisition/setup step, then read that source of truth directly. If
