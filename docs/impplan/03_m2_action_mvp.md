@@ -702,7 +702,7 @@ count and order. Mismatch ⇒ fail with the actual recorded sequence printed.
 
 | Risk | Mitigation |
 |---|---|
-| ViGEm install friction | M2 assumes the operator's configured host has ViGEmBus installed. `VigemBackend::ensure_ready` still surfaces `ACTION_VIGEM_NOT_INSTALLED` and **never** auto-installs if the driver is missing, but absent-driver portability testing is not an M2 release gate. **No silent fallback to software backend.** |
+| ViGEm install friction | `VigemBackend::ensure_ready` surfaces `ACTION_VIGEM_NOT_INSTALLED` and **never** silently installs or falls back at runtime, but configured-host issue work must acquire/install ViGEmBus through local reversible workflows before treating gamepad work as blocked. Absent-driver portability testing is not an M2 release gate. **No silent fallback to software backend.** |
 | `Natural::FAST` feel iteration | preset frozen at M2 per §3.2; tune from real telemetry at M5 without changing the default-class |
 | `OnceCell` vs `OnceLock` | use `std::sync::OnceLock` (stable since 1.70); do NOT add `once_cell` dep |
 | `enigo` raw scan codes | `Key::use_scancode = true` routes through direct `windows::SendInput` w/ `KEYEVENTF_SCANCODE`; profile flag deferred to M3 (M2 hardcodes per-call) |
