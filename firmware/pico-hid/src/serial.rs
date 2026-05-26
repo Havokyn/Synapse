@@ -21,6 +21,13 @@ use pico_hid::protocol::{
     parse_host_frame_any_command,
 };
 use pico_hid::reports::{self, BootKeyboardReport, BootMouseReport, GamepadReport};
+#[cfg(not(feature = "loopback"))]
+use pico_hid::{
+    dispatch::{DispatchState, IdentifyInfo, dispatch_frame},
+    protocol::{
+        MAX_FRAME_LEN, NakReason, ParseResult, encode_device_frame, encode_nak, parse_host_frame,
+    },
+};
 
 const CDC_MAX_PACKET_SIZE: u16 = 64;
 const HID_POLL_MS: u8 = 1;
@@ -235,10 +242,58 @@ async fn gamepad_hid_task(mut writer: GamepadWriter) -> ! {
 #[cfg(not(feature = "loopback"))]
 async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(), Disconnected> {
     let mut packet = [0u8; CDC_MAX_PACKET_SIZE as usize];
+    let mut rx = [0u8; MAX_FRAME_LEN];
+    let mut rx_len = 0usize;
+    let mut tx = [0u8; MAX_FRAME_LEN];
+    let usb_identity = usb::identity();
+    let identify = IdentifyInfo::new(*b"DEVBUILD", usb_identity.vid, usb_identity.pid);
+    let mut state = DispatchState::new();
 
     loop {
         let count = serial_class.read_packet(&mut packet).await?;
-        write_serial_bytes(serial_class, &packet[..count]).await?;
+        if rx_len + count > rx.len() {
+            state.telemetry.record_frame_dropped();
+            rx_len = 0;
+            continue;
+        }
+
+        rx[rx_len..rx_len + count].copy_from_slice(&packet[..count]);
+        rx_len += count;
+
+        loop {
+            let consumed = match parse_host_frame(&rx[..rx_len]) {
+                ParseResult::Frame { frame, consumed } => {
+                    let outcome = dispatch_frame(&mut state, frame, identify);
+                    let tx_len = encode_device_frame(
+                        frame.seq,
+                        outcome.command,
+                        &outcome.payload[..outcome.payload_len],
+                        &mut tx,
+                    )
+                    .expect("dispatch responses always fit in a device frame");
+                    write_serial_bytes(serial_class, &tx[..tx_len]).await?;
+                    consumed
+                }
+                ParseResult::Nak { nak, consumed } => {
+                    if matches!(nak.reason, NakReason::CrcInvalid) {
+                        state.telemetry.record_crc_error();
+                    } else {
+                        state.telemetry.record_link_error();
+                    }
+                    let tx_len = encode_nak(nak.seq, nak.reason, &mut tx)
+                        .expect("NAK payload always fits in a device frame");
+                    write_serial_bytes(serial_class, &tx[..tx_len]).await?;
+                    consumed
+                }
+                ParseResult::Drop { consumed, .. } => {
+                    state.telemetry.record_frame_dropped();
+                    consumed
+                }
+                ParseResult::NeedMore { .. } => break,
+            };
+
+            consume_rx(&mut rx, &mut rx_len, consumed);
+        }
     }
 }
 
@@ -303,7 +358,6 @@ async fn write_serial_bytes(
     Ok(())
 }
 
-#[cfg(feature = "loopback")]
 fn consume_rx(rx: &mut [u8; MAX_FRAME_LEN], rx_len: &mut usize, consumed: usize) {
     if consumed >= *rx_len {
         *rx_len = 0;

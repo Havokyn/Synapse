@@ -1,3 +1,5 @@
+#![cfg(not(feature = "loopback"))]
+
 use pico_hid::dispatch::{DispatchState, IdentifyInfo, dispatch_frame};
 use pico_hid::protocol::{Frame, HostCommand};
 use pico_hid::reports::GamepadReport;

@@ -1,11 +1,14 @@
+#[cfg(not(feature = "loopback"))]
 use pico_hid::dispatch::{
     DispatchOutcome, DispatchState, IdentifyInfo, MAX_RESPONSE_PAYLOAD_LEN, dispatch_frame,
 };
+#[cfg(not(feature = "loopback"))]
+use pico_hid::protocol::DeviceCommand;
 use pico_hid::protocol::{
-    DeviceCommand, DropReason, EncodeError, HOST_MAGIC, HostCommand, MAX_FRAME_LEN,
-    MAX_PAYLOAD_LEN, NakReason, ParseResult, crc16_ccitt_false, encode_host_frame, next_sequence,
-    parse_host_frame,
+    DropReason, EncodeError, HOST_MAGIC, HostCommand, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, NakReason,
+    ParseResult, crc16_ccitt_false, encode_host_frame, next_sequence, parse_host_frame,
 };
+#[cfg(not(feature = "loopback"))]
 use pico_hid::reports::{GAMEPAD_REPORT_LEN, GamepadReport};
 
 #[test]
@@ -114,6 +117,7 @@ fn protocol_roundtrips_1000_deterministic_frames() {
 }
 
 #[test]
+#[cfg(not(feature = "loopback"))]
 fn dispatcher_applies_mouse_keyboard_pad_and_release_all() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -160,6 +164,7 @@ fn dispatcher_applies_mouse_keyboard_pad_and_release_all() {
 }
 
 #[test]
+#[cfg(not(feature = "loopback"))]
 fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -208,6 +213,7 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
 }
 
 #[test]
+#[cfg(not(feature = "loopback"))]
 fn telemetry_response_contains_all_counter_fields() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -237,6 +243,7 @@ fn telemetry_response_contains_all_counter_fields() {
 }
 
 #[test]
+#[cfg(not(feature = "loopback"))]
 fn release_all_does_not_reset_telemetry_counters() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -263,6 +270,7 @@ fn release_all_does_not_reset_telemetry_counters() {
 }
 
 #[test]
+#[cfg(not(feature = "loopback"))]
 fn dispatcher_rejects_invalid_payload_boundaries() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -307,6 +315,7 @@ fn lcg(seed: u32) -> u32 {
     seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
 }
 
+#[cfg(not(feature = "loopback"))]
 fn frame<'a>(seq: u32, command: HostCommand, payload: &'a [u8]) -> pico_hid::protocol::Frame<'a> {
     pico_hid::protocol::Frame {
         seq,
@@ -315,6 +324,7 @@ fn frame<'a>(seq: u32, command: HostCommand, payload: &'a [u8]) -> pico_hid::pro
     }
 }
 
+#[cfg(not(feature = "loopback"))]
 fn ack(seq: u32) -> DispatchOutcome {
     let mut payload = [0u8; MAX_RESPONSE_PAYLOAD_LEN];
     payload[..4].copy_from_slice(&seq.to_le_bytes());
@@ -325,6 +335,7 @@ fn ack(seq: u32) -> DispatchOutcome {
     }
 }
 
+#[cfg(not(feature = "loopback"))]
 fn nak(seq: u32, reason: NakReason) -> DispatchOutcome {
     let mut payload = [0u8; MAX_RESPONSE_PAYLOAD_LEN];
     payload[..4].copy_from_slice(&seq.to_le_bytes());
@@ -336,6 +347,7 @@ fn nak(seq: u32, reason: NakReason) -> DispatchOutcome {
     }
 }
 
+#[cfg(not(feature = "loopback"))]
 fn payload_u32(outcome: &DispatchOutcome, start: usize) -> u32 {
     u32::from_le_bytes([
         outcome.payload[start],
