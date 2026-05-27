@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 39] = [
+const EXPECTED_TOOLS: [&str; 41] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -15,6 +15,8 @@ const EXPECTED_TOOLS: [&str; 39] = [
     "act_type",
     "audio_tail",
     "audio_transcribe",
+    "audit_export_bundle",
+    "audit_export_consent_set",
     "audit_intelligence_query",
     "find",
     "health",
@@ -279,6 +281,27 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_default(
         readbacks,
         tools,
+        "audit_export_consent_set",
+        "inputSchema.properties.redaction_policy.default",
+        &json!("strict"),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "audit_export_bundle",
+        "inputSchema.properties.max_rows.default",
+        &json!(100),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "audit_export_bundle",
+        "inputSchema.properties.max_row_bytes.default",
+        &json!(65_536),
+    )?;
+    read_default(
+        readbacks,
+        tools,
         "replay_record",
         "inputSchema.properties.format.default",
         &json!("jsonl"),
@@ -330,6 +353,10 @@ fn read_required_fields(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_required(readbacks, tools, "profile_registry_import", "bundle_path")?;
     read_required(readbacks, tools, "profile_registry_rollback", "profile_id")?;
     read_required(readbacks, tools, "audit_intelligence_query", "profile_id")?;
+    read_required(readbacks, tools, "audit_export_consent_set", "profile_id")?;
+    read_required(readbacks, tools, "audit_export_consent_set", "enabled")?;
+    read_required(readbacks, tools, "audit_export_bundle", "profile_id")?;
+    read_required(readbacks, tools, "audit_export_bundle", "output_path")?;
     read_required(readbacks, tools, "storage_put_probe_rows", "cf_name")?;
     read_required(readbacks, tools, "storage_put_probe_rows", "key_prefix")?;
     read_required(readbacks, tools, "storage_put_probe_rows", "rows")?;

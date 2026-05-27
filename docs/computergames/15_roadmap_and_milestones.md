@@ -211,13 +211,16 @@ The profile package manifest baseline is
 defines package metadata, provenance, compatibility targets, permissions,
 hashes, signed trust metadata, quarantine-only trust failures, rollback
 verification, and fail-closed parser validation.
+The #460 privacy baseline adds explicit local consent rows in `CF_KV` plus
+redacted local audit-export bundles with manifest, row hashes, and redaction
+reports before any future contribution path can exist.
 
 Physical sources of truth for this track are registry index/package files,
 profile TOML files, RocksDB rows in `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`,
 `CF_EVENTS`, `CF_OBSERVATIONS`, `CF_SESSIONS`, and `CF_PROFILES`, consent and
 export bundles, trust-root/quarantine/rollback rows, and MCP readbacks
-(`profile_list`, `profile_quality_refresh`, `storage_inspect`, and registry/
-audit tools). Manual FSV must trigger
+(`profile_list`, `profile_quality_refresh`, `storage_inspect`, registry/audit
+tools, `audit_export_consent_set`, and `audit_export_bundle`). Manual FSV must trigger
 real Synapse runtime surfaces and then read those physical stores directly.
 GitHub Actions/CI, scripts, tests, and benchmark harnesses are supporting
 evidence only.

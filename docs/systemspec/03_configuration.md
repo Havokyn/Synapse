@@ -212,6 +212,9 @@ There is no merge step: CLI/env values configure individual subsystems independe
 | SSE poll interval | `20 ms` | `crates/synapse-mcp/src/http/sse.rs::SSE_POLL_INTERVAL` |
 | SSE `buffer_size` (subscribe tool) | hard-pinned `4096` | `crates/synapse-mcp/src/m3/subscribe.rs::DEFAULT_BUFFER_SIZE` |
 | `reflex_history.limit` cap | `1000` | `crates/synapse-mcp/src/m3/reflex.rs::MAX_REFLEX_HISTORY_LIMIT` |
+| `audit_export_bundle.max_rows` default / cap | `100` / `1000` | `crates/synapse-mcp/src/m3/audit_export.rs` |
+| `audit_export_bundle.max_row_bytes` default / cap | `65536` / `524288` | `crates/synapse-mcp/src/m3/audit_export.rs` |
+| `audit_export_consent_set.redaction_policy` default | `strict` | `crates/synapse-mcp/src/m3/audit_export.rs` |
 | `reflex_register` default priority | `100` | `crates/synapse-core/src/types.rs::default_reflex_priority` + `synapse_reflex::DEFAULT_REFLEX_PRIORITY` |
 | `act_press` default hold_ms | `33` | `crates/synapse-mcp/src/m2/press/schema.rs::DEFAULT_HOLD_MS` |
 | `act_aim` default deadline_ms | `80` | `crates/synapse-mcp/src/m2/aim.rs::DEFAULT_DEADLINE_MS` |

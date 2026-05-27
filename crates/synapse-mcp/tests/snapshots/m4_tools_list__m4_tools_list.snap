@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 42,
+  "count": 44,
   "m4_defaults": [
     {
       "actual": "auto",
@@ -70,6 +70,8 @@ expression: snapshot
     "act_type",
     "audio_tail",
     "audio_transcribe",
+    "audit_export_bundle",
+    "audit_export_consent_set",
     "audit_intelligence_query",
     "find",
     "health",

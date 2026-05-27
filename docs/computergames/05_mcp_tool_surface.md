@@ -6,9 +6,10 @@
    surface to 33 live MCP tools by adding `act_combo`, `act_run_shell`, and
    `act_launch` per the M4 phase plan. M5 adds the local registry/audit scoring
    tool `profile_quality_refresh` plus the #458 local registry/intelligence
-   tool set, bringing the live surface to 42. Any further agent-facing tools
-   require an ADR-approved cap change. Overlapping tools merge. Profile and
-   parameter knobs are the escape hatches.
+   tool set, and #460 adds local audit-export consent/bundle tools, bringing
+   the live surface to 44. Any further agent-facing tools require an
+   ADR-approved cap change. Overlapping tools merge. Profile and parameter
+   knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
 3. **Structured input, structured output.** Every tool defines a JSON Schema with `additionalProperties: false`. Every response carries explicit fields, no free-form text.
 4. **No silent success.** If a tool did not do the work, it returns an MCP error with `code: SCREAMING_SNAKE_CASE`, never `success: true` with a partial result.
@@ -17,8 +18,9 @@
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 
 The first 30 tools below are the live M3 baseline. M4 adds rows 31-33, and M5
-adds rows 34-42 for local profile-registry/audit quality scoring, registry row
-operations, import/export, and audit intelligence.
+adds rows 34-44 for local profile-registry/audit quality scoring, registry row
+operations, import/export, audit intelligence, and consented redacted audit
+export bundles.
 Schemas use abbreviated JSON Schema syntax; canonical schema is exported by the
 daemon through standard MCP `tools/list`. Until the M4 tools are implemented,
 their schemas in this doc are the target contract for #401/#403/#406 and the
@@ -72,8 +74,10 @@ future `tools/list` snapshots in #447/#448.
 | 40 | `profile_registry_import` | write/read | validates and imports a local JSON registry bundle |
 | 41 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
 | 42 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
+| 43 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
+| 44 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
 
-M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 42
+M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 44
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -1131,6 +1135,80 @@ Reads newest rows from `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `profile_quality/v1/<profile_id>` when present, and returns bucket counts by
 status/tool/kind/error code plus learning candidates.
 
+### 3.28j `audit_export_consent_set`
+
+Writes the local consent state required before any audit export bundle can be
+created. The physical SoT is `CF_KV` key
+`audit_export/v1/consent/<profile_id>`. The tool writes the row and immediately
+reads that same key back before returning.
+
+```json
+{
+  "name": "audit_export_consent_set",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["profile_id", "enabled"],
+    "properties": {
+      "profile_id": {"type": "string"},
+      "enabled": {"type": "boolean"},
+      "redaction_policy": {"type": "string", "default": "strict"},
+      "operator_note": {"type": "string"}
+    }
+  }
+}
+```
+
+The stored row includes `row_kind="audit_export_consent"`, enabled/disabled
+state, selected policy, allowed policies, `external_sharing_allowed=false`, and
+operator note. Unsupported policies fail closed with
+`AUDIT_EXPORT_REDACTION_REQUIRED`.
+
+### 3.28k `audit_export_bundle`
+
+Creates a local, redacted audit export bundle only after consent and redaction
+policy verification. The trigger reads `CF_KV` consent state and newest
+`CF_ACTION_LOG` rows for the requested profile, redacts sensitive fields, and
+writes an operator-visible directory containing:
+
+- `manifest.json`
+- `rows.json`
+- `redaction_report.json`
+
+```json
+{
+  "name": "audit_export_bundle",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["profile_id", "output_path"],
+    "properties": {
+      "profile_id": {"type": "string"},
+      "output_path": {"type": "string"},
+      "redaction_policy": {"type": "string"},
+      "max_rows": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+      "max_row_bytes": {"type": "integer", "minimum": 1, "maximum": 524288, "default": 65536}
+    }
+  }
+}
+```
+
+`redaction_policy` is runtime-required even though it is optional in the schema
+so callers must consciously select the policy consented by the operator. The
+only current policy is `strict`. Strict redaction removes window titles, paths,
+command lines, exact timing fields, OCR/text/clipboard/transcript fields,
+screenshots/images/pixels, user identifiers, and high-cardinality IDs while
+retaining bounded signals such as profile id/version/schema, process name,
+tool, status, error code, and backend.
+
+The manifest records schema version, bundle kind, source CF, consent key and
+hash, redaction policy, row/file hashes, row counts, and
+`external_sharing_allowed=false`. The redaction report records counts by
+redaction class and the fail-closed rules. Missing/disabled consent returns
+`AUDIT_EXPORT_CONSENT_REQUIRED`; missing/unsupported policy returns
+`AUDIT_EXPORT_REDACTION_REQUIRED`; a matching row larger than `max_row_bytes`
+returns `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` before bundle files are written.
+
 ### 3.29 `health`
 
 ```json
@@ -1307,13 +1385,14 @@ Full error code catalog in `06_data_schemas.md` §Error codes.
 
 ---
 
-## 5. M4 Default Resolution Rows
+## 5. M4/M5 Default Resolution Rows
 
 The `tools/list` schema must expose the JSON defaults below once these M4 tools
-land. Rows that say "required", "omitted", or "inherits" define runtime
-resolution behavior rather than a JSON-Schema `default` value. Issue #448 owns
-the future default-resolution readback; this table is the PRD source row for the
-three M4 tools.
+land and for M5 tools whose safety behavior depends on caller-visible defaults.
+Rows that say "required", "omitted", or "inherits" define runtime resolution
+behavior rather than a JSON-Schema `default` value. Issue #448 owns the M4
+default-resolution readback; current `tools/list` snapshots also pin the M5
+audit-export defaults below.
 
 | Tool | Field | Default | Source |
 |---|---|---|---|
@@ -1334,6 +1413,15 @@ three M4 tools.
 | `act_launch` | `wait_for_window_title_regex` | omitted | M4 plan #444 |
 | `act_launch` | `timeout_ms` | `10000` | PRD 05 |
 | `act_launch` | `idempotency_key` | omitted | PRD 05 design rule 6 |
+| `audit_export_consent_set` | `profile_id` | required; no default | M5 issue #460 |
+| `audit_export_consent_set` | `enabled` | required; no default | M5 issue #460 |
+| `audit_export_consent_set` | `redaction_policy` | `"strict"` | M5 issue #460 |
+| `audit_export_consent_set` | `operator_note` | omitted | M5 issue #460 |
+| `audit_export_bundle` | `profile_id` | required; no default | M5 issue #460 |
+| `audit_export_bundle` | `output_path` | required; no default | M5 issue #460 |
+| `audit_export_bundle` | `redaction_policy` | runtime-required; omitted by schema | M5 issue #460 |
+| `audit_export_bundle` | `max_rows` | `100` | M5 issue #460 |
+| `audit_export_bundle` | `max_row_bytes` | `65536` | M5 issue #460 |
 
 All three schemas must serialize as closed top-level JSON objects with
 `additionalProperties: false`. `act_combo.steps[]` also serializes as a closed

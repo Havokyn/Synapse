@@ -42,6 +42,10 @@ use crate::{
             AudioTailParams, AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse,
             tail_audio, transcribe_audio,
         },
+        audit_export::{
+            AuditExportBundleParams, AuditExportBundleResponse, AuditExportConsentSetParams,
+            AuditExportConsentSetResponse, export_audit_bundle, set_audit_export_consent,
+        },
         permissions::{RequiredPermissions, authorization_error},
         profile::{
             ProfileActivateParams, ProfileActivateResponse, ProfileListParams, ProfileListResponse,

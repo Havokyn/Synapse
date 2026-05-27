@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m3_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 39,
+  "count": 41,
   "m3_defaults": [
     {
       "actual": [],
@@ -103,6 +103,21 @@ expression: snapshot
       "tool": "audit_intelligence_query"
     },
     {
+      "actual": "strict",
+      "path": "inputSchema.properties.redaction_policy.default",
+      "tool": "audit_export_consent_set"
+    },
+    {
+      "actual": 100,
+      "path": "inputSchema.properties.max_rows.default",
+      "tool": "audit_export_bundle"
+    },
+    {
+      "actual": 65536,
+      "path": "inputSchema.properties.max_row_bytes.default",
+      "tool": "audit_export_bundle"
+    },
+    {
       "actual": "jsonl",
       "path": "inputSchema.properties.format.default",
       "tool": "replay_record"
@@ -178,6 +193,26 @@ expression: snapshot
       "tool": "audit_intelligence_query"
     },
     {
+      "actual_contains": "profile_id",
+      "path": "inputSchema.required",
+      "tool": "audit_export_consent_set"
+    },
+    {
+      "actual_contains": "enabled",
+      "path": "inputSchema.required",
+      "tool": "audit_export_consent_set"
+    },
+    {
+      "actual_contains": "profile_id",
+      "path": "inputSchema.required",
+      "tool": "audit_export_bundle"
+    },
+    {
+      "actual_contains": "output_path",
+      "path": "inputSchema.required",
+      "tool": "audit_export_bundle"
+    },
+    {
       "actual_contains": "cf_name",
       "path": "inputSchema.required",
       "tool": "storage_put_probe_rows"
@@ -229,6 +264,8 @@ expression: snapshot
     "act_type",
     "audio_tail",
     "audio_transcribe",
+    "audit_export_bundle",
+    "audit_export_consent_set",
     "audit_intelligence_query",
     "find",
     "health",

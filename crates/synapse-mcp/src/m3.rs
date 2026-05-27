@@ -1,5 +1,6 @@
 mod a11y_events;
 pub mod audio;
+pub mod audit_export;
 pub mod permissions;
 pub mod profile;
 pub mod profile_quality;
@@ -422,7 +423,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 24] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 26] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -441,6 +442,8 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 24] {
         profile_registry::profile_registry_import(),
         profile_registry::profile_registry_rollback(),
         profile_registry::audit_intelligence_query(),
+        audit_export::audit_export_consent_set(),
+        audit_export::audit_export_bundle(),
         replay::replay_record(),
         audio::audio_tail(),
         audio::audio_transcribe(),

@@ -358,10 +358,11 @@ The M5 runtime registry surface now includes `profile_registry_search`,
 `profile_registry_inspect`, `profile_registry_install`,
 `profile_registry_disable`, `profile_registry_export`,
 `profile_registry_import`, `profile_registry_rollback`, and
-`audit_intelligence_query`. These tools operate on the physical `CF_PROFILES` /
-`CF_KV` row namespaces below and return exact row keys or bundle paths so manual
-FSV can trigger the real MCP tool and then separately read the stored RocksDB
-rows or filesystem bundle.
+`audit_intelligence_query`. #460 adds `audit_export_consent_set` and
+`audit_export_bundle`. These tools operate on the physical `CF_PROFILES` /
+`CF_KV` row namespaces below, `CF_ACTION_LOG`, and local bundle files; they
+return exact row keys or bundle paths so manual FSV can trigger the real MCP
+tool and then separately read the stored RocksDB rows or filesystem bundle.
 
 `profile_registry_install` enforces signed package trust when a package or
 operator call requires it. Successful signed installs write trust status and a
@@ -388,6 +389,7 @@ is needed. `CF_KV` is reserved only for tiny registry head/pointer rows.
 | Quarantined package | `CF_PROFILES` | `profile_registry/v1/quarantine/<package_id>/<package_version>/<digest-prefix>` |
 | Rollback event | `CF_PROFILES` | `profile_registry/v1/rollback/<profile_id>/<timestamp>` |
 | Registry head pointer | `CF_KV` | `profile_registry/v1/head/<source_id>` |
+| Audit export consent | `CF_KV` | `audit_export/v1/consent/<profile_id>` |
 
 The data model and synthetic row fixtures are defined in
 [`22_profile_registry_data_model.md`](22_profile_registry_data_model.md).
@@ -395,6 +397,33 @@ Profile package manifest bytes and fail-closed parser validation are defined in
 [`23_profile_package_manifest.md`](23_profile_package_manifest.md). Successful
 runtime install tools must write the manifest path/digest into the package row
 and then read `CF_PROFILES` separately during manual FSV.
+
+### 7.2 Audit export consent and bundle SoTs
+
+Audit export is local-first and consent-gated. `audit_export_consent_set`
+writes one `CF_KV` row at `audit_export/v1/consent/<profile_id>` with
+`row_kind="audit_export_consent"`, enabled/disabled state, selected
+redaction policy, allowed policy list, and `external_sharing_allowed=false`.
+The tool reads the same row back before returning.
+
+`audit_export_bundle` requires a caller-selected redaction policy, reads the
+consent row, reads newest matching `CF_ACTION_LOG` rows, and writes an
+operator-selected local directory with these files:
+
+| File | Purpose |
+|---|---|
+| `manifest.json` | Bundle schema/version/kind, profile id, source CF, consent key/hash, row counts, file hashes, row hashes, and `external_sharing_allowed=false` |
+| `rows.json` | Redacted `CF_ACTION_LOG` rows for the profile |
+| `redaction_report.json` | Policy name, rows scanned/exported/redacted, redaction class counts, retained fields, and fail-closed rules |
+
+Strict redaction removes window titles, paths, command lines, exact timing
+fields, OCR/text/clipboard/transcript fields, screenshots/images/pixels, user
+identifiers, and high-cardinality IDs. It retains bounded profile/outcome
+signals such as profile id/version/schema, foreground process name, tool,
+status, error code, and backend. Manual FSV must read the consent row before
+and after the consent trigger, then read the bundle files directly after export
+and prove sensitive synthetic values are absent while the expected bounded
+signals remain.
 
 ---
 

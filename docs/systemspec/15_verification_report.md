@@ -68,13 +68,13 @@ Counted by walking `crates/` and slicing by path. Comments, blank lines, and `mo
 |---|---|
 | Workspace member crates | **15** |
 | Default workspace binaries (`synapse-mcp`, `synapse-overlay`) | 2 |
-| Total Rust source files (excluding tests/benches) | **148** |
+| Total Rust source files (excluding tests/benches) | **149** |
 | Total Rust integration-test files | 76 |
 | Total Rust bench files | 13 |
-| MCP tools registered in `server.rs` | **42** (M1: 6, M2: 9, M3/M5 module stubs: 24 including `profile_quality_refresh`, seven `profile_registry_*` tools, and `audit_intelligence_query`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
-| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 42 |
+| MCP tools registered in `server.rs` | **44** (M1: 6, M2: 9, M3/M5 module stubs: 26 including `profile_quality_refresh`, seven `profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
+| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 44 |
 | RocksDB column families | **11** (`ALL_COLUMN_FAMILIES.len() == 11`; excludes implicit `default` CF) |
-| Stable error-code constants in `synapse_core::error_codes` | **97** |
+| Stable error-code constants in `synapse_core::error_codes` | **100** |
 | Reserved subsystem error enums (mapped to those codes) | 11 (`StorageError`, `ReflexError`, `ActionError`, `ProfileError`, `ProfileLoadError`, `AudioError`, `PerceptionError`, `CaptureError`, `ModelError`, `A11yError`, `TelemetryError` + parse errors `ElementIdParseError`/`EventFilterValidationError`) |
 | M3 metric specs declared in `synapse_telemetry::metrics::M3_METRICS` | **19** (12 counters, 5 gauges, 2 histograms) |
 | Permissions in M3 grant model | **13** (`READ_EVENTS`, `WRITE_REFLEX`, `READ_REFLEX`, `READ_PROFILE`, `WRITE_PROFILE_ACTIVE`, `WRITE_REPLAY`, `READ_AUDIO`, `READ_STORAGE`, `WRITE_STORAGE`, `INPUT_KEYBOARD`, `INPUT_MOUSE`, `INPUT_PAD`, `INPUT_HARDWARE_HID`) |
@@ -208,7 +208,7 @@ Files exceeding the 500-LoC impplan rule on `main` (M3 carry-over per `docs/impp
 
 | File | Topic |
 |---|---|
-| [01_system_overview.md](01_system_overview.md) | High-level architecture, tech stack, all 42 live tools |
+| [01_system_overview.md](01_system_overview.md) | High-level architecture, tech stack, all 44 live tools |
 | [02_source_code_map.md](02_source_code_map.md) | Per-file tree with descriptions + dep graph + entry-point traces |
 | [03_configuration.md](03_configuration.md) | All CLI flags, env vars, validation rules, default constants |
 | [04_storage_layer.md](04_storage_layer.md) | RocksDB CFs, schema sentinel, TTL filter, GC, disk pressure |

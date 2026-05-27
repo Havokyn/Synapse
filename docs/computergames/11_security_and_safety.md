@@ -178,6 +178,29 @@ Custom patterns must compile; else startup fails with `CONFIG_INVALID`.
 
 `--no-redaction` disables redaction. Discouraged; useful for debug or security tooling needing raw content. Operator confirms via prompt on first use.
 
+### 5.6 Audit export consent and fail-closed redaction
+
+Audit export is not telemetry and is not a sharing path by default. It requires
+explicit local consent recorded in `CF_KV` at
+`audit_export/v1/consent/<profile_id>` and a caller-selected redaction policy.
+The consent row always records `external_sharing_allowed=false`; a row that
+does not say that is treated as invalid.
+
+`audit_export_bundle` reads the consent row, reads matching `CF_ACTION_LOG`
+rows, applies the strict redaction policy, and writes only local bundle files:
+`manifest.json`, `rows.json`, and `redaction_report.json`. Strict export
+redacts window titles, paths, command lines, exact timing fields,
+OCR/text/clipboard/transcript fields, screenshots/images/pixels, user
+identifiers, and high-cardinality IDs. It retains bounded profile/outcome
+signals needed for the profile-registry / audit-data learning loop: profile
+id/version/schema, process name, tool, status, error code, and backend.
+
+Fail-closed cases return structured errors before bundle files are written:
+missing/disabled consent (`AUDIT_EXPORT_CONSENT_REQUIRED`),
+missing/unsupported/non-consented redaction policy
+(`AUDIT_EXPORT_REDACTION_REQUIRED`), and matching row payloads larger than
+`max_row_bytes` (`AUDIT_EXPORT_PAYLOAD_TOO_LARGE`).
+
 ---
 
 ## 6. Kill switches

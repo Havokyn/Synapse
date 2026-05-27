@@ -81,7 +81,7 @@ Total token cost ≤ 30 K across the whole sequence.
 - `wix-installer` (WiX Toolset v4+) available
 - Reference machine for perf gates: RTX 3060 + 8-core CPU
 - Reference machine for soak: dedicated runner, 16 GB RAM, 5 GB free disk
-- M5 starting surface (verified at M4 close): 33 MCP tools live (30 shipped at M3 — 6 M1 + 9 M2 + 11 M3 reflex/profile/replay/audio + 4 M3 `storage_*` diagnostics — plus the 3 M4 tools `act_combo`/`act_run_shell`/`act_launch`). M5 adds `describe` to make 34.
+- M5 starting surface (verified at M4 close): 33 MCP tools live (30 shipped at M3 — 6 M1 + 9 M2 + 11 M3 reflex/profile/replay/audio + 4 M3 `storage_*` diagnostics — plus the 3 M4 tools `act_combo`/`act_run_shell`/`act_launch`). The active M5 registry/audit moat work adds `profile_quality_refresh`, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the current live surface to 44 before the later VLM `describe` work.
 - M5 starting profile bundle: 5 (`notepad`, `vscode`, `chrome`, `terminal` from M3 + `minecraft.java` from M4)
 - `synapse-overlay` is still the 3-LoC binary skeleton from M0; first M5 task fills it out
 

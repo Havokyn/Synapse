@@ -108,7 +108,7 @@ These are the `serde_json` payloads written into each CF. Source: `crates/synaps
 | `CF_TELEMETRY` | not yet wired | — | — |
 | `CF_ACTION_LOG` | action audit JSON | `schema_version`, `audit_id`, `ts_ns`, `seq`, `session_id`, `profile_id`, `profile_version`, `profile_schema_version`, `audit_context`, `tool`, `status`, `error_code`, `foreground`, `active_profile_id`, `active_profile_schema_version`, `details`, `redacted`, `redactions` | action tools via `server/action_audit.rs`; diagnostic probe writes may create malformed rows for manual corrupt-row checks |
 | `CF_PROCESS_HISTORY` | not yet wired | — | — |
-| `CF_KV` | not yet wired (generic) | — | — |
+| `CF_KV` | generic JSON/bytes rows | Audit export consent rows at `audit_export/v1/consent/<profile_id>` and registry head pointers at `profile_registry/v1/head/<source_id>` | `audit_export_consent_set` and registry tools |
 
 `StoredReflexStep` is `{ index: u32, action: Action, status: String, error_code: Option<String> }`.
 `StoredAuditContext` is the shared profile/audit linkage payload:
@@ -123,7 +123,8 @@ available.
 ### 4.2 Active write paths (current build)
 
 The live build actively writes `CF_REFLEX_AUDIT`, `CF_ACTION_LOG`,
-`CF_EVENTS`, `CF_SESSIONS`, and profile-quality rows in `CF_PROFILES`:
+`CF_EVENTS`, `CF_SESSIONS`, profile-quality rows in `CF_PROFILES`, registry
+head pointers in `CF_KV`, and audit-export consent rows in `CF_KV`:
 
 | Caller | Trigger | Audit payload | Key format |
 |---|---|---|---|
@@ -134,6 +135,7 @@ The live build actively writes `CF_REFLEX_AUDIT`, `CF_ACTION_LOG`,
 | `ReflexRuntime::disable_all_by_operator` (`lib.rs:245`) | operator panic hotkey (`crates/synapse-mcp/src/safety.rs::handle_operator_hotkey`) | `details.kind = "reflex_disabled_by_operator"`, `status = Disabled`, `error_code = REFLEX_DISABLED_BY_OPERATOR` | same |
 | `ReflexScheduler` fire path (in `crates/synapse-reflex/src/scheduler.rs` + `kinds/on_event.rs`) | each reflex fire | `details.kind = "reflex_fired"`, `status = Active`, optional `event_id` and per-step `steps` | same |
 | recursion-guard clamp (`kinds/on_event.rs`) | exceeded `MAX_ON_EVENT_FIRINGS_PER_TICK` | `error_code = REFLEX_RECURSION_LIMIT` | same |
+| `SynapseService::audit_export_consent_set` | operator enables/disables export consent | JSON row `row_kind = "audit_export_consent"` with profile id, enabled state, redaction policy, allowed policies, and `external_sharing_allowed = false` | `audit_export/v1/consent/<profile_id>` in `CF_KV` |
 
 Reflex writers go through `synapse_reflex::audit::write_audit`
 (`crates/synapse-reflex/src/audit.rs`), which is just a thin wrapper around
@@ -151,6 +153,11 @@ aggregates profile-relevant outcomes, writes a redacted
 returning. The score uses the Wilson 95% lower bound over foreground-profile
 `ok` vs `error` rows; denied, stale, corrupt, and profile-mismatch rows are
 explainability/compatibility counters, not invented success samples.
+
+`audit_export_bundle` does not write RocksDB rows. It reads the consent row from
+`CF_KV`, reads matching `CF_ACTION_LOG` rows for the requested profile, redacts
+sensitive fields, and writes local bundle files (`manifest.json`, `rows.json`,
+`redaction_report.json`) under the caller-selected output directory.
 
 ## 5. Index strategy
 

@@ -30,7 +30,7 @@ Source files covered:
 
 ## 3. Error code catalog
 
-All 97 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](01_system_overview.md) for the table).
+All 100 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](01_system_overview.md) for the table).
 
 M3 added the following codes to the M2 baseline: `REFLEX_RECURSION_LIMIT`, `REFLEX_ACTION_PERMISSION_DENIED`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `SUBSCRIPTION_CAP_REACHED`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED`, `SAFETY_OPERATOR_HOTKEY_FIRED`.
 
@@ -38,6 +38,12 @@ M5 profile-registry security adds `PROFILE_TRUST_VERIFICATION_FAILED` for
 signed-package trust failures that quarantine instead of activate, and
 `PROFILE_ROLLBACK_UNAVAILABLE` when no prior trusted/local-validated package can
 be restored.
+
+M5 audit-export privacy adds `AUDIT_EXPORT_CONSENT_REQUIRED` for missing,
+disabled, invalid, or non-local consent rows; `AUDIT_EXPORT_REDACTION_REQUIRED`
+for missing, unsupported, or non-consented policies; and
+`AUDIT_EXPORT_PAYLOAD_TOO_LARGE` for matching audit rows that exceed the
+selected row-size ceiling before files are written.
 
 ## 4. Retention defaults
 

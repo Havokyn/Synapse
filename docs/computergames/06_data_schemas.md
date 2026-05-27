@@ -1065,6 +1065,9 @@ CAPTURE_TARGET_INVALID
 PERCEPTION_MODE_INVALID
 PROFILE_TRUST_VERIFICATION_FAILED
 PROFILE_ROLLBACK_UNAVAILABLE
+AUDIT_EXPORT_CONSENT_REQUIRED
+AUDIT_EXPORT_REDACTION_REQUIRED
+AUDIT_EXPORT_PAYLOAD_TOO_LARGE
 ```
 
 M5 profile-registry trust/rollback codes:
@@ -1073,6 +1076,9 @@ M5 profile-registry trust/rollback codes:
 |---|---|
 | `PROFILE_TRUST_VERIFICATION_FAILED` | `profile_registry_install` rejects a package because signed trust is required and the signature is missing, invalid, or not rooted in a trusted signer. The failed package is written only to a quarantine row. |
 | `PROFILE_ROLLBACK_UNAVAILABLE` | `profile_registry_rollback` cannot find or validate a prior trusted/local-validated package target, so the installed row is left unchanged. |
+| `AUDIT_EXPORT_CONSENT_REQUIRED` | `audit_export_bundle` cannot find an enabled local consent row in `CF_KV/audit_export/v1/consent/<profile_id>`, finds a disabled/invalid row, or detects a non-local sharing flag. |
+| `AUDIT_EXPORT_REDACTION_REQUIRED` | `audit_export_consent_set` or `audit_export_bundle` receives a missing, unsupported, or non-consented redaction policy. |
+| `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` | `audit_export_bundle` finds a matching `CF_ACTION_LOG` row larger than `max_row_bytes` and aborts before writing bundle files. |
 
 ### 8.5 MCP & session
 

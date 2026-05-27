@@ -4,10 +4,10 @@ Source files covered:
 - `crates/synapse-mcp/src/server.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
-- `crates/synapse-mcp/src/m3/{audio, permissions, profile, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
+- `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 42 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 44 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -546,6 +546,56 @@ error code across `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `CF_SESSIONS`; the quality snapshot is read from
 `CF_PROFILES/profile_quality/v1/<profile_id>` when present.
 
+## 23j. `audit_export_consent_set`
+
+**Description:** "Set local consent state for redacted audit export bundles"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`
+**Side effects:** writes `CF_KV/audit_export/v1/consent/<profile_id>` and reads it back
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `profile_id` | `String` | yes | — | Profile whose audit rows may be locally exported after consent |
+| `enabled` | `bool` | yes | — | Enables or disables local export consent |
+| `redaction_policy` | `String` | no | `strict` | Only `strict` is live |
+| `operator_note` | `Option<String>` | no | — | Optional local note stored on the consent row |
+
+**Returns:** `AuditExportConsentSetResponse { profile_id, consent_key,
+enabled, redaction_policy, wrote_row, consent_row }`. The stored row includes
+`row_kind = "audit_export_consent"`, `allowed_redaction_policies`, and
+`external_sharing_allowed = false`.
+**Errors:** `AUDIT_EXPORT_REDACTION_REQUIRED`, `STORAGE_READ_FAILED`,
+`STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
+
+## 23k. `audit_export_bundle`
+
+**Description:** "Export a local redacted audit bundle after consent verification"
+**Permissions:** `READ_PROFILE`, `READ_STORAGE`
+**Side effects:** reads `CF_KV` consent and `CF_ACTION_LOG`; writes local
+`manifest.json`, `rows.json`, and `redaction_report.json` files under
+`output_path`
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `String` | yes | — | Profile id matched against action audit rows |
+| `output_path` | `String` | yes | — | — | Local directory for the bundle files |
+| `redaction_policy` | `Option<String>` | runtime-required | — | `strict` | Must be explicitly selected and consented |
+| `max_rows` | `u32` | no | `100` | `1..=1000` | Newest action-log rows scanned |
+| `max_row_bytes` | `u64` | no | `65536` | `1..=524288` | Matching row size ceiling before abort |
+
+**Returns:** `AuditExportBundleResponse { profile_id, output_dir,
+manifest_path, rows_path, redaction_report_path, consent_key,
+redaction_policy, rows_scanned, rows_exported, redacted_fields,
+manifest_sha256, rows_sha256, redaction_report_sha256, consent_row }`.
+
+Strict redaction removes window titles, paths, command lines, exact timing
+fields, OCR/text/clipboard/transcript fields, screenshots/images/pixels, user
+identifiers, and high-cardinality IDs while retaining bounded profile/outcome
+signals.
+**Errors:** `AUDIT_EXPORT_CONSENT_REQUIRED`,
+`AUDIT_EXPORT_REDACTION_REQUIRED`, `AUDIT_EXPORT_PAYLOAD_TOO_LARGE`,
+`TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`,
+`TOOL_INTERNAL_ERROR`.
+
 ## 24. `replay_record`
 
 **Description:** "Record observations and/or events to a replay JSONL file"
@@ -662,8 +712,9 @@ For convenience the M3 tool-call gating is summarized here (live source: `crates
 | `replay_record` | `WRITE_REPLAY` |
 | `audio_tail`, `audio_transcribe` | `READ_AUDIO` |
 | `profile_quality_refresh` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
-| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query` | `READ_PROFILE`, `READ_STORAGE` |
+| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query`, `audit_export_bundle` | `READ_PROFILE`, `READ_STORAGE` |
 | `profile_registry_install`, `profile_registry_disable`, `profile_registry_import`, `profile_registry_rollback` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
+| `audit_export_consent_set` | `READ_STORAGE`, `WRITE_STORAGE` |
 | `storage_inspect` | `READ_STORAGE` |
 | `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample` | `WRITE_STORAGE` |
 

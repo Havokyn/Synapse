@@ -36,11 +36,11 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 
 ## Read order
 
-1. [01_system_overview.md](#file-01) — architecture map, tech stack, 42-tool inventory, error hierarchy
+1. [01_system_overview.md](#file-01) — architecture map, tech stack, 44-tool inventory, error hierarchy
 2. [02_source_code_map.md](#file-02) — file tree with per-file descriptions, dep graph, entry-point traces
 3. [03_configuration.md](#file-03) — CLI flags, env vars, validation, all numeric defaults
 4. [04_storage_layer.md](#file-04) — RocksDB schema (11 CFs), schema sentinel, TTL filter, GC, disk pressure
-5. [05_core_types_and_errors.md](#file-05) — `synapse-core` wire types + 97 error codes
+5. [05_core_types_and_errors.md](#file-05) — `synapse-core` wire types + 100 error codes
 6. [06_mcp_service_and_transports.md](#file-06) — `SynapseService`, stdio + HTTP routers, Bearer/Origin/Session middleware, SSE bridge
 7. [07_reflex_runtime.md](#file-07) — EventBus, scheduler, the 5 reflex kinds, audit persistence
 8. [08_action_subsystem.md](#file-08) — emitter actor, backends, rate limits, hotkey, curves/dynamics
@@ -192,7 +192,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 42 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 44 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -247,7 +247,7 @@ All 42 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `act_run_shell` | Run an allowlisted local shell command | `server.rs::act_run_shell`, `m4.rs` |
 | `act_launch` | Launch an allowlisted local process and optionally wait for a window | `server.rs::act_launch`, `m4.rs` |
 
-### 4.5 M5 — profile registry/audit loop (9 tools)
+### 4.5 M5 — profile registry/audit loop (11 tools)
 
 | Tool | Description | Source |
 |---|---|---|
@@ -260,6 +260,8 @@ All 42 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `profile_registry_import` | Import a validated local registry JSON bundle into `CF_PROFILES`/`CF_KV` | `server.rs::profile_registry_import`, `m3/profile_registry.rs` |
 | `profile_registry_rollback` | Restore an installed profile registry row to a prior trusted/local-validated package and write a rollback row | `server.rs::profile_registry_rollback`, `m3/profile_registry.rs` |
 | `audit_intelligence_query` | Summarize profile-linked action/event/reflex/session outcomes and quality snapshots | `server.rs::audit_intelligence_query`, `m3/profile_registry.rs` |
+| `audit_export_consent_set` | Write/read local audit-export consent state in `CF_KV/audit_export/v1/consent/<profile_id>` | `server.rs::audit_export_consent_set`, `m3/audit_export.rs` |
+| `audit_export_bundle` | Export consented local redacted `CF_ACTION_LOG` rows into manifest/rows/redaction-report files | `server.rs::audit_export_bundle`, `m3/audit_export.rs` |
 
 The profile-registry / audit-data network effect is the P1 strategic moat
 tracked by #454 and child issues #455-#470. Profiles encode app/game operating
@@ -272,7 +274,8 @@ Physical sources of truth for this loop are profile TOML files, future registry
 index/package files, RocksDB `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, `CF_EVENTS`,
 `CF_OBSERVATIONS`, `CF_SESSIONS`, and `CF_PROFILES` rows, consent/export
 bundles, and MCP readbacks such as `profile_list`, `profile_quality_refresh`,
-`profile_registry_*`, `audit_intelligence_query`, and `storage_inspect`.
+`profile_registry_*`, `audit_intelligence_query`, `audit_export_consent_set`,
+`audit_export_bundle`, and `storage_inspect`.
 Manual FSV must trigger the
 real runtime path and then read these physical stores directly; GitHub
 Actions/CI and automated checks never substitute for FSV.
@@ -293,7 +296,7 @@ Full parameter/return tables: [13_mcp_tool_reference.md](#file-13).
 
 ### 4.6 PRD-planned tools NOT live in this build
 
-`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's live build now has the M3 baseline, four operator storage diagnostics, M4 `act_combo`/`act_run_shell`/`act_launch`, and the M5 local registry/audit tools (`profile_quality_refresh`, `profile_registry_*` including rollback, and `audit_intelligence_query`). The following PRD-planned entries remain unimplemented: `describe` (M5 VLM) and `read_hud` (M4 HUD pipeline).
+`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's live build now has the M3 baseline, four operator storage diagnostics, M4 `act_combo`/`act_run_shell`/`act_launch`, and the M5 local registry/audit tools (`profile_quality_refresh`, `profile_registry_*` including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`). The following PRD-planned entries remain unimplemented: `describe` (M5 VLM) and `read_hud` (M4 HUD pipeline).
 
 ## 5. Entry points
 
@@ -353,7 +356,7 @@ All errors carry `SCREAMING_SNAKE_CASE` codes defined as `pub const &str` in `cr
 | Perception (PRD 8.1) | `OBSERVE_NO_PERCEPTION_AVAILABLE`, `OBSERVE_INTERNAL`, `CAPTURE_GRAPHICS_API_UNSUPPORTED`, `CAPTURE_TARGET_LOST`, `CAPTURE_NO_DIRTY_REGIONS`, `A11Y_NOT_AVAILABLE`, `A11Y_ELEMENT_STALE`, `A11Y_NO_FOREGROUND`, `A11Y_CDP_UNREACHABLE`, `DETECTION_MODEL_NOT_LOADED`, `DETECTION_MODEL_INFER_FAILED`, `DETECTION_NO_FRAME`, `OCR_NO_TEXT`, `OCR_BACKEND_UNAVAILABLE`, `HUD_NO_ACTIVE_PROFILE`, `HUD_FIELD_NOT_DEFINED`, `HUD_EXTRACTION_FAILED`, `AUDIO_DEVICE_LOST`, `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_STT_MODEL_NOT_LOADED` | `error_codes.rs` lines 2–21 |
 | Action (PRD 8.2) | `ACTION_QUEUE_FULL`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, `ACTION_TARGET_INVALID`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_HID_PORT_DISCONNECTED`, `ACTION_VIGEM_NOT_INSTALLED`, `ACTION_VIGEM_PLUGIN_FAILED`, `ACTION_ELEMENT_NOT_RESOLVED`, `ACTION_FOREGROUND_LOST`, `ACTION_UNSUPPORTED_KEY`, `ACTION_DRAG_DISTANCE_EXCEEDS_LIMIT`, `STUCK_KEY_AUTO_RELEASED`, `SAFETY_RELEASE_ALL_FIRED`, `SAFETY_OPERATOR_HOTKEY_FIRED` | lines 24–38 |
 | Reflex (PRD 8.3) | `REFLEX_CAP_REACHED`, `REFLEX_KIND_INVALID`, `REFLEX_PARAMS_INVALID`, `REFLEX_TARGET_INVALID`, `REFLEX_FILTER_INVALID`, `REFLEX_PRIORITY_INVALID`, `REFLEX_TICK_LATE`, `REFLEX_TRACK_LOST`, `REFLEX_STARVED`, `REFLEX_DISABLED_BY_OPERATOR`, `REFLEX_LIFETIME_EXPIRED`, `REFLEX_RECURSION_LIMIT`, `REFLEX_ACTION_PERMISSION_DENIED` | lines 41–53 |
-| Profile / config (PRD 8.4) | `PROFILE_NOT_FOUND`, `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE`, `PROFILE_KEYMAP_INVALID`, `PROFILE_HUD_REGION_INVALID`, `CAPTURE_TARGET_INVALID`, `PERCEPTION_MODE_INVALID`, `PROFILE_TRUST_VERIFICATION_FAILED`, `PROFILE_ROLLBACK_UNAVAILABLE` | lines 56–62 |
+| Profile / config (PRD 8.4) | `PROFILE_NOT_FOUND`, `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE`, `PROFILE_KEYMAP_INVALID`, `PROFILE_HUD_REGION_INVALID`, `CAPTURE_TARGET_INVALID`, `PERCEPTION_MODE_INVALID`, `PROFILE_TRUST_VERIFICATION_FAILED`, `PROFILE_ROLLBACK_UNAVAILABLE`, `AUDIT_EXPORT_CONSENT_REQUIRED`, `AUDIT_EXPORT_REDACTION_REQUIRED`, `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` | lines 56–65 |
 | MCP / session (PRD 8.5) | `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `SUBSCRIPTION_NOT_FOUND`, `SUBSCRIPTION_CAP_REACHED`, `TOOL_NOT_FOUND`, `TOOL_PARAMS_INVALID`, `TOOL_INTERNAL_ERROR`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID` | lines 65–77 |
 | Storage (PRD 8.6) | `STORAGE_OPEN_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `STORAGE_SCHEMA_MISMATCH`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | lines 80–89 |
 | Models (PRD 8.7) | `MODEL_DOWNLOAD_FAILED`, `MODEL_HASH_MISMATCH`, `MODEL_LOAD_FAILED`, `MODEL_BACKEND_UNAVAILABLE` | lines 92–95 |
@@ -493,7 +496,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 42 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 44 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -542,6 +545,7 @@ crates/synapse-mcp/
     └── m3/
         ├── a11y_events.rs          # Bridges synapse-a11y AccessibleEvent stream into the reflex EventBus
         ├── audio.rs                # audio_tail + audio_transcribe tool implementations
+        ├── audit_export.rs         # audit_export_consent_set + audit_export_bundle consent/redaction/export implementation
         ├── permissions.rs          # PermissionGrants, replay path normalization, profile use-scope gate
         ├── profile.rs              # profile_list + profile_activate tool implementations
         ├── reflex.rs               # reflex_register/cancel/list/history tools + ScheduledReflex construction
@@ -559,7 +563,7 @@ crates/synapse-core/
 └── src/
     ├── lib.rs                      # Re-exports public types + SCHEMA_VERSION
     ├── defaults.rs                 # SCHEMA_VERSION=1 + reference-host perf budgets
-    ├── error_codes.rs              # 95 SCREAMING_SNAKE_CASE error-code pub const strs
+    ├── error_codes.rs              # 100 SCREAMING_SNAKE_CASE error-code pub const strs
     ├── filter.rs                   # EventFilter and DataPredicate matchers
     ├── retention.rs                # Per-CF TTL + soft/hard cap MB defaults (11 CFs)
     └── types.rs                    # All wire-level types (1567 LoC): Action, Observation, Event, Profile, Reflex*, Stored*, Health, etc.
@@ -1194,6 +1198,9 @@ There is no merge step: CLI/env values configure individual subsystems independe
 | SSE poll interval | `20 ms` | `crates/synapse-mcp/src/http/sse.rs::SSE_POLL_INTERVAL` |
 | SSE `buffer_size` (subscribe tool) | hard-pinned `4096` | `crates/synapse-mcp/src/m3/subscribe.rs::DEFAULT_BUFFER_SIZE` |
 | `reflex_history.limit` cap | `1000` | `crates/synapse-mcp/src/m3/reflex.rs::MAX_REFLEX_HISTORY_LIMIT` |
+| `audit_export_bundle.max_rows` default / cap | `100` / `1000` | `crates/synapse-mcp/src/m3/audit_export.rs` |
+| `audit_export_bundle.max_row_bytes` default / cap | `65536` / `524288` | `crates/synapse-mcp/src/m3/audit_export.rs` |
+| `audit_export_consent_set.redaction_policy` default | `strict` | `crates/synapse-mcp/src/m3/audit_export.rs` |
 | `reflex_register` default priority | `100` | `crates/synapse-core/src/types.rs::default_reflex_priority` + `synapse_reflex::DEFAULT_REFLEX_PRIORITY` |
 | `act_press` default hold_ms | `33` | `crates/synapse-mcp/src/m2/press/schema.rs::DEFAULT_HOLD_MS` |
 | `act_aim` default deadline_ms | `80` | `crates/synapse-mcp/src/m2/aim.rs::DEFAULT_DEADLINE_MS` |
@@ -1323,7 +1330,7 @@ These are the `serde_json` payloads written into each CF. Source: `crates/synaps
 | `CF_TELEMETRY` | not yet wired | — | — |
 | `CF_ACTION_LOG` | action audit JSON | `schema_version`, `audit_id`, `ts_ns`, `seq`, `session_id`, `profile_id`, `profile_version`, `profile_schema_version`, `audit_context`, `tool`, `status`, `error_code`, `foreground`, `active_profile_id`, `active_profile_schema_version`, `details`, `redacted`, `redactions` | action tools via `server/action_audit.rs`; diagnostic probe writes may create malformed rows for manual corrupt-row checks |
 | `CF_PROCESS_HISTORY` | not yet wired | — | — |
-| `CF_KV` | not yet wired (generic) | — | — |
+| `CF_KV` | generic JSON/bytes rows | Audit export consent rows at `audit_export/v1/consent/<profile_id>` and registry head pointers at `profile_registry/v1/head/<source_id>` | `audit_export_consent_set` and registry tools |
 
 `StoredReflexStep` is `{ index: u32, action: Action, status: String, error_code: Option<String> }`.
 `StoredAuditContext` is the shared profile/audit linkage payload:
@@ -1338,7 +1345,8 @@ available.
 ### 4.2 Active write paths (current build)
 
 The live build actively writes `CF_REFLEX_AUDIT`, `CF_ACTION_LOG`,
-`CF_EVENTS`, `CF_SESSIONS`, and profile-quality rows in `CF_PROFILES`:
+`CF_EVENTS`, `CF_SESSIONS`, profile-quality rows in `CF_PROFILES`, registry
+head pointers in `CF_KV`, and audit-export consent rows in `CF_KV`:
 
 | Caller | Trigger | Audit payload | Key format |
 |---|---|---|---|
@@ -1349,6 +1357,7 @@ The live build actively writes `CF_REFLEX_AUDIT`, `CF_ACTION_LOG`,
 | `ReflexRuntime::disable_all_by_operator` (`lib.rs:245`) | operator panic hotkey (`crates/synapse-mcp/src/safety.rs::handle_operator_hotkey`) | `details.kind = "reflex_disabled_by_operator"`, `status = Disabled`, `error_code = REFLEX_DISABLED_BY_OPERATOR` | same |
 | `ReflexScheduler` fire path (in `crates/synapse-reflex/src/scheduler.rs` + `kinds/on_event.rs`) | each reflex fire | `details.kind = "reflex_fired"`, `status = Active`, optional `event_id` and per-step `steps` | same |
 | recursion-guard clamp (`kinds/on_event.rs`) | exceeded `MAX_ON_EVENT_FIRINGS_PER_TICK` | `error_code = REFLEX_RECURSION_LIMIT` | same |
+| `SynapseService::audit_export_consent_set` | operator enables/disables export consent | JSON row `row_kind = "audit_export_consent"` with profile id, enabled state, redaction policy, allowed policies, and `external_sharing_allowed = false` | `audit_export/v1/consent/<profile_id>` in `CF_KV` |
 
 Reflex writers go through `synapse_reflex::audit::write_audit`
 (`crates/synapse-reflex/src/audit.rs`), which is just a thin wrapper around
@@ -1366,6 +1375,11 @@ aggregates profile-relevant outcomes, writes a redacted
 returning. The score uses the Wilson 95% lower bound over foreground-profile
 `ok` vs `error` rows; denied, stale, corrupt, and profile-mismatch rows are
 explainability/compatibility counters, not invented success samples.
+
+`audit_export_bundle` does not write RocksDB rows. It reads the consent row from
+`CF_KV`, reads matching `CF_ACTION_LOG` rows for the requested profile, redacts
+sensitive fields, and writes local bundle files (`manifest.json`, `rows.json`,
+`redaction_report.json`) under the caller-selected output directory.
 
 ## 5. Index strategy
 
@@ -1522,7 +1536,7 @@ Source files covered:
 
 ## 3. Error code catalog
 
-All 97 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](#file-01) for the table).
+All 100 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](#file-01) for the table).
 
 M3 added the following codes to the M2 baseline: `REFLEX_RECURSION_LIMIT`, `REFLEX_ACTION_PERMISSION_DENIED`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `SUBSCRIPTION_CAP_REACHED`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED`, `SAFETY_OPERATOR_HOTKEY_FIRED`.
 
@@ -1530,6 +1544,12 @@ M5 profile-registry security adds `PROFILE_TRUST_VERIFICATION_FAILED` for
 signed-package trust failures that quarantine instead of activate, and
 `PROFILE_ROLLBACK_UNAVAILABLE` when no prior trusted/local-validated package can
 be restored.
+
+M5 audit-export privacy adds `AUDIT_EXPORT_CONSENT_REQUIRED` for missing,
+disabled, invalid, or non-local consent rows; `AUDIT_EXPORT_REDACTION_REQUIRED`
+for missing, unsupported, or non-consented policies; and
+`AUDIT_EXPORT_PAYLOAD_TOO_LARGE` for matching audit rows that exceed the
+selected row-size ceiling before files are written.
 
 ## 4. Retention defaults
 
@@ -1901,7 +1921,7 @@ pub struct SynapseService {
 }
 ```
 
-Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 42 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
+Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 44 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
 
 ### 1.1 Constructors
 
@@ -1924,7 +1944,7 @@ Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]
   - `"... (recording enabled)"` if only recording on
   - else `"... with M2 action scaffold"`
 
-`m3_scaffold_ready` requires `M3State::scaffold_ready() && m3_tool_stubs().len() == 24` (the original 15 M3 tools plus the M5 profile-registry/audit tools that live in the M3 module because they use profile and storage state).
+`m3_scaffold_ready` requires `M3State::scaffold_ready() && m3_tool_stubs().len() == 26` (the original 15 M3 tools plus the M5 profile-registry/audit tools that live in the M3 module because they use profile and storage state).
 
 ### 1.3 Health payload
 
@@ -2164,7 +2184,7 @@ The disabling step persists `StoredReflexAudit` rows with `error_code = REFLEX_D
 
 ## 8. Tool list snapshot
 
-The full list of 42 declared tools is in [13_mcp_tool_reference.md](#file-13). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 24 in `instructions()`).
+The full list of 44 declared tools is in [13_mcp_tool_reference.md](#file-13). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 26 in `instructions()`).
 
 
 ---
@@ -3740,14 +3760,14 @@ Open M4 work (per `docs/impplan/05_m4_hardware_hid_first_game.md`):
 
 - `firmware/pico-hid/` — standalone RP2040 firmware project excluded from the root Cargo workspace; remaining firmware issues close only with real device evidence.
 - `synapse-hid-host` — serial driver with discovery, connect/IDENTIFY, CRC16 framing, pipeline/backpressure, and reconnect paths. `Backend::Hardware` uses `HardwareBackend` when `--hardware-hid <port|auto>` connects successfully, otherwise it fails closed through `HardwareUnavailableBackend`.
-- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; M5 profile-registry/audit work adds `profile_quality_refresh`, seven `profile_registry_*` tools including rollback, and `audit_intelligence_query`, bringing the live surface to 42.
+- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; M5 profile-registry/audit work adds `profile_quality_refresh`, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the live surface to 44.
 - `minecraft.java` profile (the first game profile) — fifth bundled profile, validated against a single-player creative world per `15_roadmap_and_milestones.md` §6.
 - M3 hold-over items still open: per-subscriber `subscribe.buffer_size` (currently hard-pinned to 4096); persistent writers for `CF_EVENTS`/`CF_OBSERVATIONS`/`CF_SESSIONS`/`CF_TELEMETRY`/`CF_PROCESS_HISTORY`/`CF_KV` (`CF_REFLEX_AUDIT` and `CF_ACTION_LOG` have live writers); audio detector → SSE-bus sink integration; HUD extraction pipeline. VLM `describe` and Florence-2 remain M5.
 
 ## 3. Tools delivered vs planned
 
 PRD `docs/computergames/05_mcp_tool_surface.md` started from a 30-tool M3
-baseline and now records the approved 42-tool live surface after M4/M5
+baseline and now records the approved 44-tool live surface after M4/M5
 expansion. Current build:
 
 | # | Tool | Milestone | Status | Note |
@@ -3795,13 +3815,16 @@ expansion. Current build:
 | 40 | `profile_registry_import` | M5 (registry/audit) | live | imports validated local registry bundle |
 | 41 | `profile_registry_rollback` | M5 (registry/audit) | live | restores installed profile to a prior trusted package |
 | 42 | `audit_intelligence_query` | M5 (registry/audit) | live | summarizes profile-linked audit outcomes |
+| 43 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
+| 44 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
 | — | `describe` | M5 (VLM) | not live | Florence-2 |
 
-Live count in `crates/synapse-mcp/src/server.rs`: **42** (M1: 6, M2: 9,
-M3/M5 module stubs: 24 including `profile_quality_refresh`, seven
-`profile_registry_*` tools, `audit_intelligence_query`, and 4 operator storage
+Live count in `crates/synapse-mcp/src/server.rs`: **44** (M1: 6, M2: 9,
+M3/M5 module stubs: 26 including `profile_quality_refresh`, seven
+`profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`,
+`audit_export_bundle`, and 4 operator storage
 diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`; the M3
-`m3_tool_stubs()` length-asserts to 24).
+`m3_tool_stubs()` length-asserts to 26).
 
 ## 4. Architecture Decision Records (ADRs)
 
@@ -3969,10 +3992,10 @@ Source files covered:
 - `crates/synapse-mcp/src/server.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
-- `crates/synapse-mcp/src/m3/{audio, permissions, profile, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
+- `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 42 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 44 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4511,6 +4534,56 @@ error code across `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `CF_SESSIONS`; the quality snapshot is read from
 `CF_PROFILES/profile_quality/v1/<profile_id>` when present.
 
+## 23j. `audit_export_consent_set`
+
+**Description:** "Set local consent state for redacted audit export bundles"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`
+**Side effects:** writes `CF_KV/audit_export/v1/consent/<profile_id>` and reads it back
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `profile_id` | `String` | yes | — | Profile whose audit rows may be locally exported after consent |
+| `enabled` | `bool` | yes | — | Enables or disables local export consent |
+| `redaction_policy` | `String` | no | `strict` | Only `strict` is live |
+| `operator_note` | `Option<String>` | no | — | Optional local note stored on the consent row |
+
+**Returns:** `AuditExportConsentSetResponse { profile_id, consent_key,
+enabled, redaction_policy, wrote_row, consent_row }`. The stored row includes
+`row_kind = "audit_export_consent"`, `allowed_redaction_policies`, and
+`external_sharing_allowed = false`.
+**Errors:** `AUDIT_EXPORT_REDACTION_REQUIRED`, `STORAGE_READ_FAILED`,
+`STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
+
+## 23k. `audit_export_bundle`
+
+**Description:** "Export a local redacted audit bundle after consent verification"
+**Permissions:** `READ_PROFILE`, `READ_STORAGE`
+**Side effects:** reads `CF_KV` consent and `CF_ACTION_LOG`; writes local
+`manifest.json`, `rows.json`, and `redaction_report.json` files under
+`output_path`
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `String` | yes | — | Profile id matched against action audit rows |
+| `output_path` | `String` | yes | — | — | Local directory for the bundle files |
+| `redaction_policy` | `Option<String>` | runtime-required | — | `strict` | Must be explicitly selected and consented |
+| `max_rows` | `u32` | no | `100` | `1..=1000` | Newest action-log rows scanned |
+| `max_row_bytes` | `u64` | no | `65536` | `1..=524288` | Matching row size ceiling before abort |
+
+**Returns:** `AuditExportBundleResponse { profile_id, output_dir,
+manifest_path, rows_path, redaction_report_path, consent_key,
+redaction_policy, rows_scanned, rows_exported, redacted_fields,
+manifest_sha256, rows_sha256, redaction_report_sha256, consent_row }`.
+
+Strict redaction removes window titles, paths, command lines, exact timing
+fields, OCR/text/clipboard/transcript fields, screenshots/images/pixels, user
+identifiers, and high-cardinality IDs while retaining bounded profile/outcome
+signals.
+**Errors:** `AUDIT_EXPORT_CONSENT_REQUIRED`,
+`AUDIT_EXPORT_REDACTION_REQUIRED`, `AUDIT_EXPORT_PAYLOAD_TOO_LARGE`,
+`TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`,
+`TOOL_INTERNAL_ERROR`.
+
 ## 24. `replay_record`
 
 **Description:** "Record observations and/or events to a replay JSONL file"
@@ -4627,8 +4700,9 @@ For convenience the M3 tool-call gating is summarized here (live source: `crates
 | `replay_record` | `WRITE_REPLAY` |
 | `audio_tail`, `audio_transcribe` | `READ_AUDIO` |
 | `profile_quality_refresh` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
-| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query` | `READ_PROFILE`, `READ_STORAGE` |
+| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query`, `audit_export_bundle` | `READ_PROFILE`, `READ_STORAGE` |
 | `profile_registry_install`, `profile_registry_disable`, `profile_registry_import`, `profile_registry_rollback` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
+| `audit_export_consent_set` | `READ_STORAGE`, `WRITE_STORAGE` |
 | `storage_inspect` | `READ_STORAGE` |
 | `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample` | `WRITE_STORAGE` |
 
@@ -4731,7 +4805,7 @@ Source files covered:
 - `m3_reflex_cancel_tool.rs`, `m3_reflex_history_tool.rs`, `m3_reflex_list_tool.rs`, `m3_reflex_register_tool.rs` — reflex CRUD
 - `m3_replay_record_tool.rs` — replay JSONL writer
 - `m3_subscribe_tool.rs` — subscribe + cancel
-- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 42-tool surface, including M5 profile-registry/audit tools and `profile_registry_rollback`
+- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 44-tool surface, including M5 profile-registry/audit tools, `profile_registry_rollback`, and the #460 `audit_export_*` tools
 - `sigint_clean_exit.rs` — Ctrl-C / Ctrl-Break shuts the daemon down within deadline
 
 ### 2.5 `synapse-models` (1 file)
@@ -4945,13 +5019,13 @@ Counted by walking `crates/` and slicing by path. Comments, blank lines, and `mo
 |---|---|
 | Workspace member crates | **15** |
 | Default workspace binaries (`synapse-mcp`, `synapse-overlay`) | 2 |
-| Total Rust source files (excluding tests/benches) | **148** |
+| Total Rust source files (excluding tests/benches) | **149** |
 | Total Rust integration-test files | 76 |
 | Total Rust bench files | 13 |
-| MCP tools registered in `server.rs` | **42** (M1: 6, M2: 9, M3/M5 module stubs: 24 including `profile_quality_refresh`, seven `profile_registry_*` tools, and `audit_intelligence_query`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
-| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 42 |
+| MCP tools registered in `server.rs` | **44** (M1: 6, M2: 9, M3/M5 module stubs: 26 including `profile_quality_refresh`, seven `profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
+| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 44 |
 | RocksDB column families | **11** (`ALL_COLUMN_FAMILIES.len() == 11`; excludes implicit `default` CF) |
-| Stable error-code constants in `synapse_core::error_codes` | **97** |
+| Stable error-code constants in `synapse_core::error_codes` | **100** |
 | Reserved subsystem error enums (mapped to those codes) | 11 (`StorageError`, `ReflexError`, `ActionError`, `ProfileError`, `ProfileLoadError`, `AudioError`, `PerceptionError`, `CaptureError`, `ModelError`, `A11yError`, `TelemetryError` + parse errors `ElementIdParseError`/`EventFilterValidationError`) |
 | M3 metric specs declared in `synapse_telemetry::metrics::M3_METRICS` | **19** (12 counters, 5 gauges, 2 histograms) |
 | Permissions in M3 grant model | **13** (`READ_EVENTS`, `WRITE_REFLEX`, `READ_REFLEX`, `READ_PROFILE`, `WRITE_PROFILE_ACTIVE`, `WRITE_REPLAY`, `READ_AUDIO`, `READ_STORAGE`, `WRITE_STORAGE`, `INPUT_KEYBOARD`, `INPUT_MOUSE`, `INPUT_PAD`, `INPUT_HARDWARE_HID`) |
@@ -5085,7 +5159,7 @@ Files exceeding the 500-LoC impplan rule on `main` (M3 carry-over per `docs/impp
 
 | File | Topic |
 |---|---|
-| [01_system_overview.md](#file-01) | High-level architecture, tech stack, all 42 live tools |
+| [01_system_overview.md](#file-01) | High-level architecture, tech stack, all 44 live tools |
 | [02_source_code_map.md](#file-02) | Per-file tree with descriptions + dep graph + entry-point traces |
 | [03_configuration.md](#file-03) | All CLI flags, env vars, validation rules, default constants |
 | [04_storage_layer.md](#file-04) | RocksDB CFs, schema sentinel, TTL filter, GC, disk pressure |
