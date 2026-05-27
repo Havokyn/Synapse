@@ -4592,7 +4592,11 @@ where `row` includes the decoded JSON value when found.
 **Side effects:** validates manifest/profile files; enforces signed package
 trust where required; writes `CF_PROFILES` registry rows and a `CF_KV` source
 head pointer; reads written rows back. Failed trust verification writes only a
-`profile_package_quarantine` row in `CF_PROFILES`.
+`profile_package_quarantine` row in `CF_PROFILES`. Manifests with complete
+`curated.*` metadata also write a `curated_profile_target` row under
+`profile_registry/v1/curated_target/<seed_set_id>/<target_id>`; partial
+curated metadata or a missing matching compatibility target fails closed before
+companion rows are written.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

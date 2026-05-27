@@ -64,6 +64,7 @@ All registry keys are UTF-8 and versioned under `profile_registry/v1/`.
 | Profile version | `CF_PROFILES` | `profile_registry/v1/profile/<profile_id>/<profile_version>` |
 | Installed profile | `CF_PROFILES` | `profile_registry/v1/installed/<profile_id>` |
 | Compatibility target | `CF_PROFILES` | `profile_registry/v1/compat/<target_id>/<profile_id>/<profile_version>` |
+| Curated starter target | `CF_PROFILES` | `profile_registry/v1/curated_target/<seed_set_id>/<target_id>` |
 | Quality link | `CF_PROFILES` | `profile_registry/v1/quality_link/<profile_id>/<profile_version>` |
 | Trust root | `CF_PROFILES` | `profile_registry/v1/trust_root/<signer_id>/<key_id>` |
 | Quarantined package | `CF_PROFILES` | `profile_registry/v1/quarantine/<package_id>/<package_version>/<manifest_digest_prefix>` |
@@ -251,7 +252,44 @@ Required fields beyond the envelope:
 - `key_id`
 - `trust_policy_id`
 
-### 5.9 Quality link
+### 5.9 Curated starter target
+
+Links a selected seed target from
+[`24_curated_starter_registry.md`](24_curated_starter_registry.md) to the
+package/profile/compatibility rows that make it real. This row is written by
+`profile_registry_install` only when a manifest declares complete `curated.*`
+metadata.
+
+Required fields beyond the envelope:
+
+- `seed_set_id`
+- `target_id`
+- `tier`
+- `priority`
+- `status`
+- `backlog_issue`
+- `profile_id`
+- `profile_version`
+- `package_id`
+- `package_version`
+- `target_kind`
+- `use_scope`
+- `compatibility_status`
+- `safe_default_backend_policy`
+- `input_backends`
+- `minimum_manual_fsv`
+- `quality_signal`
+- `profile_quality_key`
+- `package_key`
+- `installed_key`
+- `compatibility_key`
+- `provenance`
+
+If any `curated.*` metadata exists, the install path fails closed unless the
+full required set is present and `curated.target_id` matches a manifest
+compatibility target.
+
+### 5.10 Quality link
 
 Points registry rows to audit-derived quality snapshots.
 
@@ -265,7 +303,7 @@ Required fields beyond the envelope:
 - `sample_count`
 - `evidence_hash`
 
-### 5.10 Contribution bundle
+### 5.11 Contribution bundle
 
 Stages an offline contribution bundle imported through `profile_registry_import`
 with `bundle_kind = "contribution"`. This row is a review/staging record, not a
@@ -321,9 +359,10 @@ A successful local package registration writes these rows through the real MCP
 3. One or more `profile_registry/v1/profile/<profile_id>/<profile_version>`.
 4. `profile_registry/v1/installed/<profile_id>` when the package is installed.
 5. One or more compatibility rows.
-6. One trust-root row when a package signature verified against a local root.
-7. One quality-link row when audit-derived quality already exists.
-8. `CF_KV` head pointer for the source/index only after the rows above succeed.
+6. One curated starter target row when manifest `curated.*` metadata is present.
+7. One trust-root row when a package signature verified against a local root.
+8. One quality-link row when audit-derived quality already exists.
+9. `CF_KV` head pointer for the source/index only after the rows above succeed.
 
 If parsing/schema validation fails, none of the companion rows are written. If
 signature/trust verification fails, `profile_registry_install` writes only a
@@ -345,6 +384,7 @@ fails with a duplicate-conflict result.
 | Contribution metadata contains prompt/tool-injection text | Write quarantined contribution row only; no active bundle rows or head rows. |
 | Contribution quality score claims more samples than exported evidence or a high score with too little evidence | Write quarantined contribution row only with explicit risk flags. |
 | Contribution has no local success evidence | Stage/de-rank with `rank_eligible=false` and `quality_weight=0`; do not treat volume as quality. |
+| Partial curated starter metadata or curated target without a matching compatibility target | Reject before install; no companion rows change. |
 | Rollback target missing, current, revoked, quarantined, or untrusted | Reject with `PROFILE_ROLLBACK_UNAVAILABLE`; installed row unchanged. |
 | Revoked package | Reject install/activation; tombstone can still be written. |
 
@@ -374,6 +414,7 @@ classes exist in RocksDB after the MCP trigger.
 | `cf_profiles_profile_version_row.json` | Runtime profile version row. |
 | `cf_profiles_installed_row.json` | Local installed profile row. |
 | `cf_profiles_compatibility_row.json` | Compatibility target row. |
+| `../curated_starter_registry/cf_profiles_curated_luanti_row.json` | Curated starter target row for `starter.v1` / `luanti.minetest`. |
 | `cf_profiles_quality_link_row.json` | Link from registry package to `profile_quality/v1/<profile_id>`. |
 | `cf_profiles_trust_root_row.json` | Trust root row for the synthetic Ed25519 signer. |
 | `cf_profiles_quarantine_row.json` | Quarantine-only row for a rejected signed package. |

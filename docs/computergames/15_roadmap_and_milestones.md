@@ -211,6 +211,11 @@ The profile package manifest baseline is
 defines package metadata, provenance, compatibility targets, permissions,
 hashes, signed trust metadata, quarantine-only trust failures, rollback
 verification, and fail-closed parser validation.
+The curated starter registry baseline is
+[`24_curated_starter_registry.md`](24_curated_starter_registry.md), which
+defines seed set `starter.v1`, shipped/backlog targets #471-#482, and the
+`curated_profile_target` row that package install writes when manifests carry
+complete curated metadata.
 The #460 privacy baseline adds explicit local consent rows in `CF_KV` plus
 redacted local audit-export bundles with manifest, row hashes, and redaction
 reports before any future contribution path can exist.

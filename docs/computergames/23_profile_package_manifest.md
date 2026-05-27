@@ -171,6 +171,13 @@ row only to a prior package row whose `trust_status` is `trusted` or
 `local_validated`, and the restored installed row must carry the target
 package's trust root, signer/key, trust policy, and signature payload digest.
 
+When a manifest includes the curated starter metadata from
+[`24_curated_starter_registry.md`](24_curated_starter_registry.md), successful
+install also writes
+`profile_registry/v1/curated_target/<seed_set_id>/<target_id>`. Partial
+`curated.*` metadata or a curated target id that is absent from the manifest
+compatibility targets fails closed before install rows are written.
+
 ## 7. Manual FSV contract
 
 Runtime FSV for package install must:
@@ -206,6 +213,9 @@ real runtime install FSV.
 | `signed_update_package_manifest.toml` | Valid signed update used to prove rollback to a prior trusted package; expected payload digest `sha256:93eb5e7fa64999919ecdb59cf09ad2aec9b8c430fc493cdd8be466a2f8757145`. |
 | `edge_bad_signature_package_manifest.toml` | Signed-required package with a known signer and intentionally corrupted signature; expected quarantine-only install failure. |
 | `edge_unknown_signer_package_manifest.toml` | Signed-required package whose signer is absent from the local trust roots; expected quarantine-only install failure. |
+| `../curated_starter_registry/curated_luanti_package_manifest.toml` | Valid curated seed package that writes a `curated_profile_target` row for `luanti.minetest`. |
+| `../curated_starter_registry/edge_unknown_use_scope_manifest.toml` | Invalid curated package with `use_scope = "unknown"`. |
+| `../curated_starter_registry/edge_missing_compatibility_manifest.toml` | Invalid curated package with no compatibility target. |
 
 ## 9. References
 

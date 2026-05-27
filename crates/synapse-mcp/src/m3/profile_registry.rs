@@ -33,6 +33,7 @@ const PACKAGE_PREFIX: &str = "profile_registry/v1/package/";
 const PROFILE_PREFIX: &str = "profile_registry/v1/profile/";
 const INSTALLED_PREFIX: &str = "profile_registry/v1/installed/";
 const COMPAT_PREFIX: &str = "profile_registry/v1/compat/";
+const CURATED_TARGET_PREFIX: &str = "profile_registry/v1/curated_target/";
 const QUALITY_LINK_PREFIX: &str = "profile_registry/v1/quality_link/";
 const TRUST_ROOT_PREFIX: &str = "profile_registry/v1/trust_root/";
 const QUARANTINE_PREFIX: &str = "profile_registry/v1/quarantine/";
@@ -1928,6 +1929,9 @@ fn registry_rows(
             ),
         )?);
     }
+    if let Some((key, value)) = curated_target_row(manifest, source_id, updated_at)? {
+        rows.push(encoded_row(key, &value)?);
+    }
     if let Some(quality_row) = quality_row {
         let quality = decode_json::<Value>(quality_row).map_err(decode_error)?;
         rows.push(encoded_row(
@@ -2133,6 +2137,125 @@ fn quality_link_row(
         "sample_count": quality.pointer("/score/sample_size").cloned().unwrap_or_else(|| json!(0)),
         "evidence_hash": quality.get("evidence_hash").cloned().unwrap_or_else(|| json!("")),
     })
+}
+
+fn curated_target_row(
+    manifest: &ProfilePackageManifest,
+    source_id: &str,
+    updated_at: &str,
+) -> Result<Option<(String, Value)>, ErrorData> {
+    if !manifest
+        .metadata
+        .keys()
+        .any(|key| key.starts_with("curated."))
+    {
+        return Ok(None);
+    }
+
+    let seed_set_id = required_curated_metadata(manifest, "curated.seed_set_id")?;
+    let target_id = required_curated_metadata(manifest, "curated.target_id")?;
+    let tier = required_curated_metadata(manifest, "curated.tier")?;
+    let priority = required_curated_metadata(manifest, "curated.priority")?;
+    let status = required_curated_metadata(manifest, "curated.status")?;
+    let backlog_issue = required_curated_metadata(manifest, "curated.backlog_issue")?;
+    let minimum_manual_fsv = required_curated_metadata(manifest, "curated.minimum_manual_fsv")?;
+    validate_registry_id("metadata.curated.seed_set_id", seed_set_id)?;
+    validate_registry_id("metadata.curated.target_id", target_id)?;
+    validate_registry_id("metadata.curated.tier", tier)?;
+    validate_registry_id("metadata.curated.priority", priority)?;
+    validate_registry_id("metadata.curated.status", status)?;
+    validate_non_empty("metadata.curated.backlog_issue", backlog_issue)?;
+    validate_non_empty("metadata.curated.minimum_manual_fsv", minimum_manual_fsv)?;
+    let Some(target) = manifest
+        .targets
+        .iter()
+        .find(|target| target.target_id == target_id)
+    else {
+        return Err(registry_error(
+            "curated_target_missing_compatibility",
+            format!(
+                "metadata.curated.target_id {target_id:?} must match a manifest compatibility target"
+            ),
+        ));
+    };
+    let fsv_steps = split_metadata_list(minimum_manual_fsv);
+    if fsv_steps.is_empty() {
+        return Err(registry_error(
+            "curated_target_fsv_missing",
+            "metadata.curated.minimum_manual_fsv must name at least one manual FSV surface",
+        ));
+    }
+    let key = curated_target_key(seed_set_id, target_id);
+    let value = json!({
+        "schema_version": SCHEMA_VERSION,
+        "row_kind": "curated_profile_target",
+        "row_id": format!("{seed_set_id}:{target_id}"),
+        "created_at": manifest.created_at,
+        "updated_at": updated_at,
+        "source_id": source_id,
+        "state": "active",
+        "seed_set_id": seed_set_id,
+        "target_id": target_id,
+        "tier": tier,
+        "priority": priority,
+        "status": status,
+        "backlog_issue": backlog_issue,
+        "profile_id": manifest.profile_id,
+        "profile_version": manifest.profile_version,
+        "package_id": manifest.package_id,
+        "package_version": manifest.package_version,
+        "target_kind": target.target_kind,
+        "app_id": target.app_id,
+        "process_name": target.process_name,
+        "title_regex": target.title_regex,
+        "steam_appid": target.steam_appid,
+        "app_version": target.app_version,
+        "use_scope": manifest.permissions.use_scope,
+        "compatibility_status": "declared",
+        "safe_default_backend_policy": manifest.metadata.get("curated.safe_default_backend_policy"),
+        "input_backends": manifest.input.backends,
+        "minimum_manual_fsv": fsv_steps,
+        "quality_signal": manifest.metadata.get("quality_signal")
+            .or_else(|| manifest.metadata.get("curated.quality_signal")),
+        "profile_quality_key": quality_key(&manifest.profile_id),
+        "package_key": package_key(&manifest.package_id, &manifest.package_version),
+        "installed_key": installed_key(&manifest.profile_id),
+        "compatibility_key": compat_key(target_id, &manifest.profile_id, &manifest.profile_version),
+        "provenance": {
+            "source_kind": manifest.source.kind,
+            "source_uri": manifest.source.uri,
+            "source_revision": manifest.source.revision,
+            "built_by": manifest.source.built_by,
+            "generated_by": manifest.source.generated_by,
+        },
+    });
+    Ok(Some((key, value)))
+}
+
+fn required_curated_metadata<'a>(
+    manifest: &'a ProfilePackageManifest,
+    key: &'static str,
+) -> Result<&'a str, ErrorData> {
+    manifest
+        .metadata
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            registry_error(
+                "curated_target_metadata_missing",
+                format!("{key} is required when any curated.* metadata is present"),
+            )
+        })
+}
+
+fn split_metadata_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn head_row(
@@ -3342,6 +3465,10 @@ fn compat_key(target_id: &str, profile_id: &str, profile_version: &str) -> Strin
     format!("{COMPAT_PREFIX}{target_id}/{profile_id}/{profile_version}")
 }
 
+fn curated_target_key(seed_set_id: &str, target_id: &str) -> String {
+    format!("{CURATED_TARGET_PREFIX}{seed_set_id}/{target_id}")
+}
+
 fn quality_link_key(profile_id: &str, profile_version: &str) -> String {
     format!("{QUALITY_LINK_PREFIX}{profile_id}/{profile_version}")
 }
@@ -3450,6 +3577,7 @@ fn merge_rules() -> Vec<String> {
         "contribution_import_runs_local_risk_review_before_active_writes".to_owned(),
         "hostile_contribution_writes_quarantine_row_only".to_owned(),
         "external_quality_claims_do_not_rank_without_local_success".to_owned(),
+        "curated_target_rows_require_manifest_compatibility_metadata".to_owned(),
     ]
 }
 

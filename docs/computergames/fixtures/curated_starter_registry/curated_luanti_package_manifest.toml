@@ -1,22 +1,22 @@
 schema_version = 1
 kind = "profile_package"
-package_id = "profile.luanti.minetest"
+package_id = "profile.luanti.minetest.curated"
 package_version = "0.1.0"
 profile_id = "luanti.minetest"
 profile_version = "1.0.0"
-created_at = "2026-05-27T09:30:00Z"
+created_at = "2026-05-27T16:10:00Z"
 
 [author]
 name = "Synapse Agent"
 contact = "synthetic@example.invalid"
-attribution = "Synthetic Luanti benchmark package fixture for Synapse issue #456."
+attribution = "Synthetic curated starter package fixture for Synapse issue #466."
 
 [source]
 kind = "bundled"
 uri = "https://github.com/ChrisRoyse/Synapse"
-revision = "m5-r02-fixture"
+revision = "m5-r12-curated-fixture"
 built_by = "codex"
-generated_by = "synapse-profile-package-manifest-v1"
+generated_by = "synapse-curated-starter-registry-v1"
 
 [[targets]]
 target_id = "luanti.minetest"
@@ -65,8 +65,8 @@ share_audit_allowed = false
 
 [[changelog]]
 version = "0.1.0"
-at = "2026-05-27T09:30:00Z"
-summary = "Initial synthetic Luanti package manifest for registry compatibility validation."
+at = "2026-05-27T16:10:00Z"
+summary = "Initial Luanti curated starter registry fixture."
 
 [hashes]
 profile_toml_sha256 = "sha256:7fde3858f653fa720653328d3704c958d43efcd5b8c8c0342b188a143d1298b3"
@@ -82,7 +82,7 @@ assets = ["docs/computergames/fixtures/luanti_minetest_world/world.mt"]
 [metadata]
 registry_family = "profile-registry/audit-data"
 quality_signal = "profile_quality.luanti.minetest"
-local_registry_row = "profile_registry/v1/package/profile.luanti.minetest/0.1.0"
+local_registry_row = "profile_registry/v1/package/profile.luanti.minetest.curated/0.1.0"
 "curated.seed_set_id" = "starter.v1"
 "curated.target_id" = "luanti.minetest"
 "curated.tier" = "benchmark.game.seed"

@@ -1085,7 +1085,7 @@ requires a future explicit operator-approved path.
 
 Searches local registry rows under `profile_registry/v1/` in `CF_PROFILES`.
 This is the operator-facing list/search readback for source/package/profile/
-installed/compatibility/quality-link rows.
+installed/compatibility/curated-target/quality-link rows.
 
 ```json
 {
@@ -1143,6 +1143,11 @@ writes the source head pointer to `CF_KV`, and reads the written rows back
 before returning. If signed trust verification fails, the tool writes a
 `profile_package_quarantine` row and returns `PROFILE_TRUST_VERIFICATION_FAILED`
 without writing package/profile/installed/head rows.
+If the manifest carries complete `curated.*` metadata, install also writes a
+`curated_profile_target` row under
+`profile_registry/v1/curated_target/<seed_set_id>/<target_id>`. Partial
+curated metadata, or a curated target id without matching compatibility target,
+fails closed before any companion rows are written.
 
 ```json
 {

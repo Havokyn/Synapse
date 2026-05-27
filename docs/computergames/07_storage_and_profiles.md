@@ -372,6 +372,14 @@ and local bundle files; they return exact row keys or bundle paths so manual
 FSV can trigger the real MCP tool and then separately read the stored RocksDB
 rows or filesystem bundle.
 
+For #466, curated starter registry packages add a
+`curated_profile_target` row when a package manifest carries complete
+`curated.*` metadata. This row links the selected seed target to its profile,
+package, compatibility target, backlog issue, safe backend policy, minimum
+manual FSV surfaces, and profile quality key. The install path fails closed
+when curated metadata is partial or points at a target absent from the manifest
+compatibility list.
+
 For #464, contribution import never copies redacted shared evidence into
 `CF_ACTION_LOG`. It writes active registry rows when no local conflict exists,
 skips byte-identical duplicates plus same-deterministic-content contribution
@@ -416,6 +424,7 @@ is needed. `CF_KV` is reserved only for tiny registry head/pointer rows.
 | Profile version | `CF_PROFILES` | `profile_registry/v1/profile/<profile_id>/<profile_version>` |
 | Installed profile | `CF_PROFILES` | `profile_registry/v1/installed/<profile_id>` |
 | Compatibility target | `CF_PROFILES` | `profile_registry/v1/compat/<target_id>/<profile_id>/<profile_version>` |
+| Curated starter target | `CF_PROFILES` | `profile_registry/v1/curated_target/<seed_set_id>/<target_id>` |
 | Quality link | `CF_PROFILES` | `profile_registry/v1/quality_link/<profile_id>/<profile_version>` |
 | Trust root | `CF_PROFILES` | `profile_registry/v1/trust_root/<signer_id>/<key_id_hex>` |
 | Quarantined package | `CF_PROFILES` | `profile_registry/v1/quarantine/<package_id>/<package_version>/<digest-prefix>` |

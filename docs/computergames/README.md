@@ -126,6 +126,7 @@ directly; scripts, tests, benchmarks, GitHub Actions, and CI are never FSV.
 | 21 | [`21_profile_registry_protocol.md`](21_profile_registry_protocol.md) | Optional shared registry protocol, local source config, moderation state, update metadata, and contribution submission boundary. |
 | 22 | [`22_profile_registry_data_model.md`](22_profile_registry_data_model.md) | Local-first profile registry data model, `CF_PROFILES`/`CF_KV` row namespaces, and install/register edge rules. |
 | 23 | [`23_profile_package_manifest.md`](23_profile_package_manifest.md) | Profile package manifest schema, provenance, compatibility matrix, permissions, and fail-closed validation rules. |
+| 24 | [`24_curated_starter_registry.md`](24_curated_starter_registry.md) | Curated starter profile registry seed set, per-target backlog, and registry row SoT. |
 
 ---
 

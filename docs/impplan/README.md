@@ -62,6 +62,11 @@ Child issue ledger:
 | #468 | overlay/CLI profile registry and audit-data inspector |
 | #469 | optional shared registry protocol and moderation boundary |
 | #470 | contribution rights, licensing, revocation |
+| #478 | curated Notepad seed package |
+| #479 | curated VS Code seed package |
+| #480 | curated Windows Terminal seed package |
+| #481 | curated Chromium-browser seed package |
+| #482 | curated Minecraft Java seed package |
 
 Manual FSV for this track always names and reads the physical source of truth:
 profile TOML files, future registry index/package files, RocksDB
@@ -95,6 +100,13 @@ The package-manifest baseline for #456 is
 `synapse-profiles` parser/validator API, portable package manifest fields,
 provenance, compatibility matrix, permissions/use scope, hashes, and
 fail-closed edge policy.
+
+The curated starter-registry baseline for #466 is
+`docs/computergames/24_curated_starter_registry.md`. It defines seed set
+`starter.v1`, the current profile target backlog (#478-#482 plus Luanti
+#471-#476), and the `curated_profile_target` row that
+`profile_registry_install` writes when package manifests carry complete
+`curated.*` metadata.
 
 ---
 
