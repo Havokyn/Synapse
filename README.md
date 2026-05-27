@@ -45,6 +45,9 @@ Physical sources of truth for that loop include profile TOML and future registry
 Contribution rights, attribution, provenance, licensing, consent, and
 revocation semantics for that loop are governed by
 [docs/computergames/20_profile_registry_governance.md](docs/computergames/20_profile_registry_governance.md).
+The optional shared-registry protocol and moderation boundary are governed by
+[docs/computergames/21_profile_registry_protocol.md](docs/computergames/21_profile_registry_protocol.md);
+local registry use stays offline-capable and account-free.
 
 ## Tools
 

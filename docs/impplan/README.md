@@ -77,6 +77,11 @@ redacted audit contribution bundles fail closed unless their physical manifest
 SoTs carry license, attribution, provenance, revocation, redaction, and consent
 metadata.
 
+The protocol/moderation baseline for #469 is
+`docs/computergames/21_profile_registry_protocol.md`. Hosted/shared registry
+state is optional; local registry behavior must remain offline-capable, and
+search/fetch/contribution/moderation/update metadata are separate SoTs.
+
 ---
 
 ## State-tracking — three sources, in order of authority

@@ -42,5 +42,5 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
   installs, model/file generation, firmware flashing, app launching, USB/COM
   inspection, and UI inspection are agent-owned work when reversible on this
   host.
-- For the contract-level PRD, see `docs/computergames/` (numbered 00-20).
+- For the contract-level PRD, see `docs/computergames/` (numbered 00-21).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).

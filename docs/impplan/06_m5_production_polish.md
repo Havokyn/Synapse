@@ -39,6 +39,12 @@ deletion semantics are governed by
 redacted audit bundle can be shared or promoted without those physical manifest
 fields.
 
+Optional shared-registry protocol and moderation boundaries are governed by
+`docs/computergames/21_profile_registry_protocol.md`. The shared service is not
+required for local use; read-only source config, package fetch, update
+metadata, contribution submission, moderation records, trust metadata, and
+revocations remain distinct source-of-truth surfaces.
+
 ## Demo gate
 
 Fresh Windows 11 VM (no Synapse pre-installed) → operator runs `synapse-mcp setup` wizard → Claude Desktop completes the multi-app scenario per `15 §7`:

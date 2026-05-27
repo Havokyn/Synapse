@@ -198,6 +198,10 @@ profiles, inspector UI, shared-registry moderation, and governance/licensing.
 The contribution-rights, attribution, provenance, and revocation baseline is
 the operator-visible governance doc in
 [`20_profile_registry_governance.md`](20_profile_registry_governance.md).
+The optional shared-registry service/protocol and moderation boundary is
+defined in
+[`21_profile_registry_protocol.md`](21_profile_registry_protocol.md); local
+registry use remains useful offline and does not require credentials.
 
 Physical sources of truth for this track are registry index/package files,
 profile TOML files, RocksDB rows in `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`,
