@@ -4,7 +4,7 @@ use std::time::Duration;
 use synapse_core::{Action, ComboInput, Key, KeystrokeDynamics};
 use synapse_hid_host::{
     HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_MODS, HOST_COMMAND_KEY_UP, HOST_COMMAND_RELEASE_ALL,
-    HidError, HidGateway, HostCommandRequest,
+    HidError, HidGateway, HidReconnectGateway, HostCommandRequest,
 };
 
 use crate::{ActionBackend, ActionError, EmitState};
@@ -60,6 +60,21 @@ impl HardwareGateway for HidGateway {
         commands: &[HostCommandRequest<'_>],
     ) -> Result<Vec<u32>, ActionError> {
         HidGateway::send_commands(self, commands).map_err(action_error_from_hid)
+    }
+}
+
+impl HardwareGateway for HidReconnectGateway {
+    #[allow(clippy::use_self)]
+    fn send_command(&mut self, command: u8, payload: &[u8]) -> Result<u32, ActionError> {
+        HidReconnectGateway::send_command(self, command, payload).map_err(action_error_from_hid)
+    }
+
+    #[allow(clippy::use_self)]
+    fn send_commands(
+        &mut self,
+        commands: &[HostCommandRequest<'_>],
+    ) -> Result<Vec<u32>, ActionError> {
+        HidReconnectGateway::send_commands(self, commands).map_err(action_error_from_hid)
     }
 }
 

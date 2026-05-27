@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use synapse_hid_host::{HidError, HidGateway, connect_auto};
+use synapse_hid_host::{HidError, HidGateway, HidReconnectGateway};
 
 use crate::{
     ActionBackend, HardwareBackend, HardwareUnavailableBackend, ResolvedBackend, VigemBackend,
@@ -61,16 +61,22 @@ impl Backends {
     pub fn production_with_hardware_hid(config: &HardwareHidConfig) -> Result<Self, HidError> {
         match config {
             HardwareHidConfig::Disabled => Ok(Self::production()),
-            HardwareHidConfig::Auto => connect_auto().map(Self::production_with_hardware_gateway),
-            HardwareHidConfig::Port(port_name) => {
-                HidGateway::connect(port_name.clone()).map(Self::production_with_hardware_gateway)
+            HardwareHidConfig::Auto => {
+                HidReconnectGateway::connect_auto().map(Self::production_with_reconnect_gateway)
             }
+            HardwareHidConfig::Port(port_name) => HidReconnectGateway::connect_port(port_name)
+                .map(Self::production_with_reconnect_gateway),
         }
     }
 
     #[must_use]
     pub fn production_with_hardware_gateway(gateway: HidGateway) -> Self {
         Self::production_with_hardware_backend(Arc::new(HardwareBackend::new(gateway)))
+    }
+
+    #[must_use]
+    pub fn production_with_reconnect_gateway(gateway: HidReconnectGateway) -> Self {
+        Self::production_with_hardware_backend(Arc::new(HardwareBackend::with_gateway(gateway)))
     }
 
     #[must_use]
