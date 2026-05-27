@@ -112,6 +112,33 @@ fn package_manifest_accepts_curated_terminal_fixture() -> TestResult {
 }
 
 #[test]
+fn package_manifest_accepts_curated_chrome_fixture() -> TestResult {
+    let path = curated_fixture("curated_chrome_package_manifest.toml");
+    let manifest = parse_package_manifest_file(&path)?;
+
+    assert_eq!(manifest.package_id, "profile.chrome.curated");
+    assert_eq!(manifest.profile_id, "chrome");
+    assert_eq!(
+        manifest.permissions.use_scope,
+        ProfileUseScope::Productivity
+    );
+    assert_eq!(manifest.targets.len(), 3);
+    assert_eq!(manifest.targets[0].target_id, "chrome.windows");
+    assert_eq!(manifest.targets[1].target_id, "edge.windows");
+    assert_eq!(manifest.targets[2].target_id, "chromium.windows");
+    assert_eq!(
+        manifest
+            .metadata
+            .get("curated.minimum_manual_fsv")
+            .map(String::as_str),
+        Some(
+            "profile_list,profile_registry_install,observe,act_clipboard,act_press,storage_inspect,profile_quality_refresh,browser_window_title_readback,browser_history_readback"
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn package_manifest_accepts_signed_fixture_metadata() -> TestResult {
     let path = fixture("signed_good_package_manifest.toml");
     let manifest = parse_package_manifest_file(&path)?;
