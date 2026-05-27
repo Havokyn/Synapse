@@ -13,6 +13,8 @@ pub enum PerceptionError {
     ObserveNoPerceptionAvailable { detail: String },
     #[error("observe failed internally: {detail}")]
     ObserveInternal { detail: String },
+    #[error("HUD extraction failed: {detail}")]
+    HudExtractionFailed { detail: String },
     #[error("invalid perception mode: {value}")]
     PerceptionModeInvalid { value: String },
 }
@@ -27,6 +29,7 @@ impl PerceptionError {
                 error_codes::OBSERVE_NO_PERCEPTION_AVAILABLE
             }
             Self::ObserveInternal { .. } => error_codes::OBSERVE_INTERNAL,
+            Self::HudExtractionFailed { .. } => error_codes::HUD_EXTRACTION_FAILED,
             Self::PerceptionModeInvalid { .. } => error_codes::PERCEPTION_MODE_INVALID,
         }
     }

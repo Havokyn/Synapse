@@ -265,6 +265,15 @@ pub struct HudReading {
 }
 ```
 
+For icon counters such as Minecraft hearts and hunger, `synapse-perception`
+exposes a slotted template extractor. It
+takes a cropped grayscale HUD region plus full/half/empty templates and scans
+each slot with zero-mean normalized cross-correlation. The default status-bar
+config is 10 slots, full=2, half=1, empty=0, max value 20, and minimum
+per-slot confidence 0.85. Synthetic 180x16 regions with three 9x9 templates
+measure at roughly 0.29 ms locally, leaving the 5 ms HUD budget for capture and
+future live-frame wiring.
+
 ### OCR cache
 
 `CF_OCR_CACHE` keyed by `sha256(cropped_region_bytes)` → `OcrResult`. TTL 1h. Hit rate on stable HUDs (HP/ammo) is high; rebuilds drop from 30 ms to ~0.1 ms.

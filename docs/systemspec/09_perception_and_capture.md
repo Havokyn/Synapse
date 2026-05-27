@@ -128,6 +128,7 @@ The crate ensures a per-thread COM apartment (`ComApartmentKind`) before any UIA
 | `parse_perception_mode(&str) -> PerceptionResult<PerceptionMode>` | string parse used by `set_perception_mode` |
 | `OcrProvider`, `TextRegion`, `is_empty_region`, `read_text`, `read_text_with_provider` | `ocr.rs` |
 | `read_text_from_software_bitmap` (Windows only) | `ocr.rs` |
+| `HudTemplate`, `TemplateCounterConfig`, `extract_template_counter_from_region`, `extract_template_counter_from_frame` | `template_match.rs` — slotted normalized-correlation HUD counter extraction for hearts/hunger-style icon bars |
 
 ### 4.2 `ObservationAssembler::assemble` algorithm
 
@@ -264,6 +265,10 @@ The fixed JSON-RPC code `-32099` is the rmcp custom-error slot; the structured `
 ## 7. What is NOT covered
 
 - **CNN object detection.** `synapse-models` ships the `Detector` trait and ONNX session loader, but `M1State` does not invoke detectors in the current build; `entities: Vec<DetectedEntity>` is populated only by synthetic fixtures.
-- **HUD extraction.** `Profile.hud` carries `HudFieldSpec`s but the perception layer does not yet run HUD extractors against live frames — `hud: HudReadings` is empty unless populated synthetically.
+- **Live HUD extraction wiring.** `Profile.hud` carries `HudFieldSpec`s and
+  `synapse-perception` exposes a template-match extractor for cropped frame
+  regions, but `observe()` does not yet run profile HUD extractors against live
+  captured frames. `hud: HudReadings` is empty unless populated synthetically or
+  by a caller that invokes the extractor directly.
 - **Audio in `Observation`.** The `audio: AudioContext` field is populated only when an audio runtime is initialized and pushing into the observation source (current build leaves it default).
 - **Linux/macOS.** All UIA / WinEvent / WinRT OCR paths are `cfg(windows)`; non-Windows builds return `A11Y_NOT_AVAILABLE` / `OCR_BACKEND_UNAVAILABLE`.
