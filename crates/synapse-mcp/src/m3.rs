@@ -425,7 +425,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 32] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 33] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -444,6 +444,7 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 32] {
         profile_quality::profile_quality_refresh(),
         profile_registry::profile_registry_search(),
         profile_registry::profile_registry_inspect(),
+        profile_registry::profile_registry_report(),
         profile_registry::profile_registry_install(),
         profile_registry::profile_registry_disable(),
         profile_registry::profile_registry_export(),

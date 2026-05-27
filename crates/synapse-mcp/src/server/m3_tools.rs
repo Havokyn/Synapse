@@ -12,21 +12,22 @@ use super::{
     ProfileRegistryDisableParams, ProfileRegistryDisableResponse, ProfileRegistryExportParams,
     ProfileRegistryExportResponse, ProfileRegistryImportParams, ProfileRegistryImportResponse,
     ProfileRegistryInspectParams, ProfileRegistryInspectResponse, ProfileRegistryInstallParams,
-    ProfileRegistryInstallResponse, ProfileRegistryRollbackParams, ProfileRegistryRollbackResponse,
-    ProfileRegistrySearchParams, ProfileRegistrySearchResponse, ReflexCancelParams,
-    ReflexCancelResponse, ReflexHistoryParams, ReflexHistoryResponse, ReflexListParams,
-    ReflexListResponse, ReflexRegisterParams, ReflexRegisterResponse, ReplayRecordParams,
-    ReplayRecordResponse, StorageGcOnceParams, StorageGcOnceResponse, StorageInspectParams,
-    StorageInspectResponse, StoragePressureSampleParams, StoragePressureSampleResponse,
-    StoragePutProbeRowsParams, StoragePutProbeRowsResponse, SubscribeCancelParams,
-    SubscribeCancelResponse, SubscribeParams, SubscribeResponse, SynapseService,
-    accept_profile_authoring_candidate, apply_storage_pressure_sample, cancel_reflex,
-    cancel_subscription, disable_registry_profile, export_audit_bundle,
-    export_profile_authoring_candidate, export_registry, generate_profile_authoring_candidate,
-    history_reflexes, import_registry, inspect_profile_authoring_candidate, inspect_registry,
-    inspect_storage, install_registry_package, list_profile_authoring_candidates, list_profiles,
-    list_reflexes, put_probe_rows, query_audit_intelligence, record_replay,
-    refresh_profile_quality, register_reflex, reject_profile_authoring_candidate,
+    ProfileRegistryInstallResponse, ProfileRegistryReportParams, ProfileRegistryReportResponse,
+    ProfileRegistryRollbackParams, ProfileRegistryRollbackResponse, ProfileRegistrySearchParams,
+    ProfileRegistrySearchResponse, ReflexCancelParams, ReflexCancelResponse, ReflexHistoryParams,
+    ReflexHistoryResponse, ReflexListParams, ReflexListResponse, ReflexRegisterParams,
+    ReflexRegisterResponse, ReplayRecordParams, ReplayRecordResponse, StorageGcOnceParams,
+    StorageGcOnceResponse, StorageInspectParams, StorageInspectResponse,
+    StoragePressureSampleParams, StoragePressureSampleResponse, StoragePutProbeRowsParams,
+    StoragePutProbeRowsResponse, SubscribeCancelParams, SubscribeCancelResponse, SubscribeParams,
+    SubscribeResponse, SynapseService, accept_profile_authoring_candidate,
+    apply_storage_pressure_sample, cancel_reflex, cancel_subscription, disable_registry_profile,
+    export_audit_bundle, export_profile_authoring_candidate, export_registry,
+    generate_profile_authoring_candidate, history_reflexes, import_registry,
+    inspect_profile_authoring_candidate, inspect_registry, inspect_storage,
+    install_registry_package, list_profile_authoring_candidates, list_profiles, list_reflexes,
+    put_probe_rows, query_audit_intelligence, record_replay, refresh_profile_quality,
+    register_reflex, reject_profile_authoring_candidate, report_profile_registry,
     rollback_registry_profile, run_storage_gc_once, search_registry, set_audit_export_consent,
     subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio,
 };
@@ -387,6 +388,27 @@ impl SynapseService {
         )?;
         let reflex_runtime = self.reflex_runtime()?;
         inspect_registry(&reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Report local profile registry, quality, audit, and consent state")]
+    pub async fn profile_registry_report(
+        &self,
+        params: Parameters<ProfileRegistryReportParams>,
+    ) -> Result<Json<ProfileRegistryReportResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_registry_report",
+            profile_id = ?params.0.profile_id,
+            limit = params.0.limit,
+            max_audit_rows = params.0.max_audit_rows,
+            "tool.invocation kind=profile_registry_report"
+        );
+        self.require_m3_permissions(
+            "profile_registry_report",
+            &crate::m3::profile_registry::required_permissions_report(&params.0),
+        )?;
+        let reflex_runtime = self.reflex_runtime()?;
+        report_profile_registry(&reflex_runtime, &params.0).map(Json)
     }
 
     #[tool(description = "Install or update a local profile registry package manifest")]

@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m3_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 47,
+  "count": 48,
   "m3_defaults": [
     {
       "actual": [],
@@ -96,6 +96,16 @@ expression: snapshot
       "actual": "local_first",
       "path": "inputSchema.properties.trust_policy.default",
       "tool": "profile_registry_install"
+    },
+    {
+      "actual": 100,
+      "path": "inputSchema.properties.limit.default",
+      "tool": "profile_registry_report"
+    },
+    {
+      "actual": 100,
+      "path": "inputSchema.properties.max_audit_rows.default",
+      "tool": "profile_registry_report"
     },
     {
       "actual": "disabled",
@@ -329,6 +339,7 @@ expression: snapshot
     "profile_registry_import",
     "profile_registry_inspect",
     "profile_registry_install",
+    "profile_registry_report",
     "profile_registry_rollback",
     "profile_registry_search",
     "read_text",

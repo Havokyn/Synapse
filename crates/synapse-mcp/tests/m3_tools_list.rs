@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 47] = [
+const EXPECTED_TOOLS: [&str; 48] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -35,6 +35,7 @@ const EXPECTED_TOOLS: [&str; 47] = [
     "profile_registry_import",
     "profile_registry_inspect",
     "profile_registry_install",
+    "profile_registry_report",
     "profile_registry_rollback",
     "profile_registry_search",
     "read_text",
@@ -276,6 +277,20 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
         "profile_registry_install",
         "inputSchema.properties.trust_policy.default",
         &json!("local_first"),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "profile_registry_report",
+        "inputSchema.properties.limit.default",
+        &json!(100),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "profile_registry_report",
+        "inputSchema.properties.max_audit_rows.default",
+        &json!(100),
     )?;
     read_default(
         readbacks,

@@ -159,6 +159,11 @@ explainability/compatibility counters, not invented success samples.
 sensitive fields, and writes local bundle files (`manifest.json`, `rows.json`,
 `redaction_report.json`) under the caller-selected output directory.
 
+`profile_registry_report` is read-only. It scans `CF_PROFILES` registry and
+quality prefixes, `CF_KV` registry-head and consent prefixes, and recent
+`CF_ACTION_LOG` rows, then returns exact CF/key/path pointers so the operator
+can verify the report with separate SoT reads.
+
 `profile_registry_export bundle_kind="contribution"` writes a local JSON
 contribution bundle that combines registry rows, redacted action-audit evidence
 summaries, and profile quality summaries under deterministic hashes.

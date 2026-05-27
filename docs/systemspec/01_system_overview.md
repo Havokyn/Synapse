@@ -106,7 +106,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 50 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -161,7 +161,7 @@ All 50 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `act_run_shell` | Run an allowlisted local shell command | `server.rs::act_run_shell`, `m4.rs` |
 | `act_launch` | Launch an allowlisted local process and optionally wait for a window | `server.rs::act_launch`, `m4.rs` |
 
-### 4.5 M5 — profile registry/audit loop (17 tools)
+### 4.5 M5 — profile registry/audit loop (18 tools)
 
 | Tool | Description | Source |
 |---|---|---|
@@ -174,6 +174,7 @@ All 50 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `profile_quality_refresh` | Refresh a local profile-quality snapshot from real `CF_ACTION_LOG` rows and persist/read it in `CF_PROFILES` | `server.rs::profile_quality_refresh`, `m3/profile_quality.rs` |
 | `profile_registry_search` | Search local registry rows under `profile_registry/v1/` in `CF_PROFILES` | `server.rs::profile_registry_search`, `m3/profile_registry.rs` |
 | `profile_registry_inspect` | Inspect one registry row in `CF_PROFILES` or registry head row in `CF_KV` | `server.rs::profile_registry_inspect`, `m3/profile_registry.rs` |
+| `profile_registry_report` | Report installed registry packages, quarantine/rollback state, quality snapshots, consent/export status, recent audit evidence, and physical SoT pointers | `server.rs::profile_registry_report`, `m3/profile_registry.rs` |
 | `profile_registry_install` | Validate a local package manifest/profile TOML, enforce signed trust policy where required, quarantine failed trust packages, write registry rows, and return row keys/readbacks | `server.rs::profile_registry_install`, `m3/profile_registry.rs` |
 | `profile_registry_disable` | Mark an installed registry profile disabled or removed and read the stored row back | `server.rs::profile_registry_disable`, `m3/profile_registry.rs` |
 | `profile_registry_export` | Export local registry rows or offline contribution bundles with deterministic hashes | `server.rs::profile_registry_export`, `m3/profile_registry.rs` |

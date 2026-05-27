@@ -7,8 +7,9 @@
    `act_launch` per the M4 phase plan. M5 adds the local registry/audit scoring
    tool `profile_quality_refresh` plus the #458 local registry/intelligence
    tool set, #460 adds local audit-export consent/bundle tools, and #462 adds
-   six local profile-authoring candidate tools, bringing the live surface to
-   50. Any further agent-facing tools require an
+   six local profile-authoring candidate tools, and #468 adds the read-only
+   registry/audit inspector, bringing the live surface to
+   51. Any further agent-facing tools require an
    ADR-approved cap change. Overlapping tools merge. Profile and parameter
    knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -19,7 +20,7 @@
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 
 The first 30 tools below are the live M3 baseline. M4 adds rows 31-33, and M5
-adds rows 34-50 for local profile-registry/audit quality scoring, authoring
+adds rows 34-51 for local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
 consented redacted audit export bundles.
 Schemas use abbreviated JSON Schema syntax; canonical schema is exported by the
@@ -75,16 +76,17 @@ future `tools/list` snapshots in #447/#448.
 | 40 | `profile_quality_refresh` | write/read | refreshes local profile quality from action audit rows |
 | 41 | `profile_registry_search` | read | searches local registry rows in `CF_PROFILES` |
 | 42 | `profile_registry_inspect` | read | reads one registry row from `CF_PROFILES` or `CF_KV` |
-| 43 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
-| 44 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
-| 45 | `profile_registry_export` | read/write | writes local registry or contribution bundle JSON with deterministic hashes |
-| 46 | `profile_registry_import` | write/read | validates and imports registry/contribution bundles with duplicate/conflict handling |
-| 47 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
-| 48 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
-| 49 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
-| 50 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
+| 43 | `profile_registry_report` | read | reports registry, quality, audit, consent, quarantine, and SoT pointers |
+| 44 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
+| 45 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
+| 46 | `profile_registry_export` | read/write | writes local registry or contribution bundle JSON with deterministic hashes |
+| 47 | `profile_registry_import` | write/read | validates and imports registry/contribution bundles with duplicate/conflict handling |
+| 48 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
+| 49 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
+| 50 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
+| 51 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
 
-M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 50
+M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 51
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -1134,7 +1136,37 @@ keys read `CF_KV`; all other `profile_registry/v1/*` keys read `CF_PROFILES`.
 Returns `cf_name`, `row_key`, `found`, and when found the full decoded JSON row
 plus the same row summary used by search.
 
-### 3.28j `profile_registry_install`
+### 3.28j `profile_registry_report`
+
+Returns an operator-facing read-only report over the local
+profile-registry/audit moat. It reads registry rows, installed package state,
+curated starter targets, quarantine rows, rollback rows, quality snapshots,
+audit-export consent, recent action audit evidence, and direct physical SoT
+pointers for manual verification.
+
+```json
+{
+  "name": "profile_registry_report",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "profile_id": {"type": "string"},
+      "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+      "max_audit_rows": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+    }
+  }
+}
+```
+
+The response includes the RocksDB storage path, row counts, exact CF/key
+pointers, installed profile/package summaries, curated target rows,
+quarantined packages, rollback rows, quality scores including stale evidence
+counts, consent/export readiness, recent audit bucket counts, and an explicit
+control list for install/rollback/export/import/quality/consent/export-bundle.
+It performs no writes and never enables hidden sharing.
+
+### 3.28k `profile_registry_install`
 
 Validates a local profile package manifest, verifies signed package trust when
 policy requires it, parses the referenced profile TOML, checks
@@ -1174,7 +1206,7 @@ row summaries. Installable package manifests must be local-only
 (`local_only=true`, `remote_server_allowed=false`) and metadata text is rejected
 if it contains prompt/tool-injection markers.
 
-### 3.28k `profile_registry_disable`
+### 3.28l `profile_registry_disable`
 
 Marks an installed registry row disabled or removed in `CF_PROFILES` and reads
 the updated row back.
@@ -1197,7 +1229,7 @@ the updated row back.
 
 Returns previous/current state, the row key, and the decoded stored row.
 
-### 3.28l `profile_registry_export`
+### 3.28m `profile_registry_export`
 
 Exports local registry rows from `CF_PROFILES` and `CF_KV` into a JSON bundle on
 disk. With `bundle_kind = "contribution"`, the same tool also includes
@@ -1230,7 +1262,7 @@ the profile quality summary for a specific `profile_id`.
 Returns output path, bundle kind, bytes written, exported row count, component
 hashes, redacted evidence counts, and row summaries.
 
-### 3.28m `profile_registry_import`
+### 3.28n `profile_registry_import`
 
 Imports a local JSON registry bundle after validating schema version, supported
 CF names, `profile_registry/v1/` key namespace, object-valued rows, and any
@@ -1260,7 +1292,7 @@ this host.
 Returns bundle kind, read row count, per-CF write counts, duplicate count,
 optional contribution row key, deterministic bundle hash, and row summaries.
 
-### 3.28n `profile_registry_rollback`
+### 3.28o `profile_registry_rollback`
 
 Rewrites `profile_registry/v1/installed/<profile_id>` to a prior active package
 whose package row is `trusted` or `local_validated`, and writes a
@@ -1291,7 +1323,7 @@ package id/version plus readback of both the installed and rollback rows. The
 installed row readback must carry the rolled-back package's trust/signature
 metadata, not stale metadata from the package being replaced.
 
-### 3.28o `audit_intelligence_query`
+### 3.28p `audit_intelligence_query`
 
 Summarizes profile-linked outcomes across the audit SoTs now populated by
 profile activation, action, and reflex paths.
@@ -1316,7 +1348,7 @@ Reads newest rows from `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `profile_quality/v1/<profile_id>` when present, and returns bucket counts by
 status/tool/kind/error code plus learning candidates.
 
-### 3.28p `audit_export_consent_set`
+### 3.28q `audit_export_consent_set`
 
 Writes the local consent state required before any audit export bundle can be
 created. The physical SoT is `CF_KV` key
@@ -1345,7 +1377,7 @@ state, selected policy, allowed policies, `external_sharing_allowed=false`, and
 operator note. Unsupported policies fail closed with
 `AUDIT_EXPORT_REDACTION_REQUIRED`.
 
-### 3.28q `audit_export_bundle`
+### 3.28r `audit_export_bundle`
 
 Creates a local, redacted audit export bundle only after consent and redaction
 policy verification. The trigger reads `CF_KV` consent state and newest
@@ -1651,6 +1683,9 @@ profile-authoring and audit-export defaults below.
 | `profile_authoring_reject` | `reason` | omitted | M5 issue #462 |
 | `profile_authoring_export` | `candidate_id` | required; no default | M5 issue #462 |
 | `profile_authoring_export` | `output_path` | required; no default | M5 issue #462 |
+| `profile_registry_report` | `profile_id` | omitted | M5 issue #468 |
+| `profile_registry_report` | `limit` | `100` | M5 issue #468 |
+| `profile_registry_report` | `max_audit_rows` | `100` | M5 issue #468 |
 | `audit_export_consent_set` | `profile_id` | required; no default | M5 issue #460 |
 | `audit_export_consent_set` | `enabled` | required; no default | M5 issue #460 |
 | `audit_export_consent_set` | `redaction_policy` | `"strict"` | M5 issue #460 |

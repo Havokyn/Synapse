@@ -7,7 +7,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 50 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 51 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -533,7 +533,27 @@ profile/package ids, state, update time, value length, and bounded value prefix.
 where `row` includes the decoded JSON value when found.
 **Errors:** `TOOL_PARAMS_INVALID`, storage read/decode errors.
 
-## 23j. `profile_registry_install`
+## 23j. `profile_registry_report`
+
+**Description:** "Report local profile registry, quality, audit, and consent state"
+**Permissions:** `READ_PROFILE`, `READ_STORAGE`
+**Side effects:** none; reads `CF_PROFILES`, `CF_KV`, and `CF_ACTION_LOG`
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | — | — | Optional profile filter |
+| `limit` | `u32` | no | `100` | `1..=1000` | Maximum rows returned per report section |
+| `max_audit_rows` | `u32` | no | `100` | `1..=1000` | `CF_ACTION_LOG` tail rows scanned |
+
+**Returns:** `ProfileRegistryReportResponse` with storage path, per-CF row
+counts, physical SoT pointers, registry heads, installed profiles, package
+rows, curated starter targets, quarantine rows, rollback rows, profile quality
+snapshots including stale-evidence counts, audit-export consent/export
+readiness, recent audit bucket counts, and an explicit control list for
+install/update/rollback/import/export/quality/consent/export-bundle actions.
+**Errors:** `TOOL_PARAMS_INVALID`, storage read/decode errors.
+
+## 23k. `profile_registry_install`
 
 **Description:** "Install or update a local profile registry package manifest"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -566,7 +586,7 @@ fail closed with `PROFILE_TRUST_VERIFICATION_FAILED`; package/profile/installed
 rows are not activated, and the response error data carries the quarantine row
 key and readback.
 
-## 23k. `profile_registry_disable`
+## 23l. `profile_registry_disable`
 
 **Description:** "Disable or remove an installed local profile registry row"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -581,7 +601,7 @@ key and readback.
 **Returns:** `ProfileRegistryDisableResponse { profile_id, row_key,
 previous_state, state, wrote_row, row }`.
 
-## 23l. `profile_registry_export`
+## 23m. `profile_registry_export`
 
 **Description:** "Export local profile registry rows to a JSON bundle"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -608,7 +628,7 @@ quality_summary_sha256, rows }`.
 Contribution exports strip path-like registry metadata fields from the shared
 bundle rows before hashing and writing the JSON bundle.
 
-## 23m. `profile_registry_import`
+## 23n. `profile_registry_import`
 
 **Description:** "Import a local profile registry JSON bundle"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -633,7 +653,7 @@ success evidence exists on this host.
 non-registry key, invalid `CF_KV` namespace, non-object row values, hash
 mismatch, or same-key/different-value local conflicts.
 
-## 23n. `profile_registry_rollback`
+## 23o. `profile_registry_rollback`
 
 **Description:** "Rollback an installed profile registry row to a prior trusted package"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -662,7 +682,7 @@ trust/signature metadata, not stale metadata from the package being replaced.
 **Errors:** `TOOL_PARAMS_INVALID`, `PROFILE_ROLLBACK_UNAVAILABLE`,
 `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`.
 
-## 23o. `audit_intelligence_query`
+## 23p. `audit_intelligence_query`
 
 **Description:** "Summarize profile-linked audit outcomes for registry intelligence"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -680,7 +700,7 @@ error code across `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `CF_SESSIONS`; the quality snapshot is read from
 `CF_PROFILES/profile_quality/v1/<profile_id>` when present.
 
-## 23p. `audit_export_consent_set`
+## 23q. `audit_export_consent_set`
 
 **Description:** "Set local consent state for redacted audit export bundles"
 **Permissions:** `READ_STORAGE`, `WRITE_STORAGE`
@@ -700,7 +720,7 @@ enabled, redaction_policy, wrote_row, consent_row }`. The stored row includes
 **Errors:** `AUDIT_EXPORT_REDACTION_REQUIRED`, `STORAGE_READ_FAILED`,
 `STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
 
-## 23q. `audit_export_bundle`
+## 23r. `audit_export_bundle`
 
 **Description:** "Export a local redacted audit bundle after consent verification"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -859,7 +879,7 @@ For convenience the M3 tool-call gating is summarized here (live source: `crates
 | `profile_authoring_list`, `profile_authoring_inspect`, `profile_authoring_export` | `READ_STORAGE` |
 | `profile_authoring_reject` | `READ_STORAGE`, `WRITE_STORAGE` |
 | `profile_quality_refresh` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
-| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query`, `audit_export_bundle` | `READ_PROFILE`, `READ_STORAGE` |
+| `profile_registry_search`, `profile_registry_inspect`, `profile_registry_report`, `profile_registry_export`, `audit_intelligence_query`, `audit_export_bundle` | `READ_PROFILE`, `READ_STORAGE` |
 | `profile_registry_install`, `profile_registry_disable`, `profile_registry_import`, `profile_registry_rollback` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
 | `audit_export_consent_set` | `READ_STORAGE`, `WRITE_STORAGE` |
 | `storage_inspect` | `READ_STORAGE` |

@@ -40,6 +40,14 @@ registry-specific readback tools. The fixtures in
 `docs/computergames/fixtures/profile_registry_data_model/` are synthetic row
 SoTs for this docs/data-model baseline.
 
+`profile_registry_report` is the read-only operator inspector for this model.
+It does not create state; it reads `CF_PROFILES`, `CF_KV`, `CF_ACTION_LOG`, the
+storage path, `profile_quality/v1/<profile_id>` snapshots, and
+`audit_export/v1/consent/<profile_id>` rows into one report. Every row summary
+must keep the physical CF/key/path pointers visible so manual FSV can compare
+the report against separate `profile_registry_inspect`, `storage_inspect`, and
+bundle/file readbacks.
+
 ## 2. Column-family use
 
 | Column family | Registry role | Why |

@@ -40,6 +40,8 @@ const QUARANTINE_PREFIX: &str = "profile_registry/v1/quarantine/";
 const ROLLBACK_PREFIX: &str = "profile_registry/v1/rollback/";
 const CONTRIBUTION_PREFIX: &str = "profile_registry/v1/contribution/";
 const HEAD_PREFIX: &str = "profile_registry/v1/head/";
+const QUALITY_PREFIX: &str = "profile_quality/v1/";
+const AUDIT_EXPORT_CONSENT_PREFIX: &str = "audit_export/v1/consent/";
 const DEFAULT_SOURCE_ID: &str = "registry.local";
 const DEFAULT_INSTALL_TRUST_POLICY: &str = "local_first";
 const DEFAULT_BUNDLE_KIND: &str = "registry";
@@ -47,6 +49,8 @@ const REGISTRY_BUNDLE_KIND: &str = "registry";
 const CONTRIBUTION_BUNDLE_KIND: &str = "contribution";
 const DEFAULT_SEARCH_LIMIT: u32 = 100;
 const MAX_SEARCH_LIMIT: u32 = 1000;
+const DEFAULT_REPORT_AUDIT_ROWS: u32 = 100;
+const MAX_REPORT_AUDIT_ROWS: u32 = 1000;
 const DEFAULT_CONTRIBUTION_AUDIT_ROWS: u32 = 100;
 const MAX_CONTRIBUTION_AUDIT_ROWS: u32 = 1000;
 const MAX_CONTRIBUTION_IMPORT_ROWS: usize = 1000;
@@ -116,6 +120,19 @@ pub struct ProfileRegistryInspectParams {
     pub profile_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_profile_id: Option<ProfileId>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<ProfileId>,
+    #[serde(default = "default_search_limit")]
+    #[schemars(default = "default_search_limit", range(min = 1, max = 1000))]
+    pub limit: u32,
+    #[serde(default = "default_report_audit_rows")]
+    #[schemars(default = "default_report_audit_rows", range(min = 1, max = 1000))]
+    pub max_audit_rows: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -248,6 +265,192 @@ pub struct ProfileRegistryInspectResponse {
     pub row_key: String,
     pub found: bool,
     pub row: Option<ProfileRegistryStoredRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportResponse {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub storage_path: String,
+    pub profile_id: Option<ProfileId>,
+    pub limit: u32,
+    pub max_audit_rows: u32,
+    pub row_counts: BTreeMap<String, u64>,
+    pub source_of_truth: Vec<ProfileRegistryReportPointer>,
+    pub registry_rows_scanned: u64,
+    pub registry_heads: Vec<ProfileRegistryRowSummary>,
+    pub installed_profiles: Vec<ProfileRegistryReportInstalledProfile>,
+    pub packages: Vec<ProfileRegistryReportPackage>,
+    pub curated_targets: Vec<ProfileRegistryReportCuratedTarget>,
+    pub quarantined_packages: Vec<ProfileRegistryReportQuarantine>,
+    pub rollback_rows: Vec<ProfileRegistryReportRollback>,
+    pub quality_snapshots: Vec<ProfileRegistryReportQualitySnapshot>,
+    pub consent: Vec<ProfileRegistryReportConsent>,
+    pub recent_audit: ProfileRegistryReportAudit,
+    pub explicit_controls: Vec<ProfileRegistryReportControl>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportPointer {
+    pub surface: String,
+    pub cf_name: Option<String>,
+    pub key: Option<String>,
+    pub key_hex: Option<String>,
+    pub path: Option<String>,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportInstalledProfile {
+    pub row_key: String,
+    pub profile_id: ProfileId,
+    pub active_profile_version: Option<String>,
+    pub installed_package_id: Option<String>,
+    pub installed_package_version: Option<String>,
+    pub activation_state: Option<String>,
+    pub state: Option<String>,
+    pub trust_status: Option<String>,
+    pub signature_status: Option<String>,
+    pub signer_id: Option<String>,
+    pub trust_root_key: Option<String>,
+    pub installed_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportPackage {
+    pub row_key: String,
+    pub package_id: Option<String>,
+    pub package_version: Option<String>,
+    pub profile_id: Option<ProfileId>,
+    pub profile_version: Option<String>,
+    pub state: Option<String>,
+    pub trust_status: Option<String>,
+    pub signature_status: Option<String>,
+    pub moderation_status: Option<String>,
+    pub signer_id: Option<String>,
+    pub trust_root_key: Option<String>,
+    pub manifest_digest: Option<String>,
+    pub target_ids: Vec<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportCuratedTarget {
+    pub row_key: String,
+    pub seed_set_id: Option<String>,
+    pub target_id: Option<String>,
+    pub tier: Option<String>,
+    pub priority: Option<String>,
+    pub status: Option<String>,
+    pub backlog_issue: Option<String>,
+    pub profile_id: Option<ProfileId>,
+    pub package_id: Option<String>,
+    pub package_version: Option<String>,
+    pub profile_quality_key: Option<String>,
+    pub minimum_manual_fsv: Vec<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportQuarantine {
+    pub row_key: String,
+    pub package_id: Option<String>,
+    pub package_version: Option<String>,
+    pub profile_id: Option<ProfileId>,
+    pub profile_version: Option<String>,
+    pub quarantine_reason: Option<String>,
+    pub error_code: Option<String>,
+    pub signature_status: Option<String>,
+    pub signer_id: Option<String>,
+    pub state: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportRollback {
+    pub row_key: String,
+    pub profile_id: Option<ProfileId>,
+    pub from_package_id: Option<String>,
+    pub from_package_version: Option<String>,
+    pub to_package_id: Option<String>,
+    pub to_package_version: Option<String>,
+    pub reason: Option<String>,
+    pub trust_status: Option<String>,
+    pub signature_status: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportQualitySnapshot {
+    pub row_key: String,
+    pub key_hex: String,
+    pub profile_id: Option<ProfileId>,
+    pub generated_at_ns: Option<u64>,
+    pub evidence_hash: Option<String>,
+    pub score_0_100: Option<u64>,
+    pub sample_size: Option<u64>,
+    pub audit_rows_scanned: Option<u64>,
+    pub audit_rows_profile_relevant: Option<u64>,
+    pub audit_rows_stale: Option<u64>,
+    pub stale_after_ns: Option<u64>,
+    pub stale_evidence_present: bool,
+    pub quality_signal: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportConsent {
+    pub row_key: String,
+    pub key_hex: String,
+    pub profile_id: ProfileId,
+    pub enabled: bool,
+    pub state: Option<String>,
+    pub redaction_policy: Option<String>,
+    pub external_sharing_allowed: bool,
+    pub matching_audit_rows: u64,
+    pub audit_export_status: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportAudit {
+    pub cf_name: String,
+    pub rows_scanned: u64,
+    pub matching_rows: u64,
+    pub by_status: BTreeMap<String, u64>,
+    pub by_tool: BTreeMap<String, u64>,
+    pub by_error_code: BTreeMap<String, u64>,
+    pub latest_rows: Vec<ProfileRegistryReportAuditRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportAuditRow {
+    pub key_hex: String,
+    pub profile_id: Option<ProfileId>,
+    pub foreground_profile_id: Option<ProfileId>,
+    pub tool: Option<String>,
+    pub status: Option<String>,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryReportControl {
+    pub tool: String,
+    pub purpose: String,
+    pub writes: String,
+    pub requires_explicit_operator_trigger: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -540,6 +743,11 @@ pub const fn profile_registry_inspect() -> M3ToolStub {
 }
 
 #[must_use]
+pub const fn profile_registry_report() -> M3ToolStub {
+    M3ToolStub::new("profile_registry_report")
+}
+
+#[must_use]
 pub const fn profile_registry_install() -> M3ToolStub {
     M3ToolStub::new("profile_registry_install")
 }
@@ -576,6 +784,11 @@ pub fn required_permissions_search(_params: &ProfileRegistrySearchParams) -> Req
 
 #[must_use]
 pub fn required_permissions_inspect(_params: &ProfileRegistryInspectParams) -> RequiredPermissions {
+    required([Permission::ReadProfile, Permission::ReadStorage])
+}
+
+#[must_use]
+pub fn required_permissions_report(_params: &ProfileRegistryReportParams) -> RequiredPermissions {
     required([Permission::ReadProfile, Permission::ReadStorage])
 }
 
@@ -687,6 +900,222 @@ pub fn inspect_registry(
         row_key: key,
         found: row.is_some(),
         row,
+    })
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "operator report intentionally assembles all registry, audit, quality, and consent surfaces in one read-only MCP operation"
+)]
+pub fn report_profile_registry(
+    reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
+    params: &ProfileRegistryReportParams,
+) -> Result<ProfileRegistryReportResponse, ErrorData> {
+    validate_report_params(params)?;
+    let runtime = lock_runtime(reflex_runtime, "reporting profile registry state")?;
+    let storage_path = runtime.storage_path().display().to_string();
+    let row_counts = runtime.storage_cf_row_counts().map_err(storage_error)?;
+    let registry_rows = runtime
+        .storage_cf_prefix_rows(cf::CF_PROFILES, REGISTRY_PREFIX.as_bytes(), usize::MAX)
+        .map_err(storage_error)?;
+    let head_rows = runtime
+        .storage_cf_prefix_rows(cf::CF_KV, HEAD_PREFIX.as_bytes(), usize::MAX)
+        .map_err(storage_error)?;
+    let quality_rows = runtime
+        .storage_cf_prefix_rows(cf::CF_PROFILES, QUALITY_PREFIX.as_bytes(), usize::MAX)
+        .map_err(storage_error)?;
+    let consent_rows = runtime
+        .storage_cf_prefix_rows(
+            cf::CF_KV,
+            AUDIT_EXPORT_CONSENT_PREFIX.as_bytes(),
+            usize::MAX,
+        )
+        .map_err(storage_error)?;
+    let audit_rows = runtime
+        .storage_cf_tail_rows(cf::CF_ACTION_LOG, params.max_audit_rows as usize)
+        .map_err(storage_error)?;
+    drop(runtime);
+
+    let profile_filter = params.profile_id.as_deref();
+    let limit = params.limit as usize;
+    let mut source_of_truth = report_base_pointers(&storage_path);
+    let mut registry_heads = Vec::new();
+    for (key, value) in head_rows {
+        let row = stored_row(cf::CF_KV, &key, &value)?;
+        if registry_heads.len() < limit {
+            push_sot_row(
+                &mut source_of_truth,
+                "registry_head",
+                cf::CF_KV,
+                &key,
+                &storage_path,
+                "registry source head pointer",
+            );
+            registry_heads.push(row.summary);
+        }
+    }
+
+    let registry_rows_scanned = registry_rows.len() as u64;
+    let mut installed_profiles = Vec::new();
+    let mut packages = Vec::new();
+    let mut curated_targets = Vec::new();
+    let mut quarantined_packages = Vec::new();
+    let mut rollback_rows = Vec::new();
+    for (key, value) in registry_rows {
+        let row = stored_row(cf::CF_PROFILES, &key, &value)?;
+        if !report_row_matches_profile(&row, profile_filter) {
+            continue;
+        }
+        match row.value.get("row_kind").and_then(Value::as_str) {
+            Some("installed_profile") if installed_profiles.len() < limit => {
+                if let Some(item) = report_installed_profile(&row) {
+                    push_sot_row(
+                        &mut source_of_truth,
+                        "installed_profile",
+                        cf::CF_PROFILES,
+                        &key,
+                        &storage_path,
+                        "installed profile registry row",
+                    );
+                    installed_profiles.push(item);
+                }
+            }
+            Some("profile_package") if packages.len() < limit => {
+                push_sot_row(
+                    &mut source_of_truth,
+                    "profile_package",
+                    cf::CF_PROFILES,
+                    &key,
+                    &storage_path,
+                    "profile package registry row",
+                );
+                packages.push(report_package(&row));
+            }
+            Some("curated_profile_target") if curated_targets.len() < limit => {
+                push_sot_row(
+                    &mut source_of_truth,
+                    "curated_profile_target",
+                    cf::CF_PROFILES,
+                    &key,
+                    &storage_path,
+                    "curated starter target row",
+                );
+                curated_targets.push(report_curated_target(&row));
+            }
+            Some("profile_package_quarantine") if quarantined_packages.len() < limit => {
+                push_sot_row(
+                    &mut source_of_truth,
+                    "profile_package_quarantine",
+                    cf::CF_PROFILES,
+                    &key,
+                    &storage_path,
+                    "quarantined package row",
+                );
+                quarantined_packages.push(report_quarantine(&row));
+            }
+            Some("profile_registry_rollback") if rollback_rows.len() < limit => {
+                push_sot_row(
+                    &mut source_of_truth,
+                    "profile_registry_rollback",
+                    cf::CF_PROFILES,
+                    &key,
+                    &storage_path,
+                    "rollback audit row",
+                );
+                rollback_rows.push(report_rollback(&row));
+            }
+            _ => {}
+        }
+    }
+
+    let recent_audit = summarize_report_audit(&audit_rows, profile_filter, limit)?;
+    let mut quality_snapshots = Vec::new();
+    for (key, value) in quality_rows {
+        let quality_profile_id = quality_row_profile_id(&key, &value)?;
+        if profile_filter
+            .is_some_and(|profile_id| quality_profile_id.as_deref() != Some(profile_id))
+        {
+            continue;
+        }
+        if quality_snapshots.len() < limit {
+            push_sot_row(
+                &mut source_of_truth,
+                "profile_quality_snapshot",
+                cf::CF_PROFILES,
+                &key,
+                &storage_path,
+                "profile quality snapshot row",
+            );
+            quality_snapshots.push(report_quality_snapshot(&key, &value)?);
+        }
+    }
+
+    let mut consent = Vec::new();
+    let mut matched_consent = false;
+    for (key, value) in consent_rows {
+        let consent_profile_id = consent_row_profile_id(&key, &value)?;
+        if profile_filter.is_some_and(|profile_id| consent_profile_id != profile_id) {
+            continue;
+        }
+        matched_consent = true;
+        if consent.len() < limit {
+            let matching_audit_rows = count_matching_audit_rows(&audit_rows, &consent_profile_id)?;
+            push_sot_row(
+                &mut source_of_truth,
+                "audit_export_consent",
+                cf::CF_KV,
+                &key,
+                &storage_path,
+                "audit export consent row",
+            );
+            consent.push(report_consent_row(
+                &key,
+                &value,
+                consent_profile_id,
+                matching_audit_rows,
+            )?);
+        }
+    }
+    if let Some(profile_id) = &params.profile_id
+        && !matched_consent
+        && consent.len() < limit
+    {
+        let key = format!("{AUDIT_EXPORT_CONSENT_PREFIX}{profile_id}");
+        push_sot_row(
+            &mut source_of_truth,
+            "audit_export_consent_missing",
+            cf::CF_KV,
+            key.as_bytes(),
+            &storage_path,
+            "expected audit export consent row is absent",
+        );
+        consent.push(missing_consent_report(
+            profile_id,
+            &key,
+            count_matching_audit_rows(&audit_rows, profile_id)?,
+        ));
+    }
+
+    Ok(ProfileRegistryReportResponse {
+        schema_version: SCHEMA_VERSION,
+        generated_at: Utc::now().to_rfc3339(),
+        storage_path,
+        profile_id: params.profile_id.clone(),
+        limit: params.limit,
+        max_audit_rows: params.max_audit_rows,
+        row_counts,
+        source_of_truth,
+        registry_rows_scanned,
+        registry_heads,
+        installed_profiles,
+        packages,
+        curated_targets,
+        quarantined_packages,
+        rollback_rows,
+        quality_snapshots,
+        consent,
+        recent_audit,
+        explicit_controls: registry_report_controls(),
     })
 }
 
@@ -2474,6 +2903,431 @@ fn value_mentions_profile(value: &Value, profile_id: &str) -> bool {
             })
 }
 
+fn validate_report_params(params: &ProfileRegistryReportParams) -> Result<(), ErrorData> {
+    validate_limit(params.limit)?;
+    if params.max_audit_rows == 0 || params.max_audit_rows > MAX_REPORT_AUDIT_ROWS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "profile_registry_report max_audit_rows must be 1..={MAX_REPORT_AUDIT_ROWS}; got {}",
+                params.max_audit_rows
+            ),
+        ));
+    }
+    if let Some(profile_id) = &params.profile_id {
+        validate_non_empty("profile_id", profile_id)?;
+    }
+    Ok(())
+}
+
+fn report_base_pointers(storage_path: &str) -> Vec<ProfileRegistryReportPointer> {
+    [
+        (
+            "storage_path",
+            None,
+            None,
+            "RocksDB root path backing this report",
+        ),
+        (
+            "registry_rows_prefix",
+            Some(cf::CF_PROFILES),
+            Some(REGISTRY_PREFIX),
+            "registry package, installed, compatibility, quarantine, rollback, and curated rows",
+        ),
+        (
+            "registry_head_prefix",
+            Some(cf::CF_KV),
+            Some(HEAD_PREFIX),
+            "registry source head pointers",
+        ),
+        (
+            "quality_snapshot_prefix",
+            Some(cf::CF_PROFILES),
+            Some(QUALITY_PREFIX),
+            "profile quality snapshot rows",
+        ),
+        (
+            "audit_export_consent_prefix",
+            Some(cf::CF_KV),
+            Some(AUDIT_EXPORT_CONSENT_PREFIX),
+            "audit export consent rows",
+        ),
+        (
+            "recent_audit_tail",
+            Some(cf::CF_ACTION_LOG),
+            None,
+            "tail rows scanned for recent profile-linked audit evidence",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(surface, cf_name, key, description)| ProfileRegistryReportPointer {
+            surface: surface.to_owned(),
+            cf_name: cf_name.map(str::to_owned),
+            key: key.map(str::to_owned),
+            key_hex: key.map(|value| hex_encode(value.as_bytes())),
+            path: Some(storage_path.to_owned()),
+            description: description.to_owned(),
+        },
+    )
+    .collect()
+}
+
+fn push_sot_row(
+    pointers: &mut Vec<ProfileRegistryReportPointer>,
+    surface: &str,
+    cf_name: &str,
+    key: &[u8],
+    storage_path: &str,
+    description: &str,
+) {
+    pointers.push(ProfileRegistryReportPointer {
+        surface: surface.to_owned(),
+        cf_name: Some(cf_name.to_owned()),
+        key: Some(String::from_utf8_lossy(key).into_owned()),
+        key_hex: Some(hex_encode(key)),
+        path: Some(storage_path.to_owned()),
+        description: description.to_owned(),
+    });
+}
+
+fn report_row_matches_profile(
+    row: &ProfileRegistryStoredRow,
+    profile_filter: Option<&str>,
+) -> bool {
+    profile_filter.is_none_or(|profile_id| {
+        row.summary.profile_id.as_deref() == Some(profile_id)
+            || value_mentions_profile(&row.value, profile_id)
+    })
+}
+
+fn report_installed_profile(
+    row: &ProfileRegistryStoredRow,
+) -> Option<ProfileRegistryReportInstalledProfile> {
+    Some(ProfileRegistryReportInstalledProfile {
+        row_key: row.summary.key.clone(),
+        profile_id: string_field(&row.value, "profile_id")?,
+        active_profile_version: string_field(&row.value, "active_profile_version"),
+        installed_package_id: string_field(&row.value, "installed_package_id"),
+        installed_package_version: string_field(&row.value, "installed_package_version"),
+        activation_state: string_field(&row.value, "activation_state"),
+        state: string_field(&row.value, "state"),
+        trust_status: string_field(&row.value, "trust_status"),
+        signature_status: string_field(&row.value, "signature_status"),
+        signer_id: string_field(&row.value, "signer_id"),
+        trust_root_key: string_field(&row.value, "trust_root_key"),
+        installed_at: string_field(&row.value, "installed_at"),
+        updated_at: string_field(&row.value, "updated_at"),
+    })
+}
+
+fn report_package(row: &ProfileRegistryStoredRow) -> ProfileRegistryReportPackage {
+    ProfileRegistryReportPackage {
+        row_key: row.summary.key.clone(),
+        package_id: string_field(&row.value, "package_id"),
+        package_version: string_field(&row.value, "package_version"),
+        profile_id: string_field(&row.value, "profile_id"),
+        profile_version: string_field(&row.value, "profile_version"),
+        state: string_field(&row.value, "state"),
+        trust_status: string_field(&row.value, "trust_status"),
+        signature_status: string_field(&row.value, "signature_status"),
+        moderation_status: string_field(&row.value, "moderation_status"),
+        signer_id: string_field(&row.value, "signer_id"),
+        trust_root_key: string_field(&row.value, "trust_root_key"),
+        manifest_digest: string_field(&row.value, "manifest_digest"),
+        target_ids: string_array_field(&row.value, "target_ids"),
+        updated_at: string_field(&row.value, "updated_at"),
+    }
+}
+
+fn report_curated_target(row: &ProfileRegistryStoredRow) -> ProfileRegistryReportCuratedTarget {
+    ProfileRegistryReportCuratedTarget {
+        row_key: row.summary.key.clone(),
+        seed_set_id: string_field(&row.value, "seed_set_id"),
+        target_id: string_field(&row.value, "target_id"),
+        tier: string_field(&row.value, "tier"),
+        priority: string_field(&row.value, "priority"),
+        status: string_field(&row.value, "status"),
+        backlog_issue: string_field(&row.value, "backlog_issue"),
+        profile_id: string_field(&row.value, "profile_id"),
+        package_id: string_field(&row.value, "package_id"),
+        package_version: string_field(&row.value, "package_version"),
+        profile_quality_key: string_field(&row.value, "profile_quality_key"),
+        minimum_manual_fsv: string_array_field(&row.value, "minimum_manual_fsv"),
+        updated_at: string_field(&row.value, "updated_at"),
+    }
+}
+
+fn report_quarantine(row: &ProfileRegistryStoredRow) -> ProfileRegistryReportQuarantine {
+    ProfileRegistryReportQuarantine {
+        row_key: row.summary.key.clone(),
+        package_id: string_field(&row.value, "package_id"),
+        package_version: string_field(&row.value, "package_version"),
+        profile_id: string_field(&row.value, "profile_id"),
+        profile_version: string_field(&row.value, "profile_version"),
+        quarantine_reason: string_field(&row.value, "quarantine_reason"),
+        error_code: string_field(&row.value, "error_code"),
+        signature_status: string_field(&row.value, "signature_status"),
+        signer_id: string_field(&row.value, "signer_id"),
+        state: string_field(&row.value, "state"),
+        updated_at: string_field(&row.value, "updated_at"),
+    }
+}
+
+fn report_rollback(row: &ProfileRegistryStoredRow) -> ProfileRegistryReportRollback {
+    ProfileRegistryReportRollback {
+        row_key: row.summary.key.clone(),
+        profile_id: string_field(&row.value, "profile_id"),
+        from_package_id: string_field(&row.value, "from_package_id"),
+        from_package_version: string_field(&row.value, "from_package_version"),
+        to_package_id: string_field(&row.value, "to_package_id"),
+        to_package_version: string_field(&row.value, "to_package_version"),
+        reason: string_field(&row.value, "reason"),
+        trust_status: string_field(&row.value, "trust_status"),
+        signature_status: string_field(&row.value, "signature_status"),
+        updated_at: string_field(&row.value, "updated_at"),
+    }
+}
+
+fn summarize_report_audit(
+    rows: &[(Vec<u8>, Vec<u8>)],
+    profile_filter: Option<&str>,
+    limit: usize,
+) -> Result<ProfileRegistryReportAudit, ErrorData> {
+    let mut report = ProfileRegistryReportAudit {
+        cf_name: cf::CF_ACTION_LOG.to_owned(),
+        rows_scanned: rows.len() as u64,
+        matching_rows: 0,
+        by_status: BTreeMap::new(),
+        by_tool: BTreeMap::new(),
+        by_error_code: BTreeMap::new(),
+        latest_rows: Vec::new(),
+    };
+    for (key, value) in rows {
+        let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+        if profile_filter.is_some_and(|profile_id| !value_mentions_profile(&decoded, profile_id)) {
+            continue;
+        }
+        report.matching_rows += 1;
+        if let Some(status) = string_field(&decoded, "status") {
+            increment(&mut report.by_status, status);
+        }
+        if let Some(tool) = string_field(&decoded, "tool") {
+            increment(&mut report.by_tool, tool);
+        }
+        if let Some(error_code) = string_field(&decoded, "error_code") {
+            increment(&mut report.by_error_code, error_code);
+        }
+        if report.latest_rows.len() < limit {
+            report.latest_rows.push(ProfileRegistryReportAuditRow {
+                key_hex: hex_encode(key),
+                profile_id: string_field(&decoded, "profile_id")
+                    .or_else(|| string_field(&decoded, "active_profile_id")),
+                foreground_profile_id: decoded
+                    .pointer("/foreground/profile_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                tool: string_field(&decoded, "tool"),
+                status: string_field(&decoded, "status"),
+                error_code: string_field(&decoded, "error_code"),
+            });
+        }
+    }
+    Ok(report)
+}
+
+fn quality_row_profile_id(key: &[u8], value: &[u8]) -> Result<Option<ProfileId>, ErrorData> {
+    let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+    Ok(string_field(&decoded, "profile_id").or_else(|| {
+        String::from_utf8_lossy(key)
+            .strip_prefix(QUALITY_PREFIX)
+            .map(str::to_owned)
+    }))
+}
+
+fn report_quality_snapshot(
+    key: &[u8],
+    value: &[u8],
+) -> Result<ProfileRegistryReportQualitySnapshot, ErrorData> {
+    let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+    let audit_rows_stale = decoded
+        .pointer("/source/audit_rows_stale")
+        .and_then(Value::as_u64);
+    Ok(ProfileRegistryReportQualitySnapshot {
+        row_key: String::from_utf8_lossy(key).into_owned(),
+        key_hex: hex_encode(key),
+        profile_id: string_field(&decoded, "profile_id"),
+        generated_at_ns: decoded.get("generated_at_ns").and_then(Value::as_u64),
+        evidence_hash: string_field(&decoded, "evidence_hash"),
+        score_0_100: decoded
+            .pointer("/score/score_0_100")
+            .and_then(Value::as_u64),
+        sample_size: decoded
+            .pointer("/score/sample_size")
+            .and_then(Value::as_u64),
+        audit_rows_scanned: decoded
+            .pointer("/source/audit_rows_scanned")
+            .and_then(Value::as_u64),
+        audit_rows_profile_relevant: decoded
+            .pointer("/source/audit_rows_profile_relevant")
+            .and_then(Value::as_u64),
+        audit_rows_stale,
+        stale_after_ns: decoded
+            .pointer("/source/stale_after_ns")
+            .and_then(Value::as_u64),
+        stale_evidence_present: audit_rows_stale.unwrap_or_default() > 0,
+        quality_signal: string_field(&decoded, "quality_signal"),
+    })
+}
+
+fn consent_row_profile_id(key: &[u8], value: &[u8]) -> Result<ProfileId, ErrorData> {
+    let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+    string_field(&decoded, "profile_id")
+        .or_else(|| {
+            String::from_utf8_lossy(key)
+                .strip_prefix(AUDIT_EXPORT_CONSENT_PREFIX)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            registry_error(
+                "audit_export_consent_profile_missing",
+                "consent row missing profile_id",
+            )
+        })
+}
+
+fn report_consent_row(
+    key: &[u8],
+    value: &[u8],
+    profile_id: ProfileId,
+    matching_audit_rows: u64,
+) -> Result<ProfileRegistryReportConsent, ErrorData> {
+    let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+    let enabled = decoded
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let external_sharing_allowed = decoded
+        .get("external_sharing_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let redaction_policy = string_field(&decoded, "redaction_policy");
+    Ok(ProfileRegistryReportConsent {
+        row_key: String::from_utf8_lossy(key).into_owned(),
+        key_hex: hex_encode(key),
+        profile_id,
+        enabled,
+        state: string_field(&decoded, "state"),
+        redaction_policy: redaction_policy.clone(),
+        external_sharing_allowed,
+        matching_audit_rows,
+        audit_export_status: audit_export_status(
+            enabled,
+            redaction_policy.as_deref(),
+            matching_audit_rows,
+        ),
+        updated_at: string_field(&decoded, "updated_at"),
+    })
+}
+
+fn missing_consent_report(
+    profile_id: &str,
+    key: &str,
+    matching_audit_rows: u64,
+) -> ProfileRegistryReportConsent {
+    ProfileRegistryReportConsent {
+        row_key: key.to_owned(),
+        key_hex: hex_encode(key.as_bytes()),
+        profile_id: profile_id.to_owned(),
+        enabled: false,
+        state: Some("missing".to_owned()),
+        redaction_policy: None,
+        external_sharing_allowed: false,
+        matching_audit_rows,
+        audit_export_status: "consent_missing".to_owned(),
+        updated_at: None,
+    }
+}
+
+fn audit_export_status(
+    enabled: bool,
+    redaction_policy: Option<&str>,
+    matching_audit_rows: u64,
+) -> String {
+    if !enabled {
+        return "consent_disabled".to_owned();
+    }
+    if redaction_policy != Some("strict") {
+        return "redaction_policy_not_strict".to_owned();
+    }
+    if matching_audit_rows == 0 {
+        return "no_matching_audit_rows".to_owned();
+    }
+    "local_export_ready".to_owned()
+}
+
+fn count_matching_audit_rows(
+    rows: &[(Vec<u8>, Vec<u8>)],
+    profile_id: &str,
+) -> Result<u64, ErrorData> {
+    let mut count = 0_u64;
+    for (_key, value) in rows {
+        let decoded = decode_json::<Value>(value).map_err(decode_error)?;
+        if value_mentions_profile(&decoded, profile_id) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn registry_report_controls() -> Vec<ProfileRegistryReportControl> {
+    vec![
+        ProfileRegistryReportControl {
+            tool: "profile_registry_install".to_owned(),
+            purpose: "install or update a local registry package manifest".to_owned(),
+            writes: "CF_PROFILES profile_registry/v1/* and CF_KV profile_registry/v1/head/*"
+                .to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "profile_registry_rollback".to_owned(),
+            purpose: "move an installed profile back to a prior trusted package".to_owned(),
+            writes: "CF_PROFILES installed profile and profile_registry/v1/rollback/*".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "profile_registry_export".to_owned(),
+            purpose: "write an explicit local registry or contribution JSON bundle".to_owned(),
+            writes: "operator-selected local output file".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "profile_registry_import".to_owned(),
+            purpose: "stage or import an explicit local registry JSON bundle".to_owned(),
+            writes: "CF_PROFILES/CF_KV registry rows after local validation".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "profile_quality_refresh".to_owned(),
+            purpose: "refresh local quality scoring from stored action audit evidence".to_owned(),
+            writes: "CF_PROFILES profile_quality/v1/<profile_id>".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "audit_export_consent_set".to_owned(),
+            purpose: "enable or disable local audit export consent".to_owned(),
+            writes: "CF_KV audit_export/v1/consent/<profile_id>".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+        ProfileRegistryReportControl {
+            tool: "audit_export_bundle".to_owned(),
+            purpose: "write a local redacted audit bundle after consent verification".to_owned(),
+            writes: "operator-selected local output directory".to_owned(),
+            requires_explicit_operator_trigger: true,
+        },
+    ]
+}
+
 fn select_prior_package_key(
     runtime: &MutexGuard<'_, ReflexRuntime>,
     profile_id: &str,
@@ -3441,6 +4295,21 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn string_array_field(value: &Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn increment(counts: &mut BTreeMap<String, u64>, key: String) {
     *counts.entry(key).or_default() += 1;
 }
@@ -3544,6 +4413,10 @@ fn utf8_prefix(bytes: &[u8], max_chars: usize) -> String {
 
 const fn default_search_limit() -> u32 {
     DEFAULT_SEARCH_LIMIT
+}
+
+const fn default_report_audit_rows() -> u32 {
+    DEFAULT_REPORT_AUDIT_ROWS
 }
 
 fn default_bundle_kind() -> String {

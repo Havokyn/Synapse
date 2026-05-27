@@ -359,7 +359,7 @@ license SPDX expression, attribution, provenance, revocation state, redaction
 policy, and operator consent id.
 
 The M5 runtime registry surface now includes `profile_registry_search`,
-`profile_registry_inspect`, `profile_registry_install`,
+`profile_registry_inspect`, `profile_registry_report`, `profile_registry_install`,
 `profile_registry_disable`, `profile_registry_export`,
 `profile_registry_import`, `profile_registry_rollback`, and
 `audit_intelligence_query`. #460 adds `audit_export_consent_set` and

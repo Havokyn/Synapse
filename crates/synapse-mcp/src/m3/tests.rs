@@ -86,6 +86,7 @@ fn m3_tool_stub_names_are_stable() {
         "profile_quality_refresh",
         "profile_registry_search",
         "profile_registry_inspect",
+        "profile_registry_report",
         "profile_registry_install",
         "profile_registry_disable",
         "profile_registry_export",
