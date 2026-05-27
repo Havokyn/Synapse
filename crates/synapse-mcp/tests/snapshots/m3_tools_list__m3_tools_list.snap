@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m3_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 41,
+  "count": 47,
   "m3_defaults": [
     {
       "actual": [],
@@ -51,6 +51,21 @@ expression: snapshot
       "actual": true,
       "path": "inputSchema.properties.include_inactive.default",
       "tool": "profile_list"
+    },
+    {
+      "actual": 500,
+      "path": "inputSchema.properties.max_audit_rows.default",
+      "tool": "profile_authoring_generate"
+    },
+    {
+      "actual": 500,
+      "path": "inputSchema.properties.max_replay_rows.default",
+      "tool": "profile_authoring_generate"
+    },
+    {
+      "actual": 100,
+      "path": "inputSchema.properties.limit.default",
+      "tool": "profile_authoring_list"
     },
     {
       "actual": 5000,
@@ -156,6 +171,36 @@ expression: snapshot
       "actual_contains": "profile_id",
       "path": "inputSchema.required",
       "tool": "profile_activate"
+    },
+    {
+      "actual_contains": "profile_id",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_generate"
+    },
+    {
+      "actual_contains": "candidate_id",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_inspect"
+    },
+    {
+      "actual_contains": "candidate_id",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_accept"
+    },
+    {
+      "actual_contains": "candidate_id",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_reject"
+    },
+    {
+      "actual_contains": "candidate_id",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_export"
+    },
+    {
+      "actual_contains": "output_path",
+      "path": "inputSchema.required",
+      "tool": "profile_authoring_export"
     },
     {
       "actual_contains": "profile_id",
@@ -271,6 +316,12 @@ expression: snapshot
     "health",
     "observe",
     "profile_activate",
+    "profile_authoring_accept",
+    "profile_authoring_export",
+    "profile_authoring_generate",
+    "profile_authoring_inspect",
+    "profile_authoring_list",
+    "profile_authoring_reject",
     "profile_list",
     "profile_quality_refresh",
     "profile_registry_disable",

@@ -4,11 +4,11 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 
 ## Read order
 
-1. [01_system_overview.md](01_system_overview.md) — architecture map, tech stack, 44-tool inventory, error hierarchy
+1. [01_system_overview.md](01_system_overview.md) — architecture map, tech stack, 50-tool inventory, error hierarchy
 2. [02_source_code_map.md](02_source_code_map.md) — file tree with per-file descriptions, dep graph, entry-point traces
 3. [03_configuration.md](03_configuration.md) — CLI flags, env vars, validation, all numeric defaults
 4. [04_storage_layer.md](04_storage_layer.md) — RocksDB schema (11 CFs), schema sentinel, TTL filter, GC, disk pressure
-5. [05_core_types_and_errors.md](05_core_types_and_errors.md) — `synapse-core` wire types + 100 error codes
+5. [05_core_types_and_errors.md](05_core_types_and_errors.md) — `synapse-core` wire types + 105 error codes
 6. [06_mcp_service_and_transports.md](06_mcp_service_and_transports.md) — `SynapseService`, stdio + HTTP routers, Bearer/Origin/Session middleware, SSE bridge
 7. [07_reflex_runtime.md](07_reflex_runtime.md) — EventBus, scheduler, the 5 reflex kinds, audit persistence
 8. [08_action_subsystem.md](08_action_subsystem.md) — emitter actor, backends, rate limits, hotkey, curves/dynamics

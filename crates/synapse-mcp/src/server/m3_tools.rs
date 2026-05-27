@@ -2,7 +2,12 @@ use super::{
     AudioTailParams, AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse,
     AuditExportBundleParams, AuditExportBundleResponse, AuditExportConsentSetParams,
     AuditExportConsentSetResponse, AuditIntelligenceQueryParams, AuditIntelligenceQueryResponse,
-    ErrorData, Json, Parameters, ProfileActivateParams, ProfileActivateResponse, ProfileListParams,
+    ErrorData, Json, Parameters, ProfileActivateParams, ProfileActivateResponse,
+    ProfileAuthoringAcceptParams, ProfileAuthoringAcceptResponse, ProfileAuthoringExportParams,
+    ProfileAuthoringExportResponse, ProfileAuthoringGenerateParams,
+    ProfileAuthoringGenerateResponse, ProfileAuthoringInspectParams,
+    ProfileAuthoringInspectResponse, ProfileAuthoringListParams, ProfileAuthoringListResponse,
+    ProfileAuthoringRejectParams, ProfileAuthoringRejectResponse, ProfileListParams,
     ProfileListResponse, ProfileQualityRefreshParams, ProfileQualityRefreshResponse,
     ProfileRegistryDisableParams, ProfileRegistryDisableResponse, ProfileRegistryExportParams,
     ProfileRegistryExportResponse, ProfileRegistryImportParams, ProfileRegistryImportResponse,
@@ -15,10 +20,13 @@ use super::{
     StorageInspectResponse, StoragePressureSampleParams, StoragePressureSampleResponse,
     StoragePutProbeRowsParams, StoragePutProbeRowsResponse, SubscribeCancelParams,
     SubscribeCancelResponse, SubscribeParams, SubscribeResponse, SynapseService,
-    apply_storage_pressure_sample, cancel_reflex, cancel_subscription, disable_registry_profile,
-    export_audit_bundle, export_registry, history_reflexes, import_registry, inspect_registry,
-    inspect_storage, install_registry_package, list_profiles, list_reflexes, put_probe_rows,
-    query_audit_intelligence, record_replay, refresh_profile_quality, register_reflex,
+    accept_profile_authoring_candidate, apply_storage_pressure_sample, cancel_reflex,
+    cancel_subscription, disable_registry_profile, export_audit_bundle,
+    export_profile_authoring_candidate, export_registry, generate_profile_authoring_candidate,
+    history_reflexes, import_registry, inspect_profile_authoring_candidate, inspect_registry,
+    inspect_storage, install_registry_package, list_profile_authoring_candidates, list_profiles,
+    list_reflexes, put_probe_rows, query_audit_intelligence, record_replay,
+    refresh_profile_quality, register_reflex, reject_profile_authoring_candidate,
     rollback_registry_profile, run_storage_gc_once, search_registry, set_audit_export_consent,
     subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio,
 };
@@ -193,6 +201,128 @@ impl SynapseService {
         self.apply_backend_resolution_for_profile(&response.active_profile_id)?;
         self.persist_profile_activation_success(&response.active_profile_id, response.changed)?;
         Ok(Json(response))
+    }
+
+    #[tool(description = "Generate a local candidate profile patch from replay and audit evidence")]
+    pub async fn profile_authoring_generate(
+        &self,
+        params: Parameters<ProfileAuthoringGenerateParams>,
+    ) -> Result<Json<ProfileAuthoringGenerateResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_generate",
+            profile_id = %params.0.profile_id,
+            max_audit_rows = params.0.max_audit_rows,
+            max_replay_rows = params.0.max_replay_rows,
+            replay_path = ?params.0.replay_path,
+            "tool.invocation kind=profile_authoring_generate"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_generate",
+            &crate::m3::profile_authoring::required_permissions_generate(&params.0),
+        )?;
+        let profile_runtime = self.profile_runtime()?;
+        let reflex_runtime = self.reflex_runtime()?;
+        generate_profile_authoring_candidate(&profile_runtime, &reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "List local profile authoring candidates")]
+    pub async fn profile_authoring_list(
+        &self,
+        params: Parameters<ProfileAuthoringListParams>,
+    ) -> Result<Json<ProfileAuthoringListResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_list",
+            profile_id = ?params.0.profile_id,
+            state = ?params.0.state,
+            limit = params.0.limit,
+            "tool.invocation kind=profile_authoring_list"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_list",
+            &crate::m3::profile_authoring::required_permissions_list(&params.0),
+        )?;
+        let reflex_runtime = self.reflex_runtime()?;
+        list_profile_authoring_candidates(&reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Inspect one local profile authoring candidate")]
+    pub async fn profile_authoring_inspect(
+        &self,
+        params: Parameters<ProfileAuthoringInspectParams>,
+    ) -> Result<Json<ProfileAuthoringInspectResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_inspect",
+            candidate_id = %params.0.candidate_id,
+            "tool.invocation kind=profile_authoring_inspect"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_inspect",
+            &crate::m3::profile_authoring::required_permissions_inspect(&params.0),
+        )?;
+        let reflex_runtime = self.reflex_runtime()?;
+        inspect_profile_authoring_candidate(&reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Accept a local profile authoring candidate without activating it")]
+    pub async fn profile_authoring_accept(
+        &self,
+        params: Parameters<ProfileAuthoringAcceptParams>,
+    ) -> Result<Json<ProfileAuthoringAcceptResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_accept",
+            candidate_id = %params.0.candidate_id,
+            "tool.invocation kind=profile_authoring_accept"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_accept",
+            &crate::m3::profile_authoring::required_permissions_accept(&params.0),
+        )?;
+        let profile_runtime = self.profile_runtime()?;
+        let reflex_runtime = self.reflex_runtime()?;
+        accept_profile_authoring_candidate(&profile_runtime, &reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Reject a local profile authoring candidate")]
+    pub async fn profile_authoring_reject(
+        &self,
+        params: Parameters<ProfileAuthoringRejectParams>,
+    ) -> Result<Json<ProfileAuthoringRejectResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_reject",
+            candidate_id = %params.0.candidate_id,
+            "tool.invocation kind=profile_authoring_reject"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_reject",
+            &crate::m3::profile_authoring::required_permissions_reject(&params.0),
+        )?;
+        let reflex_runtime = self.reflex_runtime()?;
+        reject_profile_authoring_candidate(&reflex_runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Export a local profile authoring candidate bundle")]
+    pub async fn profile_authoring_export(
+        &self,
+        params: Parameters<ProfileAuthoringExportParams>,
+    ) -> Result<Json<ProfileAuthoringExportResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile_authoring_export",
+            candidate_id = %params.0.candidate_id,
+            output_path = %params.0.output_path,
+            "tool.invocation kind=profile_authoring_export"
+        );
+        self.require_m3_permissions(
+            "profile_authoring_export",
+            &crate::m3::profile_authoring::required_permissions_export(&params.0),
+        )?;
+        let reflex_runtime = self.reflex_runtime()?;
+        export_profile_authoring_candidate(&reflex_runtime, &params.0).map(Json)
     }
 
     #[tool(description = "Refresh local profile quality scoring from stored action audit rows")]

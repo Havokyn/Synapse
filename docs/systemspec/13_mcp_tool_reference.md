@@ -4,10 +4,10 @@ Source files covered:
 - `crates/synapse-mcp/src/server.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
-- `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
+- `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 44 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 50 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -358,7 +358,117 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 **Returns:** `ProfileActivateResponse { profile_id, active_profile_id, previous_active_profile_id, changed: bool }`. `changed=false` if `profile_id` was already active.
 **Errors:** `PROFILE_NOT_FOUND`, `SAFETY_PROFILE_ACTION_DENIED` (use_scope=Unknown without `--allow-unknown-profile`).
 
-## 23a. `profile_quality_refresh`
+## 23a. `profile_authoring_generate`
+
+**Description:** "Generate a local profile authoring candidate from replay/audit evidence"
+**Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
+**Side effects:** reads loaded profile state, optional replay JSONL, and
+`CF_ACTION_LOG`; writes and immediately reads back `CF_PROFILES` key
+`profile_authoring/v1/candidate/<candidate_id>`
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `String` | yes | — | loaded profile id | Profile the candidate patch targets |
+| `replay_path` | `Option<String>` | no | — | under replay root | Optional replay JSONL evidence path |
+| `max_audit_rows` | `u32` | no | `500` | `0..=10000` | Newest action audit rows scanned |
+| `max_replay_rows` | `u32` | no | `500` | `0..=10000` | Replay rows scanned |
+| `candidate_id` | `Option<String>` | no | derived | non-empty, path-safe | Optional deterministic candidate id |
+
+**Returns:** `ProfileAuthoringGenerateResponse { cf_name, row_key,
+wrote_row, active_profile_id, candidate, summary }`. The candidate row stores
+source audit/replay counts and row ids, an evidence hash, evidence summary,
+expected improvement strings, a declarative patch, and a safety review.
+Candidates are stored separately from active profiles.
+
+**Errors:** `PROFILE_NOT_FOUND`, `PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE`,
+`PROFILE_AUTHORING_CONFLICTING_EVIDENCE`,
+`PROFILE_AUTHORING_UNSAFE_ESCALATION`, `TOOL_PARAMS_INVALID`,
+`STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
+
+## 23b. `profile_authoring_list`
+
+**Description:** "List local profile authoring candidates"
+**Permissions:** `READ_STORAGE`
+**Side effects:** none; scans `CF_PROFILES` keys under
+`profile_authoring/v1/candidate/`
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | — | loaded or stored profile id | Optional profile filter |
+| `state` | `Option<String>` | no | — | non-empty | Optional state filter (`candidate`, `accepted`, `rejected`) |
+| `limit` | `u32` | no | `100` | `1..=1000` | Maximum returned summaries |
+
+**Returns:** `ProfileAuthoringListResponse { cf_name, prefix, profile_id,
+state, limit, total_matched, candidates }`.
+
+## 23c. `profile_authoring_inspect`
+
+**Description:** "Inspect a local profile authoring candidate"
+**Permissions:** `READ_STORAGE`
+**Side effects:** none; reads one `CF_PROFILES` candidate row
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `candidate_id` | `String` | yes | Candidate id under `profile_authoring/v1/candidate/` |
+
+**Returns:** `ProfileAuthoringInspectResponse { cf_name, row_key, found,
+candidate, summary }`. Missing candidates return `found=false`.
+
+## 23d. `profile_authoring_accept`
+
+**Description:** "Accept a local profile authoring candidate without activating it"
+**Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
+**Side effects:** rewrites one `CF_PROFILES` candidate row with
+`state="accepted"` and reads it back. It does not mutate bundled profile TOML or
+activate the profile.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `candidate_id` | `String` | yes | — | Candidate id to accept |
+| `operator_note` | `Option<String>` | no | — | Optional local note stored on the row |
+
+**Returns:** `ProfileAuthoringAcceptResponse { cf_name, row_key,
+candidate_id, profile_id, previous_state, state, wrote_row, activated,
+active_profile_id, candidate }` with `activated=false`.
+**Errors:** `PROFILE_AUTHORING_CANDIDATE_NOT_FOUND`,
+`PROFILE_AUTHORING_INVALID_STATE`, storage read/write errors.
+
+## 23e. `profile_authoring_reject`
+
+**Description:** "Reject a local profile authoring candidate"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`
+**Side effects:** rewrites one `CF_PROFILES` candidate row with
+`state="rejected"` and reads it back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `candidate_id` | `String` | yes | — | Candidate id to reject |
+| `reason` | `Option<String>` | no | — | Optional local rejection reason |
+
+**Returns:** `ProfileAuthoringRejectResponse { cf_name, row_key,
+candidate_id, profile_id, previous_state, state, wrote_row, candidate }`.
+**Errors:** `PROFILE_AUTHORING_CANDIDATE_NOT_FOUND`,
+`PROFILE_AUTHORING_INVALID_STATE`, storage read/write errors.
+
+## 23f. `profile_authoring_export`
+
+**Description:** "Export a local profile authoring candidate to JSON"
+**Permissions:** `READ_STORAGE`
+**Side effects:** reads one `CF_PROFILES` candidate row, writes a local JSON
+bundle file, then parses the written file before returning.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `candidate_id` | `String` | yes | Candidate id to export |
+| `output_path` | `String` | yes | Destination JSON file path |
+
+**Returns:** `ProfileAuthoringExportResponse { output_path, bytes_written,
+cf_name, row_key, candidate_id, profile_id, state }`. The exported JSON file
+contains the full candidate row plus schema/version/CF metadata.
+**Errors:** `PROFILE_AUTHORING_CANDIDATE_NOT_FOUND`, `TOOL_PARAMS_INVALID`,
+`STORAGE_READ_FAILED`, `TOOL_INTERNAL_ERROR`.
+
+## 23g. `profile_quality_refresh`
 
 **Description:** "Refresh local profile quality scoring from stored action audit rows"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -387,7 +497,7 @@ operator-approved path.
 **Errors:** `PROFILE_NOT_FOUND`, `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`,
 `STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
 
-## 23b. `profile_registry_search`
+## 23h. `profile_registry_search`
 
 **Description:** "Search local profile registry rows"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -405,7 +515,7 @@ row_kind, include_disabled, limit, total_matched, rows }`. Rows are
 `ProfileRegistryRowSummary` values with UTF-8 key, key hex, row kind/id,
 profile/package ids, state, update time, value length, and bounded value prefix.
 
-## 23c. `profile_registry_inspect`
+## 23i. `profile_registry_inspect`
 
 **Description:** "Inspect one local profile registry row by key or id"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -423,7 +533,7 @@ profile/package ids, state, update time, value length, and bounded value prefix.
 where `row` includes the decoded JSON value when found.
 **Errors:** `TOOL_PARAMS_INVALID`, storage read/decode errors.
 
-## 23d. `profile_registry_install`
+## 23j. `profile_registry_install`
 
 **Description:** "Install or update a local profile registry package manifest"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -452,7 +562,7 @@ fail closed with `PROFILE_TRUST_VERIFICATION_FAILED`; package/profile/installed
 rows are not activated, and the response error data carries the quarantine row
 key and readback.
 
-## 23e. `profile_registry_disable`
+## 23k. `profile_registry_disable`
 
 **Description:** "Disable or remove an installed local profile registry row"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -467,7 +577,7 @@ key and readback.
 **Returns:** `ProfileRegistryDisableResponse { profile_id, row_key,
 previous_state, state, wrote_row, row }`.
 
-## 23f. `profile_registry_export`
+## 23l. `profile_registry_export`
 
 **Description:** "Export local profile registry rows to a JSON bundle"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -484,7 +594,7 @@ previous_state, state, wrote_row, row }`.
 **Returns:** `ProfileRegistryExportResponse { output_path, bytes_written,
 rows_exported, rows }`.
 
-## 23g. `profile_registry_import`
+## 23m. `profile_registry_import`
 
 **Description:** "Import a local profile registry JSON bundle"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -499,7 +609,7 @@ cf_profile_rows_written, cf_kv_rows_written, rows }`.
 **Errors:** `TOOL_PARAMS_INVALID` for malformed bundle schema, unsupported CF,
 non-registry key, invalid `CF_KV` namespace, or non-object row values.
 
-## 23h. `profile_registry_rollback`
+## 23n. `profile_registry_rollback`
 
 **Description:** "Rollback an installed profile registry row to a prior trusted package"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE`
@@ -528,7 +638,7 @@ trust/signature metadata, not stale metadata from the package being replaced.
 **Errors:** `TOOL_PARAMS_INVALID`, `PROFILE_ROLLBACK_UNAVAILABLE`,
 `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`.
 
-## 23i. `audit_intelligence_query`
+## 23o. `audit_intelligence_query`
 
 **Description:** "Summarize profile-linked audit outcomes for registry intelligence"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -546,7 +656,7 @@ error code across `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `CF_SESSIONS`; the quality snapshot is read from
 `CF_PROFILES/profile_quality/v1/<profile_id>` when present.
 
-## 23j. `audit_export_consent_set`
+## 23p. `audit_export_consent_set`
 
 **Description:** "Set local consent state for redacted audit export bundles"
 **Permissions:** `READ_STORAGE`, `WRITE_STORAGE`
@@ -566,7 +676,7 @@ enabled, redaction_policy, wrote_row, consent_row }`. The stored row includes
 **Errors:** `AUDIT_EXPORT_REDACTION_REQUIRED`, `STORAGE_READ_FAILED`,
 `STORAGE_WRITE_FAILED`, `TOOL_INTERNAL_ERROR`.
 
-## 23k. `audit_export_bundle`
+## 23q. `audit_export_bundle`
 
 **Description:** "Export a local redacted audit bundle after consent verification"
 **Permissions:** `READ_PROFILE`, `READ_STORAGE`
@@ -711,6 +821,9 @@ For convenience the M3 tool-call gating is summarized here (live source: `crates
 | `profile_activate` | `WRITE_PROFILE_ACTIVE` |
 | `replay_record` | `WRITE_REPLAY` |
 | `audio_tail`, `audio_transcribe` | `READ_AUDIO` |
+| `profile_authoring_generate`, `profile_authoring_accept` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
+| `profile_authoring_list`, `profile_authoring_inspect`, `profile_authoring_export` | `READ_STORAGE` |
+| `profile_authoring_reject` | `READ_STORAGE`, `WRITE_STORAGE` |
 | `profile_quality_refresh` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |
 | `profile_registry_search`, `profile_registry_inspect`, `profile_registry_export`, `audit_intelligence_query`, `audit_export_bundle` | `READ_PROFILE`, `READ_STORAGE` |
 | `profile_registry_install`, `profile_registry_disable`, `profile_registry_import`, `profile_registry_rollback` | `READ_PROFILE`, `READ_STORAGE`, `WRITE_STORAGE` |

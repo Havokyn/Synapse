@@ -24,7 +24,7 @@ pub struct SynapseService {
 }
 ```
 
-Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 44 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
+Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 50 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
 
 ### 1.1 Constructors
 
@@ -47,7 +47,7 @@ Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]
   - `"... (recording enabled)"` if only recording on
   - else `"... with M2 action scaffold"`
 
-`m3_scaffold_ready` requires `M3State::scaffold_ready() && m3_tool_stubs().len() == 26` (the original 15 M3 tools plus the M5 profile-registry/audit tools that live in the M3 module because they use profile and storage state).
+`m3_scaffold_ready` requires `M3State::scaffold_ready() && m3_tool_stubs().len() == 32` (the original 15 M3 tools plus the M5 profile-registry/audit/profile-authoring tools that live in the M3 module because they use profile and storage state).
 
 ### 1.3 Health payload
 
@@ -287,4 +287,4 @@ The disabling step persists `StoredReflexAudit` rows with `error_code = REFLEX_D
 
 ## 8. Tool list snapshot
 
-The full list of 44 declared tools is in [13_mcp_tool_reference.md](13_mcp_tool_reference.md). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 26 in `instructions()`).
+The full list of 50 declared tools is in [13_mcp_tool_reference.md](13_mcp_tool_reference.md). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_authoring_generate`, `profile_authoring_list`, `profile_authoring_inspect`, `profile_authoring_accept`, `profile_authoring_reject`, `profile_authoring_export`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 32 in `instructions()`).

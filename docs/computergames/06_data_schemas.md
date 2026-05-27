@@ -1068,9 +1068,14 @@ PROFILE_ROLLBACK_UNAVAILABLE
 AUDIT_EXPORT_CONSENT_REQUIRED
 AUDIT_EXPORT_REDACTION_REQUIRED
 AUDIT_EXPORT_PAYLOAD_TOO_LARGE
+PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE
+PROFILE_AUTHORING_CONFLICTING_EVIDENCE
+PROFILE_AUTHORING_UNSAFE_ESCALATION
+PROFILE_AUTHORING_CANDIDATE_NOT_FOUND
+PROFILE_AUTHORING_INVALID_STATE
 ```
 
-M5 profile-registry trust/rollback codes:
+M5 profile-registry trust/rollback, audit-export, and profile-authoring codes:
 
 | Code | Trigger path |
 |---|---|
@@ -1079,6 +1084,11 @@ M5 profile-registry trust/rollback codes:
 | `AUDIT_EXPORT_CONSENT_REQUIRED` | `audit_export_bundle` cannot find an enabled local consent row in `CF_KV/audit_export/v1/consent/<profile_id>`, finds a disabled/invalid row, or detects a non-local sharing flag. |
 | `AUDIT_EXPORT_REDACTION_REQUIRED` | `audit_export_consent_set` or `audit_export_bundle` receives a missing, unsupported, or non-consented redaction policy. |
 | `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` | `audit_export_bundle` finds a matching `CF_ACTION_LOG` row larger than `max_row_bytes` and aborts before writing bundle files. |
+| `PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE` | `profile_authoring_generate` finds no relevant audit/replay evidence or the relevant evidence produces an empty patch; no candidate row is written. |
+| `PROFILE_AUTHORING_CONFLICTING_EVIDENCE` | `profile_authoring_generate` sees contradictory hints for the same keymap, backend, HUD field, metadata, or use-scope field; no candidate row is written. |
+| `PROFILE_AUTHORING_UNSAFE_ESCALATION` | `profile_authoring_generate` sees evidence that would escalate local policy, such as hardware/ViGEm defaults, sanctioned-research scope, remote-server enablement, shell enablement, or hardware-input metadata; no candidate row is written. |
+| `PROFILE_AUTHORING_CANDIDATE_NOT_FOUND` | `profile_authoring_accept`, `profile_authoring_reject`, or `profile_authoring_export` cannot read the requested `CF_PROFILES/profile_authoring/v1/candidate/<candidate_id>` row. |
+| `PROFILE_AUTHORING_INVALID_STATE` | `profile_authoring_accept` or `profile_authoring_reject` is requested from an incompatible candidate state. |
 
 ### 8.5 MCP & session
 

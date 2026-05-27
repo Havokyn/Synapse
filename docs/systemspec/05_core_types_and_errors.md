@@ -30,7 +30,7 @@ Source files covered:
 
 ## 3. Error code catalog
 
-All 100 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](01_system_overview.md) for the table).
+All 105 codes are `pub const &'static str` in `crates/synapse-core/src/error_codes.rs`. Mapped from each subsystem's `thiserror` enum's `.code()` method. Categories with line ranges (see [01_system_overview.md §8](01_system_overview.md) for the table).
 
 M3 added the following codes to the M2 baseline: `REFLEX_RECURSION_LIMIT`, `REFLEX_ACTION_PERMISSION_DENIED`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `SUBSCRIPTION_CAP_REACHED`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED`, `SAFETY_OPERATOR_HOTKEY_FIRED`.
 
@@ -44,6 +44,14 @@ disabled, invalid, or non-local consent rows; `AUDIT_EXPORT_REDACTION_REQUIRED`
 for missing, unsupported, or non-consented policies; and
 `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` for matching audit rows that exceed the
 selected row-size ceiling before files are written.
+
+M5 profile-authoring adds `PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE` for empty
+or irrelevant replay/audit evidence, `PROFILE_AUTHORING_CONFLICTING_EVIDENCE`
+for incompatible hints in the same candidate, `PROFILE_AUTHORING_UNSAFE_ESCALATION`
+for candidate patches that would escalate backend/use-scope/permission safety,
+`PROFILE_AUTHORING_CANDIDATE_NOT_FOUND` for unknown candidate ids, and
+`PROFILE_AUTHORING_INVALID_STATE` for accept/reject transitions from non-candidate
+states.
 
 ## 4. Retention defaults
 

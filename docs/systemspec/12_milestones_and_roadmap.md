@@ -98,14 +98,14 @@ Open M4 work (per `docs/impplan/05_m4_hardware_hid_first_game.md`):
 
 - `firmware/pico-hid/` — standalone RP2040 firmware project excluded from the root Cargo workspace; remaining firmware issues close only with real device evidence.
 - `synapse-hid-host` — serial driver with discovery, connect/IDENTIFY, CRC16 framing, pipeline/backpressure, and reconnect paths. `Backend::Hardware` uses `HardwareBackend` when `--hardware-hid <port|auto>` connects successfully, otherwise it fails closed through `HardwareUnavailableBackend`.
-- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; M5 profile-registry/audit work adds `profile_quality_refresh`, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the live surface to 44.
+- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the live surface to 50.
 - `minecraft.java` profile (the first game profile) — fifth bundled profile, validated against a single-player creative world per `15_roadmap_and_milestones.md` §6.
 - M3 hold-over items still open: per-subscriber `subscribe.buffer_size` (currently hard-pinned to 4096); persistent writers for `CF_EVENTS`/`CF_OBSERVATIONS`/`CF_SESSIONS`/`CF_TELEMETRY`/`CF_PROCESS_HISTORY`/`CF_KV` (`CF_REFLEX_AUDIT` and `CF_ACTION_LOG` have live writers); audio detector → SSE-bus sink integration; HUD extraction pipeline. VLM `describe` and Florence-2 remain M5.
 
 ## 3. Tools delivered vs planned
 
 PRD `docs/computergames/05_mcp_tool_surface.md` started from a 30-tool M3
-baseline and now records the approved 44-tool live surface after M4/M5
+baseline and now records the approved 50-tool live surface after M4/M5
 expansion. Current build:
 
 | # | Tool | Milestone | Status | Note |
@@ -144,25 +144,32 @@ expansion. Current build:
 | 31 | `act_combo` | M4 | live | one-shot timed action sequence |
 | 32 | `act_run_shell` | M4 (gated) | live | allowlisted local shell command |
 | 33 | `act_launch` | M4 (gated) | live | allowlisted local process launch |
-| 34 | `profile_quality_refresh` | M5 (registry/audit) | live | writes `CF_PROFILES` quality snapshot from `CF_ACTION_LOG` |
-| 35 | `profile_registry_search` | M5 (registry/audit) | live | searches `CF_PROFILES` registry rows |
-| 36 | `profile_registry_inspect` | M5 (registry/audit) | live | reads one `CF_PROFILES`/`CF_KV` registry row |
-| 37 | `profile_registry_install` | M5 (registry/audit) | live | validates package manifest/profile TOML and writes registry rows |
-| 38 | `profile_registry_disable` | M5 (registry/audit) | live | disables or removes an installed registry row |
-| 39 | `profile_registry_export` | M5 (registry/audit) | live | exports local registry bundle |
-| 40 | `profile_registry_import` | M5 (registry/audit) | live | imports validated local registry bundle |
-| 41 | `profile_registry_rollback` | M5 (registry/audit) | live | restores installed profile to a prior trusted package |
-| 42 | `audit_intelligence_query` | M5 (registry/audit) | live | summarizes profile-linked audit outcomes |
-| 43 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
-| 44 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
+| 34 | `profile_authoring_generate` | M5 (registry/audit) | live | writes a profile-authoring candidate row from replay/audit evidence |
+| 35 | `profile_authoring_list` | M5 (registry/audit) | live | lists local authoring candidate rows |
+| 36 | `profile_authoring_inspect` | M5 (registry/audit) | live | reads one candidate row |
+| 37 | `profile_authoring_accept` | M5 (registry/audit) | live | marks a candidate accepted without activation |
+| 38 | `profile_authoring_reject` | M5 (registry/audit) | live | marks a candidate rejected |
+| 39 | `profile_authoring_export` | M5 (registry/audit) | live | exports one candidate bundle |
+| 40 | `profile_quality_refresh` | M5 (registry/audit) | live | writes `CF_PROFILES` quality snapshot from `CF_ACTION_LOG` |
+| 41 | `profile_registry_search` | M5 (registry/audit) | live | searches `CF_PROFILES` registry rows |
+| 42 | `profile_registry_inspect` | M5 (registry/audit) | live | reads one `CF_PROFILES`/`CF_KV` registry row |
+| 43 | `profile_registry_install` | M5 (registry/audit) | live | validates package manifest/profile TOML and writes registry rows |
+| 44 | `profile_registry_disable` | M5 (registry/audit) | live | disables or removes an installed registry row |
+| 45 | `profile_registry_export` | M5 (registry/audit) | live | exports local registry bundle |
+| 46 | `profile_registry_import` | M5 (registry/audit) | live | imports validated local registry bundle |
+| 47 | `profile_registry_rollback` | M5 (registry/audit) | live | restores installed profile to a prior trusted package |
+| 48 | `audit_intelligence_query` | M5 (registry/audit) | live | summarizes profile-linked audit outcomes |
+| 49 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
+| 50 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
 | — | `describe` | M5 (VLM) | not live | Florence-2 |
 
-Live count in `crates/synapse-mcp/src/server.rs`: **44** (M1: 6, M2: 9,
-M3/M5 module stubs: 26 including `profile_quality_refresh`, seven
-`profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`,
-`audit_export_bundle`, and 4 operator storage
-diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`; the M3
-`m3_tool_stubs()` length-asserts to 26).
+Live count in `crates/synapse-mcp/src/server.rs`: **50** (M1: 6, M2: 9,
+M3/M5 module stubs: 32 including `profile_quality_refresh`, six
+`profile_authoring_*` tools, seven `profile_registry_*` tools,
+`audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`,
+and 4 operator storage diagnostics, plus M4
+`act_combo`/`act_run_shell`/`act_launch`; the M3 `m3_tool_stubs()`
+length-asserts to 32).
 
 ## 4. Architecture Decision Records (ADRs)
 

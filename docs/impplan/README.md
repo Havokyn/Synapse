@@ -67,9 +67,10 @@ Manual FSV for this track always names and reads the physical source of truth:
 profile TOML files, future registry index/package files, RocksDB
 `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, `CF_EVENTS`, `CF_OBSERVATIONS`,
 `CF_SESSIONS`, and `CF_PROFILES` rows, consent/export bundles, and MCP
-readbacks (`profile_list`, `profile_quality_refresh`, `storage_inspect`, and
-future registry/audit tools). GitHub Actions/CI, scripts, tests, and benchmarks
-are supporting evidence only.
+readbacks (`profile_list`, `profile_quality_refresh`, `profile_authoring_*`,
+`profile_registry_*`, `audit_intelligence_query`, `audit_export_*`, and
+`storage_inspect`). GitHub Actions/CI, scripts, tests, and benchmarks are
+supporting evidence only.
 
 The governance baseline for #470 is
 `docs/computergames/20_profile_registry_governance.md`. Profile packages and
@@ -147,7 +148,7 @@ A work-item is "done" iff:
 
 | Crate | Path | State | Next phase owner |
 |---|---|---|---|
-| `synapse-mcp` | `crates/synapse-mcp` | **44 MCP tools live** (M3 baseline plus M4 `act_combo`/`act_run_shell`/`act_launch` and M5 `profile_quality_refresh`, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, and #460 `audit_export_consent_set` / `audit_export_bundle`); streamable HTTP + SSE transport live on loopback with bearer auth + Origin/Host check + `Mcp-Session-Id` lifecycle; M3/M5 permission gating wired; profile, storage, reflex, registry, audit-intelligence, and audit-export surfaces live | Continue M5 registry/audit moat work |
+| `synapse-mcp` | `crates/synapse-mcp` | **50 MCP tools live** (M3 baseline plus M4 `act_combo`/`act_run_shell`/`act_launch` and M5 `profile_quality_refresh`, six `profile_authoring_*` tools, seven `profile_registry_*` tools including rollback, `audit_intelligence_query`, and #460 `audit_export_consent_set` / `audit_export_bundle`); streamable HTTP + SSE transport live on loopback with bearer auth + Origin/Host check + `Mcp-Session-Id` lifecycle; M3/M5 permission gating wired; profile, storage, reflex, authoring, registry, audit-intelligence, and audit-export surfaces live | Continue M5 registry/audit moat work |
 | `synapse-core` | `crates/synapse-core` | full M0-M3 type set + all M3 error codes (`pub const`) including `REFLEX_RECURSION_LIMIT`, `HTTP_*` (bind/token/origin/session), `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `REPLAY_*`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED`, `REFLEX_ACTION_PERMISSION_DENIED`; `Action` enum + `AimCurve`/`AimNaturalParams::FAST` + `KeystrokeDynamics`/`KeystrokeNaturalParams::FAST`; `Profile`/`ReflexRegistration`/`StoredEvent`/`StoredObservation`/`StoredReflexAudit`/`StoredSession`/`OcrResult`/`EventFilter` extensions; event-filter validator | M4 extends with `Profile.use_scope`, `ComboInput` plumbing through MCP layer |
 | `synapse-capture` | `crates/synapse-capture` | windows-capture 2.0 + DXGI fallback + DPI awareness + `screen_to_window`/`window_to_screen` + capture-target resolver | unchanged at M4 |
 | `synapse-a11y` | `crates/synapse-a11y` | UIA tree walker + cache batch + WinEvent on COM STA + chromiumoxide CDP attach + `re_resolve` + `expand_state_of` + `coalesce_events`/`debounce_value_changes` + packaged-Notepad RawView fix (#244 closed) | M3 wired `subscribe_win_events` into the reflex bus; M4 unchanged |

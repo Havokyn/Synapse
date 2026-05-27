@@ -106,7 +106,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 44 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 50 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -161,10 +161,16 @@ All 44 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `act_run_shell` | Run an allowlisted local shell command | `server.rs::act_run_shell`, `m4.rs` |
 | `act_launch` | Launch an allowlisted local process and optionally wait for a window | `server.rs::act_launch`, `m4.rs` |
 
-### 4.5 M5 — profile registry/audit loop (11 tools)
+### 4.5 M5 — profile registry/audit loop (17 tools)
 
 | Tool | Description | Source |
 |---|---|---|
+| `profile_authoring_generate` | Generate a local candidate profile patch from bounded replay/audit evidence and persist/read it in `CF_PROFILES` | `server.rs::profile_authoring_generate`, `m3/profile_authoring.rs` |
+| `profile_authoring_list` | List local profile-authoring candidate rows from `CF_PROFILES` | `server.rs::profile_authoring_list`, `m3/profile_authoring.rs` |
+| `profile_authoring_inspect` | Read one candidate row from `CF_PROFILES/profile_authoring/v1/candidate/<candidate_id>` | `server.rs::profile_authoring_inspect`, `m3/profile_authoring.rs` |
+| `profile_authoring_accept` | Mark a candidate accepted without activating or mutating the active profile | `server.rs::profile_authoring_accept`, `m3/profile_authoring.rs` |
+| `profile_authoring_reject` | Mark a candidate rejected with an optional local reason | `server.rs::profile_authoring_reject`, `m3/profile_authoring.rs` |
+| `profile_authoring_export` | Export one candidate row to a local JSON bundle file and read the written file back | `server.rs::profile_authoring_export`, `m3/profile_authoring.rs` |
 | `profile_quality_refresh` | Refresh a local profile-quality snapshot from real `CF_ACTION_LOG` rows and persist/read it in `CF_PROFILES` | `server.rs::profile_quality_refresh`, `m3/profile_quality.rs` |
 | `profile_registry_search` | Search local registry rows under `profile_registry/v1/` in `CF_PROFILES` | `server.rs::profile_registry_search`, `m3/profile_registry.rs` |
 | `profile_registry_inspect` | Inspect one registry row in `CF_PROFILES` or registry head row in `CF_KV` | `server.rs::profile_registry_inspect`, `m3/profile_registry.rs` |
@@ -188,8 +194,8 @@ Physical sources of truth for this loop are profile TOML files, future registry
 index/package files, RocksDB `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, `CF_EVENTS`,
 `CF_OBSERVATIONS`, `CF_SESSIONS`, and `CF_PROFILES` rows, consent/export
 bundles, and MCP readbacks such as `profile_list`, `profile_quality_refresh`,
-`profile_registry_*`, `audit_intelligence_query`, `audit_export_consent_set`,
-`audit_export_bundle`, and `storage_inspect`.
+`profile_authoring_*`, `profile_registry_*`, `audit_intelligence_query`,
+`audit_export_consent_set`, `audit_export_bundle`, and `storage_inspect`.
 Manual FSV must trigger the
 real runtime path and then read these physical stores directly; GitHub
 Actions/CI and automated checks never substitute for FSV.
@@ -270,12 +276,12 @@ All errors carry `SCREAMING_SNAKE_CASE` codes defined as `pub const &str` in `cr
 | Perception (PRD 8.1) | `OBSERVE_NO_PERCEPTION_AVAILABLE`, `OBSERVE_INTERNAL`, `CAPTURE_GRAPHICS_API_UNSUPPORTED`, `CAPTURE_TARGET_LOST`, `CAPTURE_NO_DIRTY_REGIONS`, `A11Y_NOT_AVAILABLE`, `A11Y_ELEMENT_STALE`, `A11Y_NO_FOREGROUND`, `A11Y_CDP_UNREACHABLE`, `DETECTION_MODEL_NOT_LOADED`, `DETECTION_MODEL_INFER_FAILED`, `DETECTION_NO_FRAME`, `OCR_NO_TEXT`, `OCR_BACKEND_UNAVAILABLE`, `HUD_NO_ACTIVE_PROFILE`, `HUD_FIELD_NOT_DEFINED`, `HUD_EXTRACTION_FAILED`, `AUDIO_DEVICE_LOST`, `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_STT_MODEL_NOT_LOADED` | `error_codes.rs` lines 2–21 |
 | Action (PRD 8.2) | `ACTION_QUEUE_FULL`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, `ACTION_TARGET_INVALID`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_HID_PORT_DISCONNECTED`, `ACTION_VIGEM_NOT_INSTALLED`, `ACTION_VIGEM_PLUGIN_FAILED`, `ACTION_ELEMENT_NOT_RESOLVED`, `ACTION_FOREGROUND_LOST`, `ACTION_UNSUPPORTED_KEY`, `ACTION_DRAG_DISTANCE_EXCEEDS_LIMIT`, `STUCK_KEY_AUTO_RELEASED`, `SAFETY_RELEASE_ALL_FIRED`, `SAFETY_OPERATOR_HOTKEY_FIRED` | lines 24–38 |
 | Reflex (PRD 8.3) | `REFLEX_CAP_REACHED`, `REFLEX_KIND_INVALID`, `REFLEX_PARAMS_INVALID`, `REFLEX_TARGET_INVALID`, `REFLEX_FILTER_INVALID`, `REFLEX_PRIORITY_INVALID`, `REFLEX_TICK_LATE`, `REFLEX_TRACK_LOST`, `REFLEX_STARVED`, `REFLEX_DISABLED_BY_OPERATOR`, `REFLEX_LIFETIME_EXPIRED`, `REFLEX_RECURSION_LIMIT`, `REFLEX_ACTION_PERMISSION_DENIED` | lines 41–53 |
-| Profile / config (PRD 8.4) | `PROFILE_NOT_FOUND`, `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE`, `PROFILE_KEYMAP_INVALID`, `PROFILE_HUD_REGION_INVALID`, `CAPTURE_TARGET_INVALID`, `PERCEPTION_MODE_INVALID`, `PROFILE_TRUST_VERIFICATION_FAILED`, `PROFILE_ROLLBACK_UNAVAILABLE`, `AUDIT_EXPORT_CONSENT_REQUIRED`, `AUDIT_EXPORT_REDACTION_REQUIRED`, `AUDIT_EXPORT_PAYLOAD_TOO_LARGE` | lines 56–65 |
-| MCP / session (PRD 8.5) | `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `SUBSCRIPTION_NOT_FOUND`, `SUBSCRIPTION_CAP_REACHED`, `TOOL_NOT_FOUND`, `TOOL_PARAMS_INVALID`, `TOOL_INTERNAL_ERROR`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID` | lines 65–77 |
-| Storage (PRD 8.6) | `STORAGE_OPEN_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `STORAGE_SCHEMA_MISMATCH`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | lines 80–89 |
-| Models (PRD 8.7) | `MODEL_DOWNLOAD_FAILED`, `MODEL_HASH_MISMATCH`, `MODEL_LOAD_FAILED`, `MODEL_BACKEND_UNAVAILABLE` | lines 92–95 |
-| Hardware HID (PRD 8.8) | `HID_PORT_NOT_FOUND`, `HID_PORT_OPEN_FAILED`, `HID_PROTOCOL_HANDSHAKE_FAILED`, `HID_FIRMWARE_VERSION_MISMATCH`, `HID_COMMAND_REJECTED`, `HID_LINK_TIMEOUT` | lines 98–103 |
-| Safety (PRD 8.9) | `SAFETY_KILLSWITCH_ACTIVE`, `SAFETY_PROCESS_DENYLISTED`, `SAFETY_SHELL_DENIED_BY_POLICY`, `SAFETY_LAUNCH_DENIED_BY_POLICY`, `SAFETY_SECRET_REDACTED`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED` | lines 106–112 |
+| Profile / config (PRD 8.4) | `PROFILE_NOT_FOUND`, `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE`, `PROFILE_KEYMAP_INVALID`, `PROFILE_HUD_REGION_INVALID`, `CAPTURE_TARGET_INVALID`, `PERCEPTION_MODE_INVALID`, `PROFILE_TRUST_VERIFICATION_FAILED`, `PROFILE_ROLLBACK_UNAVAILABLE`, `AUDIT_EXPORT_CONSENT_REQUIRED`, `AUDIT_EXPORT_REDACTION_REQUIRED`, `AUDIT_EXPORT_PAYLOAD_TOO_LARGE`, `PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE`, `PROFILE_AUTHORING_CONFLICTING_EVIDENCE`, `PROFILE_AUTHORING_UNSAFE_ESCALATION`, `PROFILE_AUTHORING_CANDIDATE_NOT_FOUND`, `PROFILE_AUTHORING_INVALID_STATE` | lines 56–72 |
+| MCP / session (PRD 8.5) | `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `SUBSCRIPTION_NOT_FOUND`, `SUBSCRIPTION_CAP_REACHED`, `TOOL_NOT_FOUND`, `TOOL_PARAMS_INVALID`, `TOOL_INTERNAL_ERROR`, `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID`, `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID` | lines 75–87 |
+| Storage (PRD 8.6) | `STORAGE_OPEN_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `STORAGE_SCHEMA_MISMATCH`, `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | lines 90–99 |
+| Models (PRD 8.7) | `MODEL_DOWNLOAD_FAILED`, `MODEL_HASH_MISMATCH`, `MODEL_LOAD_FAILED`, `MODEL_BACKEND_UNAVAILABLE` | lines 102–105 |
+| Hardware HID (PRD 8.8) | `HID_PORT_NOT_FOUND`, `HID_PORT_OPEN_FAILED`, `HID_PROTOCOL_HANDSHAKE_FAILED`, `HID_FIRMWARE_VERSION_MISMATCH`, `HID_COMMAND_REJECTED`, `HID_LINK_TIMEOUT` | lines 108–113 |
+| Safety (PRD 8.9) | `SAFETY_KILLSWITCH_ACTIVE`, `SAFETY_PROCESS_DENYLISTED`, `SAFETY_SHELL_DENIED_BY_POLICY`, `SAFETY_LAUNCH_DENIED_BY_POLICY`, `SAFETY_SECRET_REDACTED`, `SAFETY_PERMISSION_DENIED`, `SAFETY_PROFILE_ACTION_DENIED` | lines 116–122 |
 
 Cross-crate `thiserror` enums that surface these codes:
 

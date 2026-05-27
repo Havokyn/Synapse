@@ -51,7 +51,7 @@ override:   --db <path>     (CLI flag)
 |---|---|---|---|---|---|---|---|
 | `CF_EVENTS` | `[at_ns u64 BE][seq u32 BE]` | `StoredEvent` | json | 24h | 2 GB | 4 GB | Append-only ring; profile activation/denial and future replay events |
 | `CF_OBSERVATIONS` | `[seq u64 BE]` | `StoredObservation` | json | 6h | 500 MB | 1 GB | 1Hz sample + reason-triggered snapshots |
-| `CF_PROFILES` | `[profile_id utf8]` or `[profile_quality/v1/<profile_id>]` | cached TOML/profile-registry rows | raw bytes/json | none | 20 MB | 50 MB | Cached load plus local profile-quality snapshots; authored profile source remains on-disk TOML |
+| `CF_PROFILES` | `[profile_id utf8]`, `[profile_quality/v1/<profile_id>]`, or namespaced registry/authoring keys | cached TOML/profile-registry/profile-authoring rows | raw bytes/json | none | 20 MB | 50 MB | Cached load plus local profile-quality snapshots, registry rows, and authoring candidates; authored active profile source remains on-disk TOML |
 | `CF_MODEL_CACHE` | `[model_sha256 32 bytes]` | model bytes | raw bytes | LRU when full | 1 GB | 2 GB | Downloaded ONNX models, sha-verified |
 | `CF_SESSIONS` | `[session/v1/<session_id>]` | `StoredSession` | json | 30d | 50 MB | 100 MB | One row per MCP audit session, including active profile history |
 | `CF_REFLEX_AUDIT` | `[reflex_id][audit_id]` | `StoredReflexAudit` | json | 7d | 200 MB | 500 MB | Per-reflex audit with optional profile/session context |
@@ -359,10 +359,14 @@ The M5 runtime registry surface now includes `profile_registry_search`,
 `profile_registry_disable`, `profile_registry_export`,
 `profile_registry_import`, `profile_registry_rollback`, and
 `audit_intelligence_query`. #460 adds `audit_export_consent_set` and
-`audit_export_bundle`. These tools operate on the physical `CF_PROFILES` /
-`CF_KV` row namespaces below, `CF_ACTION_LOG`, and local bundle files; they
-return exact row keys or bundle paths so manual FSV can trigger the real MCP
-tool and then separately read the stored RocksDB rows or filesystem bundle.
+`audit_export_bundle`. #462 adds `profile_authoring_generate`,
+`profile_authoring_list`, `profile_authoring_inspect`,
+`profile_authoring_accept`, `profile_authoring_reject`, and
+`profile_authoring_export`. These tools operate on the physical
+`CF_PROFILES` / `CF_KV` row namespaces below, `CF_ACTION_LOG`, replay JSONL,
+and local bundle files; they return exact row keys or bundle paths so manual
+FSV can trigger the real MCP tool and then separately read the stored RocksDB
+rows or filesystem bundle.
 
 `profile_registry_install` enforces signed package trust when a package or
 operator call requires it. Successful signed installs write trust status and a
@@ -388,6 +392,7 @@ is needed. `CF_KV` is reserved only for tiny registry head/pointer rows.
 | Trust root | `CF_PROFILES` | `profile_registry/v1/trust_root/<signer_id>/<key_id_hex>` |
 | Quarantined package | `CF_PROFILES` | `profile_registry/v1/quarantine/<package_id>/<package_version>/<digest-prefix>` |
 | Rollback event | `CF_PROFILES` | `profile_registry/v1/rollback/<profile_id>/<timestamp>` |
+| Profile authoring candidate | `CF_PROFILES` | `profile_authoring/v1/candidate/<candidate_id>` |
 | Registry head pointer | `CF_KV` | `profile_registry/v1/head/<source_id>` |
 | Audit export consent | `CF_KV` | `audit_export/v1/consent/<profile_id>` |
 
@@ -398,7 +403,43 @@ Profile package manifest bytes and fail-closed parser validation are defined in
 runtime install tools must write the manifest path/digest into the package row
 and then read `CF_PROFILES` separately during manual FSV.
 
-### 7.2 Audit export consent and bundle SoTs
+### 7.2 Profile authoring candidate SoT
+
+Profile authoring is local-first and approval-gated. `profile_authoring_generate`
+reads real `CF_ACTION_LOG` rows and optional replay JSONL records, derives a
+candidate patch, and writes one JSON row at
+`profile_authoring/v1/candidate/<candidate_id>` in `CF_PROFILES`. The row kind
+is `profile_authoring_candidate`.
+
+Candidate rows are not active profiles and do not overwrite TOML profiles.
+They carry:
+
+| Field | Purpose |
+|---|---|
+| `state` | `candidate`, `accepted`, or `rejected` |
+| `source` | Source CF names, replay path, source audit row keys/ids, evidence hash, and scanned/relevant counts |
+| `evidence_summary` | Observed process names, HUD fields, detection classes, backends, tools, and hint counts |
+| `expected_improvement` | Human-readable changes expected from the patch |
+| `patch` | Proposed profile changes for matches, HUD fields, keymap, backend defaults, detection classes, reflex combos, and safety metadata |
+| `safety_review` | Local-only contribution posture and fail-closed safety flags |
+
+`profile_authoring_accept` only marks a candidate accepted and reads the
+candidate row back; it returns `activated=false` and does not call
+`profile_activate`. Export writes a separate local JSON file containing the
+candidate row, source CF/key, and export timestamp. Manual FSV must read the
+candidate prefix before generation, trigger the real MCP authoring tool with
+known synthetic replay/audit evidence, then read the exact candidate row,
+active profile state, and optional export file bytes.
+
+Unsafe evidence fails closed without a row when it requests hardware/ViGEm
+backend escalation, sanctioned-research scope, unsupported productivity scope
+escalation, remote-server enablement, shell enablement, or hardware-input
+metadata. Conflicting evidence fails closed when the same keymap/backend/HUD/
+metadata/use-scope field has two values. Insufficient evidence fails closed
+when no relevant replay/audit rows exist or relevant rows produce an empty
+patch.
+
+### 7.3 Audit export consent and bundle SoTs
 
 Audit export is local-first and consent-gated. `audit_export_consent_set`
 writes one `CF_KV` row at `audit_export/v1/consent/<profile_id>` with

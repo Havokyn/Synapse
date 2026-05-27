@@ -108,10 +108,11 @@ storage_put_probe_rows, subscribe, subscribe_cancel
 M4 adds three agent-facing MCP tools: `act_combo`, `act_run_shell`, and
 `act_launch`. The `hid identify` and `hid flash` surfaces are CLI subcommands,
 not additions to the agent-facing 33-tool count. M5 subsequently added
-`profile_quality_refresh`, seven `profile_registry_*` tools including
-`profile_registry_rollback`, `audit_intelligence_query`, and #460
-`audit_export_consent_set` / `audit_export_bundle`, bringing the current
-approved live surface to 44 agent-facing tools.
+`profile_quality_refresh`, six `profile_authoring_*` candidate tools, seven
+`profile_registry_*` tools including `profile_registry_rollback`,
+`audit_intelligence_query`, and #460 `audit_export_consent_set` /
+`audit_export_bundle`, bringing the current approved live surface to 50
+agent-facing tools.
 
 ### 1.3 Firmware state
 

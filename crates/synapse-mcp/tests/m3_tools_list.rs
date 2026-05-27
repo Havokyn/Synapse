@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 41] = [
+const EXPECTED_TOOLS: [&str; 47] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -22,6 +22,12 @@ const EXPECTED_TOOLS: [&str; 41] = [
     "health",
     "observe",
     "profile_activate",
+    "profile_authoring_accept",
+    "profile_authoring_export",
+    "profile_authoring_generate",
+    "profile_authoring_inspect",
+    "profile_authoring_list",
+    "profile_authoring_reject",
     "profile_list",
     "profile_quality_refresh",
     "profile_registry_disable",
@@ -211,6 +217,27 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_default(
         readbacks,
         tools,
+        "profile_authoring_generate",
+        "inputSchema.properties.max_audit_rows.default",
+        &json!(500),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "profile_authoring_generate",
+        "inputSchema.properties.max_replay_rows.default",
+        &json!(500),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "profile_authoring_list",
+        "inputSchema.properties.limit.default",
+        &json!(100),
+    )?;
+    read_default(
+        readbacks,
+        tools,
         "profile_quality_refresh",
         "inputSchema.properties.max_audit_rows.default",
         &json!(5000),
@@ -341,6 +368,17 @@ fn read_required_fields(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_required(readbacks, tools, "subscribe_cancel", "subscription_id")?;
     read_required(readbacks, tools, "reflex_cancel", "reflex_id")?;
     read_required(readbacks, tools, "profile_activate", "profile_id")?;
+    read_required(readbacks, tools, "profile_authoring_generate", "profile_id")?;
+    read_required(
+        readbacks,
+        tools,
+        "profile_authoring_inspect",
+        "candidate_id",
+    )?;
+    read_required(readbacks, tools, "profile_authoring_accept", "candidate_id")?;
+    read_required(readbacks, tools, "profile_authoring_reject", "candidate_id")?;
+    read_required(readbacks, tools, "profile_authoring_export", "candidate_id")?;
+    read_required(readbacks, tools, "profile_authoring_export", "output_path")?;
     read_required(readbacks, tools, "profile_quality_refresh", "profile_id")?;
     read_required(
         readbacks,

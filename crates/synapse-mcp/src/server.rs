@@ -51,6 +51,17 @@ use crate::{
             ProfileActivateParams, ProfileActivateResponse, ProfileListParams, ProfileListResponse,
             activate_profile, list_profiles,
         },
+        profile_authoring::{
+            ProfileAuthoringAcceptParams, ProfileAuthoringAcceptResponse,
+            ProfileAuthoringExportParams, ProfileAuthoringExportResponse,
+            ProfileAuthoringGenerateParams, ProfileAuthoringGenerateResponse,
+            ProfileAuthoringInspectParams, ProfileAuthoringInspectResponse,
+            ProfileAuthoringListParams, ProfileAuthoringListResponse, ProfileAuthoringRejectParams,
+            ProfileAuthoringRejectResponse, accept_profile_authoring_candidate,
+            export_profile_authoring_candidate, generate_profile_authoring_candidate,
+            inspect_profile_authoring_candidate, list_profile_authoring_candidates,
+            reject_profile_authoring_candidate,
+        },
         profile_quality::{
             ProfileQualityRefreshParams, ProfileQualityRefreshResponse, refresh_profile_quality,
         },

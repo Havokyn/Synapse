@@ -3,6 +3,7 @@ pub mod audio;
 pub mod audit_export;
 pub mod permissions;
 pub mod profile;
+pub mod profile_authoring;
 pub mod profile_quality;
 pub mod profile_registry;
 pub mod reflex;
@@ -423,7 +424,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 26] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 32] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -433,6 +434,12 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 26] {
         reflex::reflex_history(),
         profile::profile_list(),
         profile::profile_activate(),
+        profile_authoring::profile_authoring_generate(),
+        profile_authoring::profile_authoring_list(),
+        profile_authoring::profile_authoring_inspect(),
+        profile_authoring::profile_authoring_accept(),
+        profile_authoring::profile_authoring_reject(),
+        profile_authoring::profile_authoring_export(),
         profile_quality::profile_quality_refresh(),
         profile_registry::profile_registry_search(),
         profile_registry::profile_registry_inspect(),

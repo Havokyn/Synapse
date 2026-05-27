@@ -36,7 +36,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 44 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 50 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -88,6 +88,7 @@ crates/synapse-mcp/
         ├── audit_export.rs         # audit_export_consent_set + audit_export_bundle consent/redaction/export implementation
         ├── permissions.rs          # PermissionGrants, replay path normalization, profile use-scope gate
         ├── profile.rs              # profile_list + profile_activate tool implementations
+        ├── profile_authoring.rs    # profile_authoring_* candidate generation/list/inspect/accept/reject/export implementation
         ├── reflex.rs               # reflex_register/cancel/list/history tools + ScheduledReflex construction
         ├── replay.rs               # replay_record: observation + event JSONL writer
         ├── storage.rs              # storage_inspect/_put_probe_rows/_gc_once/_pressure_sample diagnostic tools
@@ -103,7 +104,7 @@ crates/synapse-core/
 └── src/
     ├── lib.rs                      # Re-exports public types + SCHEMA_VERSION
     ├── defaults.rs                 # SCHEMA_VERSION=1 + reference-host perf budgets
-    ├── error_codes.rs              # 100 SCREAMING_SNAKE_CASE error-code pub const strs
+    ├── error_codes.rs              # 105 SCREAMING_SNAKE_CASE error-code pub const strs
     ├── filter.rs                   # EventFilter and DataPredicate matchers
     ├── retention.rs                # Per-CF TTL + soft/hard cap MB defaults (11 CFs)
     └── types.rs                    # All wire-level types (1567 LoC): Action, Observation, Event, Profile, Reflex*, Stored*, Health, etc.

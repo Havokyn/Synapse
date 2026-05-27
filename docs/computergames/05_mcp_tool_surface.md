@@ -6,8 +6,9 @@
    surface to 33 live MCP tools by adding `act_combo`, `act_run_shell`, and
    `act_launch` per the M4 phase plan. M5 adds the local registry/audit scoring
    tool `profile_quality_refresh` plus the #458 local registry/intelligence
-   tool set, and #460 adds local audit-export consent/bundle tools, bringing
-   the live surface to 44. Any further agent-facing tools require an
+   tool set, #460 adds local audit-export consent/bundle tools, and #462 adds
+   six local profile-authoring candidate tools, bringing the live surface to
+   50. Any further agent-facing tools require an
    ADR-approved cap change. Overlapping tools merge. Profile and parameter
    knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -18,9 +19,9 @@
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 
 The first 30 tools below are the live M3 baseline. M4 adds rows 31-33, and M5
-adds rows 34-44 for local profile-registry/audit quality scoring, registry row
-operations, import/export, audit intelligence, and consented redacted audit
-export bundles.
+adds rows 34-50 for local profile-registry/audit quality scoring, authoring
+candidates, registry row operations, import/export, audit intelligence, and
+consented redacted audit export bundles.
 Schemas use abbreviated JSON Schema syntax; canonical schema is exported by the
 daemon through standard MCP `tools/list`. Until the M4 tools are implemented,
 their schemas in this doc are the target contract for #401/#403/#406 and the
@@ -65,19 +66,25 @@ future `tools/list` snapshots in #447/#448.
 | 31 | `act_combo` | write | schedules a one-shot timed action sequence |
 | 32 | `act_run_shell` | write | runs an allowlisted local shell command |
 | 33 | `act_launch` | write | launches an allowlisted local process |
-| 34 | `profile_quality_refresh` | write/read | refreshes local profile quality from action audit rows |
-| 35 | `profile_registry_search` | read | searches local registry rows in `CF_PROFILES` |
-| 36 | `profile_registry_inspect` | read | reads one registry row from `CF_PROFILES` or `CF_KV` |
-| 37 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
-| 38 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
-| 39 | `profile_registry_export` | read/write | writes a local JSON registry bundle file |
-| 40 | `profile_registry_import` | write/read | validates and imports a local JSON registry bundle |
-| 41 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
-| 42 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
-| 43 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
-| 44 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
+| 34 | `profile_authoring_generate` | write/read | proposes a local profile patch from replay/audit evidence |
+| 35 | `profile_authoring_list` | read | lists local authoring candidate rows in `CF_PROFILES` |
+| 36 | `profile_authoring_inspect` | read | reads one authoring candidate row |
+| 37 | `profile_authoring_accept` | write/read | marks a candidate accepted without activating it |
+| 38 | `profile_authoring_reject` | write/read | marks a candidate rejected |
+| 39 | `profile_authoring_export` | read/write | writes a local candidate export bundle file |
+| 40 | `profile_quality_refresh` | write/read | refreshes local profile quality from action audit rows |
+| 41 | `profile_registry_search` | read | searches local registry rows in `CF_PROFILES` |
+| 42 | `profile_registry_inspect` | read | reads one registry row from `CF_PROFILES` or `CF_KV` |
+| 43 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
+| 44 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
+| 45 | `profile_registry_export` | read/write | writes a local JSON registry bundle file |
+| 46 | `profile_registry_import` | write/read | validates and imports a local JSON registry bundle |
+| 47 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
+| 48 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
+| 49 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
+| 50 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
 
-M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 44
+M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 50
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -894,7 +901,156 @@ Returns:
 }
 ```
 
-### 3.28a `profile_quality_refresh`
+### 3.28a `profile_authoring_generate`
+
+Generates a local candidate profile patch from real replay/audit evidence and
+writes it as a separate candidate row. The physical SoT is `CF_PROFILES` key
+`profile_authoring/v1/candidate/<candidate_id>`. The candidate is never an
+active profile; approval only changes candidate state.
+
+```json
+{
+  "name": "profile_authoring_generate",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["profile_id"],
+    "properties": {
+      "profile_id": {"type": "string"},
+      "replay_path": {"type": "string"},
+      "max_audit_rows": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 500},
+      "max_replay_rows": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 500},
+      "candidate_id": {"type": "string"}
+    }
+  }
+}
+```
+
+Evidence can add matches, HUD fields, keymaps, backend defaults, detection
+classes, reflex combo proposals, use-scope hints, and safety metadata. The
+stored row contains source CF names, replay path, source audit keys/ids,
+evidence hash, evidence summary, expected improvement, generated timestamp,
+candidate state, patch, and a safety review. It fails closed with
+`PROFILE_AUTHORING_INSUFFICIENT_EVIDENCE`,
+`PROFILE_AUTHORING_CONFLICTING_EVIDENCE`, or
+`PROFILE_AUTHORING_UNSAFE_ESCALATION` before writing a candidate row.
+
+### 3.28b `profile_authoring_list`
+
+Lists local profile-authoring candidates from `CF_PROFILES` without activating
+or mutating them.
+
+```json
+{
+  "name": "profile_authoring_list",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "profile_id": {"type": "string"},
+      "state": {"enum": ["candidate", "accepted", "rejected"]},
+      "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+    }
+  }
+}
+```
+
+Returns the `CF_PROFILES` prefix, filters, total matched count, and bounded
+candidate summaries with row keys, state, evidence hash, expected improvement,
+and stored value size.
+
+### 3.28c `profile_authoring_inspect`
+
+Reads one local candidate row by candidate id.
+
+```json
+{
+  "name": "profile_authoring_inspect",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["candidate_id"],
+    "properties": {"candidate_id": {"type": "string"}}
+  }
+}
+```
+
+Returns `found=false` for a missing row. Found rows return the full stored
+candidate plus the summary used by `profile_authoring_list`.
+
+### 3.28d `profile_authoring_accept`
+
+Marks a candidate row accepted and reads it back. It does not activate,
+install, or overwrite any active/bundled profile.
+
+```json
+{
+  "name": "profile_authoring_accept",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["candidate_id"],
+    "properties": {
+      "candidate_id": {"type": "string"},
+      "operator_note": {"type": "string"}
+    }
+  }
+}
+```
+
+Accepting from `candidate` writes `state="accepted"`, `accepted_at_ns`, and the
+optional note. Re-accepting an already accepted row is idempotent. Any other
+state fails closed with `PROFILE_AUTHORING_INVALID_STATE`.
+
+### 3.28e `profile_authoring_reject`
+
+Marks a candidate row rejected and reads it back.
+
+```json
+{
+  "name": "profile_authoring_reject",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["candidate_id"],
+    "properties": {
+      "candidate_id": {"type": "string"},
+      "reason": {"type": "string"}
+    }
+  }
+}
+```
+
+Rejecting from `candidate` writes `state="rejected"`, `rejected_at_ns`, and the
+optional reason. Re-rejecting an already rejected row is idempotent. Any other
+state fails closed with `PROFILE_AUTHORING_INVALID_STATE`.
+
+### 3.28f `profile_authoring_export`
+
+Writes one candidate as a local JSON export file after reading the candidate
+from `CF_PROFILES`.
+
+```json
+{
+  "name": "profile_authoring_export",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["candidate_id", "output_path"],
+    "properties": {
+      "candidate_id": {"type": "string"},
+      "output_path": {"type": "string"}
+    }
+  }
+}
+```
+
+The bundle contains the schema version, export timestamp, source CF/key, and
+the full candidate row. The tool parses the written file before returning so a
+manual FSV run can separately inspect both the candidate row and the export
+file bytes.
+
+### 3.28g `profile_quality_refresh`
 
 Refreshes the local profile-registry quality snapshot for one profile from real
 stored action audit rows. This is a local-only read/aggregate/write/readback
@@ -925,7 +1081,7 @@ compatibility counters, profile-schema-version recency/mixed-version counters,
 redaction policy, and contribution policy. Export is always `false`; sharing
 requires a future explicit operator-approved path.
 
-### 3.28b `profile_registry_search`
+### 3.28h `profile_registry_search`
 
 Searches local registry rows under `profile_registry/v1/` in `CF_PROFILES`.
 This is the operator-facing list/search readback for source/package/profile/
@@ -951,7 +1107,7 @@ Returns `cf_name`, `prefix`, filters, `total_matched`, and row summaries with
 UTF-8 keys, hex keys, row kind/id, state, profile/package ids, update time, and
 bounded value prefix.
 
-### 3.28c `profile_registry_inspect`
+### 3.28i `profile_registry_inspect`
 
 Reads one registry row by exact key or derived id. `profile_registry/v1/head/*`
 keys read `CF_KV`; all other `profile_registry/v1/*` keys read `CF_PROFILES`.
@@ -978,7 +1134,7 @@ keys read `CF_KV`; all other `profile_registry/v1/*` keys read `CF_PROFILES`.
 Returns `cf_name`, `row_key`, `found`, and when found the full decoded JSON row
 plus the same row summary used by search.
 
-### 3.28d `profile_registry_install`
+### 3.28j `profile_registry_install`
 
 Validates a local profile package manifest, verifies signed package trust when
 policy requires it, parses the referenced profile TOML, checks
@@ -1011,7 +1167,7 @@ rewrite. The response returns `manifest_digest`, profile TOML path, `wrote_rows`
 `idempotent`, trust/signature status, signer/trust-root readback, row keys, and
 row summaries.
 
-### 3.28e `profile_registry_disable`
+### 3.28k `profile_registry_disable`
 
 Marks an installed registry row disabled or removed in `CF_PROFILES` and reads
 the updated row back.
@@ -1034,7 +1190,7 @@ the updated row back.
 
 Returns previous/current state, the row key, and the decoded stored row.
 
-### 3.28f `profile_registry_export`
+### 3.28l `profile_registry_export`
 
 Exports local registry rows from `CF_PROFILES` and `CF_KV` into a JSON bundle on
 disk. The bundle is a local file artifact and is not a consent/share path.
@@ -1059,7 +1215,7 @@ disk. The bundle is a local file artifact and is not a consent/share path.
 
 Returns output path, bytes written, exported row count, and row summaries.
 
-### 3.28g `profile_registry_import`
+### 3.28m `profile_registry_import`
 
 Imports a local JSON registry bundle after validating schema version, supported
 CF names, `profile_registry/v1/` key namespace, and object-valued rows.
@@ -1079,7 +1235,7 @@ CF names, `profile_registry/v1/` key namespace, and object-valued rows.
 Returns read row count, per-CF write counts, and summaries for the imported
 rows.
 
-### 3.28h `profile_registry_rollback`
+### 3.28n `profile_registry_rollback`
 
 Rewrites `profile_registry/v1/installed/<profile_id>` to a prior active package
 whose package row is `trusted` or `local_validated`, and writes a
@@ -1110,7 +1266,7 @@ package id/version plus readback of both the installed and rollback rows. The
 installed row readback must carry the rolled-back package's trust/signature
 metadata, not stale metadata from the package being replaced.
 
-### 3.28i `audit_intelligence_query`
+### 3.28o `audit_intelligence_query`
 
 Summarizes profile-linked outcomes across the audit SoTs now populated by
 profile activation, action, and reflex paths.
@@ -1135,7 +1291,7 @@ Reads newest rows from `CF_ACTION_LOG`, `CF_EVENTS`, `CF_REFLEX_AUDIT`, and
 `profile_quality/v1/<profile_id>` when present, and returns bucket counts by
 status/tool/kind/error code plus learning candidates.
 
-### 3.28j `audit_export_consent_set`
+### 3.28p `audit_export_consent_set`
 
 Writes the local consent state required before any audit export bundle can be
 created. The physical SoT is `CF_KV` key
@@ -1164,7 +1320,7 @@ state, selected policy, allowed policies, `external_sharing_allowed=false`, and
 operator note. Unsupported policies fail closed with
 `AUDIT_EXPORT_REDACTION_REQUIRED`.
 
-### 3.28k `audit_export_bundle`
+### 3.28q `audit_export_bundle`
 
 Creates a local, redacted audit export bundle only after consent and redaction
 policy verification. The trigger reads `CF_KV` consent state and newest
@@ -1392,7 +1548,7 @@ land and for M5 tools whose safety behavior depends on caller-visible defaults.
 Rows that say "required", "omitted", or "inherits" define runtime resolution
 behavior rather than a JSON-Schema `default` value. Issue #448 owns the M4
 default-resolution readback; current `tools/list` snapshots also pin the M5
-audit-export defaults below.
+profile-authoring and audit-export defaults below.
 
 | Tool | Field | Default | Source |
 |---|---|---|---|
@@ -1413,6 +1569,21 @@ audit-export defaults below.
 | `act_launch` | `wait_for_window_title_regex` | omitted | M4 plan #444 |
 | `act_launch` | `timeout_ms` | `10000` | PRD 05 |
 | `act_launch` | `idempotency_key` | omitted | PRD 05 design rule 6 |
+| `profile_authoring_generate` | `profile_id` | required; no default | M5 issue #462 |
+| `profile_authoring_generate` | `replay_path` | omitted | M5 issue #462 |
+| `profile_authoring_generate` | `max_audit_rows` | `500` | M5 issue #462 |
+| `profile_authoring_generate` | `max_replay_rows` | `500` | M5 issue #462 |
+| `profile_authoring_generate` | `candidate_id` | omitted; generated from evidence hash | M5 issue #462 |
+| `profile_authoring_list` | `profile_id` | omitted | M5 issue #462 |
+| `profile_authoring_list` | `state` | omitted | M5 issue #462 |
+| `profile_authoring_list` | `limit` | `100` | M5 issue #462 |
+| `profile_authoring_inspect` | `candidate_id` | required; no default | M5 issue #462 |
+| `profile_authoring_accept` | `candidate_id` | required; no default | M5 issue #462 |
+| `profile_authoring_accept` | `operator_note` | omitted | M5 issue #462 |
+| `profile_authoring_reject` | `candidate_id` | required; no default | M5 issue #462 |
+| `profile_authoring_reject` | `reason` | omitted | M5 issue #462 |
+| `profile_authoring_export` | `candidate_id` | required; no default | M5 issue #462 |
+| `profile_authoring_export` | `output_path` | required; no default | M5 issue #462 |
 | `audit_export_consent_set` | `profile_id` | required; no default | M5 issue #460 |
 | `audit_export_consent_set` | `enabled` | required; no default | M5 issue #460 |
 | `audit_export_consent_set` | `redaction_policy` | `"strict"` | M5 issue #460 |
@@ -1423,7 +1594,7 @@ audit-export defaults below.
 | `audit_export_bundle` | `max_rows` | `100` | M5 issue #460 |
 | `audit_export_bundle` | `max_row_bytes` | `65536` | M5 issue #460 |
 
-All three schemas must serialize as closed top-level JSON objects with
+All listed schemas must serialize as closed top-level JSON objects with
 `additionalProperties: false`. `act_combo.steps[]` also serializes as a closed
 object. The nested `act_combo.steps[].params` object is validated against the
 selected action tool schema before scheduling; it is not accepted as unchecked
