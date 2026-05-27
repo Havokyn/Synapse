@@ -123,8 +123,9 @@ The `synapse-profiles` parser rejects these cases:
 | Invalid target `title_regex` | Reject. |
 | Empty backend list or duplicate backend | Reject. |
 | `use_scope = "unknown"` | Reject for installable packages. |
-| `permissions.execution.local_only = true` and `remote_server_allowed = true` | Reject. |
+| `permissions.execution.local_only != true` or `remote_server_allowed != false` | Reject; v1 installable packages are local-only. |
 | `permissions.contribution.share_audit_allowed = true` without `export_allowed = true` | Reject. |
+| Metadata/changelog/provenance text contains prompt/tool-injection markers | Reject before install; metadata is data, not agent instructions. |
 | Missing or unapproved package license | Reject. |
 | Malformed SHA-256 digest | Reject. |
 | Expected manifest digest differs from actual manifest bytes | Reject before metadata is trusted. |

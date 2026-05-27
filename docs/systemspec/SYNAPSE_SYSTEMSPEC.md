@@ -4672,6 +4672,11 @@ rows_read, cf_profile_rows_written, cf_kv_rows_written, duplicate_rows,
 contribution_row_key, deterministic_bundle_sha256, rows }`.
 Duplicate rows are byte-identical rows, plus contribution rows with the same
 deterministic content even if the exact bundle-file hash differs.
+Contribution imports run local abuse review before active-row writes. Hostile
+contribution bundles write only a quarantined contribution row with risk
+reason codes; staged contributions carry `rank_eligible=false`,
+`quality_weight=0`, and `external_quality_claims_trusted=false` until local
+success evidence exists on this host.
 **Errors:** `TOOL_PARAMS_INVALID` for malformed bundle schema, unsupported CF,
 non-registry key, invalid `CF_KV` namespace, non-object row values, hash
 mismatch, or same-key/different-value local conflicts.

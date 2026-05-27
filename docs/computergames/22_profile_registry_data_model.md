@@ -31,8 +31,12 @@ bundles carry deterministic component hashes, redacted action-audit evidence,
 and quality-summary rows; import stages their evidence under
 `profile_registry/v1/contribution/` instead of copying redacted shared evidence
 into `CF_ACTION_LOG`. Contribution export strips path-like registry metadata
-fields before writing the shared bundle file. Manual FSV must verify them by
-reading `CF_PROFILES` / `CF_KV`, local bundle files, and registry-specific readback tools. The fixtures in
+fields before writing the shared bundle file. Contribution import also runs a
+local risk review before active-row writes: hostile or fake-quality bundles
+write only a quarantined contribution row, while accepted contribution rows are
+still de-ranked until local success evidence exists on this host. Manual FSV
+must verify them by reading `CF_PROFILES` / `CF_KV`, local bundle files, and
+registry-specific readback tools. The fixtures in
 `docs/computergames/fixtures/profile_registry_data_model/` are synthetic row
 SoTs for this docs/data-model baseline.
 
@@ -280,12 +284,32 @@ Required fields beyond the envelope:
 - `audit_evidence_sha256`
 - `quality_summary_sha256`
 - `merge_rules`
+- `review_state`
+- `risk_flags`
+- `trust_downgrade_reasons`
+- `rank_eligible`
+- `quality_weight`
+- `external_success_evidence_rows`
+- `local_success_evidence_rows`
+- `external_quality_claims_trusted`
 - `external_sharing_allowed`
 
 Contribution rows store redacted evidence summaries such as tool/status/error
 counts, foreground process name, backend, and profile schema version. They do
 not store raw file paths, window titles, PIDs, HWNDs, screenshots, clipboard
 content, audio, or raw unredacted audit rows.
+
+Contribution row states:
+
+| State | Meaning | Search/ranking impact |
+|---|---|---|
+| `staged` | Hash-valid contribution passed local abuse review. | Hidden from default registry search and `rank_eligible=false` until local success evidence/promoter review exists. |
+| `quarantined` | Import review found hostile metadata, unsafe permission markers, fake quality evidence, profile mismatches, or row-volume abuse. | Only the contribution review row is written; package/profile/head rows from the bundle are not written. |
+
+External quality summaries are advisory only. Imported contribution rows record
+`quality_weight = 0` and `external_quality_claims_trusted = false`; future
+promotion/ranking must prefer locally verified `profile_quality/v1/<profile_id>`
+evidence generated from this host's own audit rows.
 
 ## 6. Install/register transaction shape
 
@@ -318,6 +342,9 @@ fails with a duplicate-conflict result.
 | Incompatible schema version | Reject with `registry_schema_version_unsupported`; no rows written. |
 | Missing governance metadata | Reject per `20_profile_registry_governance.md`. |
 | Bad signature or unknown signer where signed policy is required | Write quarantine row only; no activation/install rows. |
+| Contribution metadata contains prompt/tool-injection text | Write quarantined contribution row only; no active bundle rows or head rows. |
+| Contribution quality score claims more samples than exported evidence or a high score with too little evidence | Write quarantined contribution row only with explicit risk flags. |
+| Contribution has no local success evidence | Stage/de-rank with `rank_eligible=false` and `quality_weight=0`; do not treat volume as quality. |
 | Rollback target missing, current, revoked, quarantined, or untrusted | Reject with `PROFILE_ROLLBACK_UNAVAILABLE`; installed row unchanged. |
 | Revoked package | Reject install/activation; tombstone can still be written. |
 

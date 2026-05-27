@@ -48,7 +48,26 @@ const DEFAULT_SEARCH_LIMIT: u32 = 100;
 const MAX_SEARCH_LIMIT: u32 = 1000;
 const DEFAULT_CONTRIBUTION_AUDIT_ROWS: u32 = 100;
 const MAX_CONTRIBUTION_AUDIT_ROWS: u32 = 1000;
+const MAX_CONTRIBUTION_IMPORT_ROWS: usize = 1000;
+const HIGH_QUALITY_SCORE_THRESHOLD: u64 = 90;
+const MIN_HIGH_QUALITY_EVIDENCE_ROWS: u64 = 10;
 const VALUE_PREFIX_CHARS: usize = 1024;
+const CONTRIBUTION_POISON_MARKERS: &[&str] = &[
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "disregard previous instructions",
+    "system prompt",
+    "developer message",
+    "tool call",
+    "exfiltrate",
+    "reveal secrets",
+    "jailbreak",
+    "prompt injection",
+    "run powershell",
+    "execute shell",
+    "download and run",
+    "act_run_shell",
+];
 const SYNTHETIC_FIXTURE_SIGNER_ID: &str = "synapse.fixture.signer";
 const SYNTHETIC_FIXTURE_PUBLIC_KEY_HEX: &str =
     "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
@@ -434,6 +453,61 @@ struct TrustVerification {
     trust_root_key: Option<String>,
     signature_payload_digest: Option<String>,
     required: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ContributionReview {
+    review_state: &'static str,
+    risk_flags: Vec<String>,
+    trust_downgrade_reasons: Vec<String>,
+    rank_eligible: bool,
+    quality_weight: u64,
+    registry_rows_accepted: u64,
+    registry_rows_rejected: u64,
+    external_success_evidence_rows: u64,
+    local_success_evidence_rows: u64,
+}
+
+impl ContributionReview {
+    fn staged(registry_rows_read: u64, external_success_evidence_rows: u64) -> Self {
+        Self {
+            review_state: "staged",
+            risk_flags: Vec::new(),
+            trust_downgrade_reasons: vec![
+                "external_contribution_untrusted_until_local_review".to_owned(),
+                "external_quality_claims_do_not_count_as_local_success".to_owned(),
+            ],
+            rank_eligible: false,
+            quality_weight: 0,
+            registry_rows_accepted: registry_rows_read,
+            registry_rows_rejected: 0,
+            external_success_evidence_rows,
+            local_success_evidence_rows: 0,
+        }
+    }
+
+    const fn quarantined(
+        registry_rows_read: u64,
+        external_success_evidence_rows: u64,
+        risk_flags: Vec<String>,
+        trust_downgrade_reasons: Vec<String>,
+    ) -> Self {
+        Self {
+            review_state: "quarantined",
+            risk_flags,
+            trust_downgrade_reasons,
+            rank_eligible: false,
+            quality_weight: 0,
+            registry_rows_accepted: 0,
+            registry_rows_rejected: registry_rows_read,
+            external_success_evidence_rows,
+            local_success_evidence_rows: 0,
+        }
+    }
+
+    fn is_quarantined(&self) -> bool {
+        matches!(self.review_state, "quarantined")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -953,6 +1027,10 @@ pub fn export_registry(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single MCP operation keeps bundle validation, risk review, duplicate handling, row write, and response assembly together"
+)]
 pub fn import_registry(
     reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
     params: &ProfileRegistryImportParams,
@@ -1008,6 +1086,16 @@ pub fn import_registry(
             kv_rows.push((row.key.clone().into_bytes(), encoded));
         }
     }
+    let contribution_review = if bundle_kind == CONTRIBUTION_BUNDLE_KIND {
+        let review = review_contribution_bundle(&bundle, summaries.len() as u64);
+        if review.is_quarantined() {
+            profile_rows.clear();
+            kv_rows.clear();
+        }
+        Some(review)
+    } else {
+        None
+    };
     let contribution_row_key = if bundle_kind == CONTRIBUTION_BUNDLE_KIND {
         Some(contribution_key(
             bundle.profile_id.as_deref().unwrap_or("unknown-profile"),
@@ -1017,7 +1105,12 @@ pub fn import_registry(
         None
     };
     if let Some(key) = &contribution_row_key {
-        let value = contribution_import_row(&bundle_path, &bundle, summaries.len() as u64)?;
+        let value = contribution_import_row(
+            &bundle_path,
+            &bundle,
+            summaries.len() as u64,
+            contribution_review.as_ref(),
+        )?;
         let encoded = encode_json(&value).map_err(|error| {
             mcp_error(
                 error_codes::TOOL_INTERNAL_ERROR,
@@ -2414,7 +2507,11 @@ fn row_filter_matches(
     query: Option<&str>,
     params: &ProfileRegistrySearchParams,
 ) -> bool {
-    if !params.include_disabled && matches!(summary.state.as_deref(), Some("disabled" | "removed"))
+    if !params.include_disabled
+        && matches!(
+            summary.state.as_deref(),
+            Some("disabled" | "removed" | "staged" | "quarantined" | "rejected")
+        )
     {
         return false;
     }
@@ -2596,6 +2693,259 @@ fn validate_bundle_hashes(bundle: &ProfileRegistryExportBundle) -> Result<(), Er
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "review rules are kept linear so each quarantine/de-rank reason is audit-readable"
+)]
+fn review_contribution_bundle(
+    bundle: &ProfileRegistryExportBundle,
+    registry_rows_read: u64,
+) -> ContributionReview {
+    let external_success_evidence_rows = bundle
+        .audit_evidence
+        .iter()
+        .filter(|row| row.status.as_deref() == Some("ok"))
+        .count() as u64;
+    let mut terminal_risk_flags = Vec::new();
+    let mut advisory_risk_flags = Vec::new();
+    let mut trust_downgrade_reasons = Vec::new();
+
+    if bundle.profile_id.as_deref().is_none_or(str::is_empty) {
+        push_unique(&mut terminal_risk_flags, "contribution_profile_id_missing");
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "missing_profile_id_prevents_safe_review",
+        );
+    }
+    if bundle.rows.is_empty() {
+        push_unique(&mut terminal_risk_flags, "contribution_registry_rows_empty");
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "empty_contribution_cannot_improve_registry",
+        );
+    }
+    if bundle.rows.len() > MAX_CONTRIBUTION_IMPORT_ROWS {
+        push_unique(
+            &mut terminal_risk_flags,
+            "contribution_registry_rows_limit_exceeded",
+        );
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "row_volume_exceeds_local_review_limit",
+        );
+    }
+    if bundle.audit_evidence.len() > MAX_CONTRIBUTION_AUDIT_ROWS as usize {
+        push_unique(
+            &mut terminal_risk_flags,
+            "contribution_audit_evidence_limit_exceeded",
+        );
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "audit_evidence_volume_exceeds_local_review_limit",
+        );
+    }
+
+    for row in &bundle.rows {
+        if contribution_value_has_poison_marker(&row.value) {
+            push_unique(&mut terminal_risk_flags, "metadata_prompt_injection_text");
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "untrusted_metadata_contains_agent_instruction_marker",
+            );
+        }
+        if contribution_value_requests_unsafe_permission(&row.value) {
+            push_unique(
+                &mut terminal_risk_flags,
+                "unsafe_action_or_permission_metadata",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "contribution_requests_unsafe_runtime_permission",
+            );
+        }
+        if let Some(profile_id) = bundle.profile_id.as_deref()
+            && !contribution_row_is_global(row)
+            && !value_mentions_profile(&row.value, profile_id)
+        {
+            push_unique(
+                &mut terminal_risk_flags,
+                "contribution_registry_row_profile_mismatch",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "registry_row_does_not_match_bundle_profile_id",
+            );
+        }
+    }
+
+    for evidence in &bundle.audit_evidence {
+        if let Some(profile_id) = bundle.profile_id.as_deref() {
+            let has_profile_field =
+                evidence.profile_id.is_some() || evidence.foreground_profile_id.is_some();
+            let mentions_bundle_profile = evidence.profile_id.as_deref() == Some(profile_id)
+                || evidence.foreground_profile_id.as_deref() == Some(profile_id);
+            if has_profile_field && !mentions_bundle_profile {
+                push_unique(&mut terminal_risk_flags, "audit_evidence_profile_mismatch");
+                push_unique(
+                    &mut trust_downgrade_reasons,
+                    "audit_evidence_does_not_match_bundle_profile_id",
+                );
+            }
+        }
+    }
+
+    for summary in &bundle.quality_summaries {
+        if let Some(profile_id) = bundle.profile_id.as_deref()
+            && summary.profile_id.as_deref() != Some(profile_id)
+        {
+            push_unique(&mut terminal_risk_flags, "quality_summary_profile_mismatch");
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "quality_summary_does_not_match_bundle_profile_id",
+            );
+        }
+        let score = summary.score_0_100.unwrap_or_default();
+        let sample_size = summary.sample_size.unwrap_or_default();
+        if score > 100 {
+            push_unique(&mut terminal_risk_flags, "quality_score_out_of_range");
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "quality_score_claim_exceeds_valid_range",
+            );
+        }
+        if sample_size > bundle.audit_evidence.len() as u64 {
+            push_unique(
+                &mut terminal_risk_flags,
+                "quality_sample_exceeds_exported_evidence",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "quality_sample_claim_not_supported_by_exported_evidence",
+            );
+        }
+        if score >= HIGH_QUALITY_SCORE_THRESHOLD && sample_size < MIN_HIGH_QUALITY_EVIDENCE_ROWS {
+            push_unique(
+                &mut terminal_risk_flags,
+                "quality_score_high_with_low_evidence",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "high_quality_claim_requires_more_verified_evidence",
+            );
+        }
+        if score >= HIGH_QUALITY_SCORE_THRESHOLD
+            && (bundle.audit_evidence.len() as u64) < MIN_HIGH_QUALITY_EVIDENCE_ROWS
+        {
+            push_unique(
+                &mut terminal_risk_flags,
+                "quality_score_high_with_low_exported_evidence",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "high_quality_claim_requires_more_exported_evidence",
+            );
+        }
+        if score > 0 && external_success_evidence_rows == 0 {
+            push_unique(
+                &mut advisory_risk_flags,
+                "quality_score_without_success_evidence",
+            );
+            push_unique(
+                &mut trust_downgrade_reasons,
+                "quality_score_has_no_success_evidence_in_bundle",
+            );
+        }
+    }
+
+    if external_success_evidence_rows == 0 {
+        push_unique(&mut advisory_risk_flags, "low_quality_no_success_evidence");
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "no_success_evidence_in_bundle",
+        );
+    }
+    if registry_rows_read > external_success_evidence_rows.saturating_mul(25).max(25) {
+        push_unique(
+            &mut advisory_risk_flags,
+            "registry_row_volume_exceeds_success_evidence",
+        );
+        push_unique(
+            &mut trust_downgrade_reasons,
+            "registry_row_volume_not_backed_by_success_evidence",
+        );
+    }
+
+    if !terminal_risk_flags.is_empty() {
+        terminal_risk_flags.extend(advisory_risk_flags);
+        terminal_risk_flags.sort();
+        terminal_risk_flags.dedup();
+        trust_downgrade_reasons.sort();
+        trust_downgrade_reasons.dedup();
+        return ContributionReview::quarantined(
+            registry_rows_read,
+            external_success_evidence_rows,
+            terminal_risk_flags,
+            trust_downgrade_reasons,
+        );
+    }
+
+    let mut review = ContributionReview::staged(registry_rows_read, external_success_evidence_rows);
+    review.risk_flags = advisory_risk_flags;
+    review.risk_flags.sort();
+    review.risk_flags.dedup();
+    review
+        .trust_downgrade_reasons
+        .extend(trust_downgrade_reasons);
+    review.trust_downgrade_reasons.sort();
+    review.trust_downgrade_reasons.dedup();
+    review
+}
+
+fn contribution_row_is_global(row: &ProfileRegistryBundleRow) -> bool {
+    let row_kind = row.value.get("row_kind").and_then(Value::as_str);
+    matches!(
+        row_kind,
+        Some("registry_source" | "registry_head" | "registry_trust_root")
+    ) || row.key.starts_with(SOURCE_PREFIX)
+        || row.key.starts_with(HEAD_PREFIX)
+        || row.key.starts_with(TRUST_ROOT_PREFIX)
+}
+
+fn contribution_value_has_poison_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let normalized = text.to_ascii_lowercase();
+            CONTRIBUTION_POISON_MARKERS
+                .iter()
+                .any(|marker| normalized.contains(marker))
+        }
+        Value::Array(items) => items.iter().any(contribution_value_has_poison_marker),
+        Value::Object(object) => object.values().any(contribution_value_has_poison_marker),
+        _ => false,
+    }
+}
+
+fn contribution_value_requests_unsafe_permission(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key == "remote_server_allowed" && value.as_bool() == Some(true))
+                || (key == "local_only" && value.as_bool() == Some(false))
+                || (key == "shell_allowed" && value.as_bool() == Some(true))
+                || contribution_value_requests_unsafe_permission(value)
+        }),
+        Value::Array(items) => items
+            .iter()
+            .any(contribution_value_requests_unsafe_permission),
+        _ => false,
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|item| item == value) {
+        values.push(value.to_owned());
+    }
+}
+
 fn verify_optional_hash(
     field: &str,
     expected: Option<&str>,
@@ -2722,6 +3072,12 @@ fn contribution_rows_are_semantic_duplicates(existing: &[u8], incoming: &[u8]) -
     }
     remove_object_field(&mut existing, "bundle_file_sha256");
     remove_object_field(&mut incoming, "bundle_file_sha256");
+    remove_object_field(&mut existing, "created_at");
+    remove_object_field(&mut incoming, "created_at");
+    remove_object_field(&mut existing, "updated_at");
+    remove_object_field(&mut incoming, "updated_at");
+    remove_object_field(&mut existing, "reviewed_at");
+    remove_object_field(&mut incoming, "reviewed_at");
     existing == incoming
 }
 
@@ -2729,6 +3085,7 @@ fn contribution_import_row(
     bundle_path: &Path,
     bundle: &ProfileRegistryExportBundle,
     registry_rows_read: u64,
+    review: Option<&ContributionReview>,
 ) -> Result<Value, ErrorData> {
     let bundle_file_sha256 = fs::read(bundle_path)
         .map(|bytes| sha256_hex(&bytes))
@@ -2741,6 +3098,9 @@ fn contribution_import_row(
                 ),
             )
         })?;
+    let updated_at = Utc::now().to_rfc3339();
+    let default_review = ContributionReview::staged(registry_rows_read, 0);
+    let review = review.unwrap_or(&default_review);
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "row_kind": "profile_contribution_bundle",
@@ -2748,18 +3108,33 @@ fn contribution_import_row(
             bundle.profile_id.as_deref().unwrap_or("unknown-profile"),
             bundle.deterministic_bundle_sha256.as_deref(),
         ),
-        "state": "staged",
+        "created_at": updated_at,
+        "updated_at": updated_at,
+        "reviewed_at": updated_at,
+        "source_id": "registry.contribution.local",
+        "state": review.review_state,
+        "activation_state": review.review_state,
         "bundle_kind": bundle.bundle_kind.clone(),
         "profile_id": bundle.profile_id.clone(),
         "deterministic_bundle_sha256": bundle.deterministic_bundle_sha256.clone(),
         "bundle_file_sha256": bundle_file_sha256,
         "registry_rows_read": registry_rows_read,
+        "registry_rows_accepted": review.registry_rows_accepted,
+        "registry_rows_rejected": review.registry_rows_rejected,
         "audit_evidence_rows": bundle.audit_evidence.len() as u64,
         "quality_summary_rows": bundle.quality_summaries.len() as u64,
         "registry_rows_sha256": bundle.registry_rows_sha256.clone(),
         "audit_evidence_sha256": bundle.audit_evidence_sha256.clone(),
         "quality_summary_sha256": bundle.quality_summary_sha256.clone(),
         "merge_rules": bundle.merge_rules.clone(),
+        "review_state": review.review_state,
+        "risk_flags": review.risk_flags.clone(),
+        "trust_downgrade_reasons": review.trust_downgrade_reasons.clone(),
+        "rank_eligible": review.rank_eligible,
+        "quality_weight": review.quality_weight,
+        "external_success_evidence_rows": review.external_success_evidence_rows,
+        "local_success_evidence_rows": review.local_success_evidence_rows,
+        "external_quality_claims_trusted": false,
         "audit_evidence": bundle.audit_evidence.clone(),
         "quality_summaries": bundle.quality_summaries.clone(),
         "external_sharing_allowed": false,
@@ -3072,6 +3447,9 @@ fn merge_rules() -> Vec<String> {
         "same_key_different_value_fails_closed".to_owned(),
         "contribution_evidence_is_staged_under_profile_registry_contribution_rows".to_owned(),
         "redacted_audit_evidence_is_not_imported_into_CF_ACTION_LOG".to_owned(),
+        "contribution_import_runs_local_risk_review_before_active_writes".to_owned(),
+        "hostile_contribution_writes_quarantine_row_only".to_owned(),
+        "external_quality_claims_do_not_rank_without_local_success".to_owned(),
     ]
 }
 

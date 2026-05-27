@@ -105,6 +105,18 @@ and stages contribution evidence under
 import redacted shared evidence into `CF_ACTION_LOG`. Contribution export also
 strips path-like registry metadata fields from shared bundle rows.
 
+Contribution import is a local review gate, not a trust shortcut. Before active
+registry/head writes, Synapse reviews the bundle for prompt/tool-injection text,
+unsafe permission escalation markers, profile-id mismatches, fake quality
+claims, excessive row/evidence volume, and quality scores not supported by the
+exported redacted evidence. Hostile bundles write only a quarantined
+`profile_contribution_bundle` row with explicit `risk_flags` and
+`trust_downgrade_reasons`. Hash-valid bundles that pass abuse review are still
+`staged`, `rank_eligible = false`, `quality_weight = 0`, and
+`external_quality_claims_trusted = false` until this configured host has local
+success evidence. This prevents contribution volume or self-claimed scores from
+outranking verified local `profile_quality/v1/<profile_id>` rows.
+
 ## 5. Attribution and provenance
 
 Attribution is preserved across these flows:
@@ -167,6 +179,10 @@ used if retained action/reflex/session audit rows still exist.
 | Audit bundle missing consent | Reject export; keep local audit data local. |
 | Audit bundle includes raw sensitive classes | Reject export; require a new redaction policy and explicit issue acceptance. |
 | Unknown manifest major version | Reject until a migration/import issue defines the new schema. |
+| Contribution bundle contains prompt/tool-injection text in metadata | Quarantine contribution row only with `metadata_prompt_injection_text`; no active rows. |
+| Contribution bundle claims high quality with too little/mismatched evidence | Quarantine contribution row only with the quality risk reason. |
+| Contribution bundle has volume but no local success evidence | Stage/de-rank with `rank_eligible = false` and `quality_weight = 0`. |
+| Package asks for remote execution or non-local execution | Reject before install; no package/profile/installed/head rows. |
 
 These are not warnings. They are terminal governance errors until the package or
 bundle is corrected.

@@ -1165,7 +1165,9 @@ Duplicate package id/version with the same manifest digest is idempotent.
 Duplicate id/version with a different digest fails closed with no companion-row
 rewrite. The response returns `manifest_digest`, profile TOML path, `wrote_rows`,
 `idempotent`, trust/signature status, signer/trust-root readback, row keys, and
-row summaries.
+row summaries. Installable package manifests must be local-only
+(`local_only=true`, `remote_server_allowed=false`) and metadata text is rejected
+if it contains prompt/tool-injection markers.
 
 ### 3.28k `profile_registry_disable`
 
@@ -1231,7 +1233,12 @@ deterministic bundle hashes present. Byte-identical rows are skipped on
 duplicate import; contribution rows with the same deterministic content are
 also skipped even when the exact bundle-file hash differs. Same-key/different
 value conflicts fail closed before writes. Imported contribution evidence is
-staged under `profile_registry/v1/contribution/`.
+staged under `profile_registry/v1/contribution/`. Contribution import runs a
+local abuse review before active-row writes. Hostile bundles write only a
+quarantined contribution row with explicit `risk_flags`; staged bundles carry
+`rank_eligible=false`, `quality_weight=0`, and
+`external_quality_claims_trusted=false` until local success evidence exists on
+this host.
 
 ```json
 {

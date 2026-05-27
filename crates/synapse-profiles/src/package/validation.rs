@@ -15,6 +15,22 @@ pub const PROFILE_PACKAGE_SCHEMA_VERSION: u32 = 1;
 pub const PROFILE_PACKAGE_KIND: &str = "profile_package";
 
 const APPROVED_PROFILE_LICENSES: [&str; 3] = ["MIT", "Apache-2.0", "MIT OR Apache-2.0"];
+const METADATA_POISON_MARKERS: &[&str] = &[
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "disregard previous instructions",
+    "system prompt",
+    "developer message",
+    "tool call",
+    "exfiltrate",
+    "reveal secrets",
+    "jailbreak",
+    "prompt injection",
+    "run powershell",
+    "execute shell",
+    "download and run",
+    "act_run_shell",
+];
 
 impl ProfilePackageManifest {
     /// Validates this manifest using the current local package policy.
@@ -48,6 +64,7 @@ impl ProfilePackageManifest {
         self.files.validate(path)?;
         self.trust.validate(path)?;
         validate_signatures(path, &self.signatures)?;
+        validate_manifest_text_safety(path, self)?;
         if self.trust.policy == "signed_required" && self.signatures.is_empty() {
             return Err(ProfileError::Parse {
                 path: path.to_path_buf(),
@@ -180,12 +197,10 @@ impl PackagePermissions {
                     .to_owned(),
             });
         }
-        if self.execution.remote_server_allowed && self.execution.local_only {
+        if !self.execution.local_only || self.execution.remote_server_allowed {
             return Err(ProfileError::Parse {
                 path: path.to_path_buf(),
-                message:
-                    "permissions.execution cannot be both local_only and remote_server_allowed"
-                        .to_owned(),
+                message: "permissions.execution must be local_only=true and remote_server_allowed=false for installable packages".to_owned(),
             });
         }
         Ok(())
@@ -319,6 +334,41 @@ fn validate_changelog(
         validate_semver(path, "changelog.version", &entry.version)?;
         validate_timestamp(path, "changelog.at", &entry.at)?;
         require_non_empty(path, "changelog.summary", &entry.summary)?;
+    }
+    Ok(())
+}
+
+fn validate_manifest_text_safety(
+    path: &Path,
+    manifest: &ProfilePackageManifest,
+) -> Result<(), ProfileError> {
+    validate_text_field_safe(path, "author.name", &manifest.author.name)?;
+    validate_text_field_safe(path, "author.contact", &manifest.author.contact)?;
+    validate_text_field_safe(path, "author.attribution", &manifest.author.attribution)?;
+    validate_text_field_safe(path, "source.uri", &manifest.source.uri)?;
+    validate_text_field_safe(path, "source.revision", &manifest.source.revision)?;
+    validate_text_field_safe(path, "source.built_by", &manifest.source.built_by)?;
+    validate_text_field_safe(path, "source.generated_by", &manifest.source.generated_by)?;
+    for (index, entry) in manifest.changelog.iter().enumerate() {
+        validate_text_field_safe(path, &format!("changelog[{index}].summary"), &entry.summary)?;
+    }
+    for (key, value) in &manifest.metadata {
+        validate_text_field_safe(path, "metadata key", key)?;
+        validate_text_field_safe(path, &format!("metadata.{key}"), value)?;
+    }
+    Ok(())
+}
+
+fn validate_text_field_safe(path: &Path, field: &str, value: &str) -> Result<(), ProfileError> {
+    let normalized = value.to_ascii_lowercase();
+    if let Some(marker) = METADATA_POISON_MARKERS
+        .iter()
+        .find(|marker| normalized.contains(**marker))
+    {
+        return Err(ProfileError::Parse {
+            path: path.to_path_buf(),
+            message: format!("{field} contains unsafe metadata instruction marker {marker:?}"),
+        });
     }
     Ok(())
 }
