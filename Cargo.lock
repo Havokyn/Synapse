@@ -3580,6 +3580,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "synapse-everquest"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "synapse-hid-host"
 version = "0.1.0"
 dependencies = [

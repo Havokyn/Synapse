@@ -128,6 +128,7 @@ directly; scripts, tests, benchmarks, GitHub Actions, and CI are never FSV.
 | 23 | [`23_profile_package_manifest.md`](23_profile_package_manifest.md) | Profile package manifest schema, provenance, compatibility matrix, permissions, and fail-closed validation rules. |
 | 24 | [`24_curated_starter_registry.md`](24_curated_starter_registry.md) | Curated starter profile registry seed set, per-target backlog, and registry row SoT. |
 | 25 | [`25_mcp_runtime_fsv_path.md`](25_mcp_runtime_fsv_path.md) | Reliable MCP runtime path for manual FSV, direct chat `Transport closed` boundary, and repo-owned HTTP/stdout SoTs. |
+| 26 | [`26_everquest_live_eval.md`](26_everquest_live_eval.md) | Current EverQuest live evaluation target, `synapse-everquest` log pipeline, level-1 Dark Elf Wizard on Frostreaver, and manual FSV plan to reach level 2. |
 
 ---
 

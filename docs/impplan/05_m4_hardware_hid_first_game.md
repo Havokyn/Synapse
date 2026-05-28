@@ -4,6 +4,16 @@
 agent should read before touching hardware HID, Minecraft profile, or M4 MCP
 tool work.
 
+**Configured-host game target update 2026-05-28:** the operator redirected the
+current full-system game evaluation from Minecraft to EverQuest. The active
+live target is an operator-owned fresh level 1 Dark Elf Wizard on the
+Frostreaver server, starting in Neriak, with the practical acceptance target of
+reaching level 2 through supervised, operator-attended real gameplay. The
+durable runbook and current SoT contract live in
+`docs/computergames/26_everquest_live_eval.md`; context issue #491 plus tasks
+#492-#500 are canonical for exact open work. Minecraft profile work remains
+historical/superseded for this evaluation unless a later issue reactivates it.
+
 **Issue state is canonical.** GitHub Issues are the live work queue. This file
 summarizes the queue as read on 2026-05-26 after `git pull --ff-only`, but an
 agent must re-read the current issue before claiming work. If source, docs, and
@@ -60,8 +70,10 @@ Implementation doctrine: [00_methodology.md](00_methodology.md) and
 
 **Ship the first real-device game-control path: RP2040 firmware, the
 `synapse-hid-host` serial gateway, `Backend::Hardware`, the three M4 MCP tools,
-and a `minecraft.java` single-player profile that can complete the M4 demo on
-the configured Windows host with manual source-of-truth evidence.**
+and a configured-host first-game evaluation that can complete its demo with
+manual source-of-truth evidence.** The original profile target was
+`minecraft.java`; the current operator-directed live evaluation target is
+`everquest.live`, defined in `docs/computergames/26_everquest_live_eval.md`.
 
 Everything in M4 traces back to that sentence:
 
@@ -71,8 +83,9 @@ Everything in M4 traces back to that sentence:
   falling back to software or ViGEm.
 - The MCP tool surface must expose `act_combo`, `act_run_shell`, and
   `act_launch` with explicit safety gates.
-- The Minecraft profile must resolve a real Minecraft Java window, read HUD
-  state, emit game events, and drive only supported `single_player` use.
+- The active first-game profile must resolve the configured-host game window,
+  read visible/log-backed state, emit compact game events, and drive only the
+  supported operator-attended foreground use declared by the profile.
 - Missing local prerequisites must be made real on this configured host.
 
 ---

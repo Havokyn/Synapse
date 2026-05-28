@@ -151,6 +151,24 @@ can verify the intended boundary before actions run.
 
 Browser games use the Chrome profile machinery. Roblox Studio is `operator_owned_test`. Runtime experiences should start as `unknown` until a profile states the intended environment.
 
+### 7.7 EverQuest Live Evaluation
+
+`operator_owned_test` on the configured host only, with explicit
+`supported_use.operator_attended_required = "true"`. The active evaluation
+target is the operator-authenticated EverQuest client with an operator-owned
+level 1 Dark Elf Wizard on the Frostreaver server, starting in Neriak. The
+current acceptance target is reaching level 2 while recording manual
+source-of-truth evidence.
+
+The `everquest.live` profile is a foreground-only live-eval candidate. It must
+not use unattended loops, process memory access, packet/protocol inspection,
+DLL injection, graphics injection, chat/trade/economy/social automation, PvP
+automation, or scaled/background account operation. Actions are allowed only
+from active operator prompts and visible foreground state. FSV must read the
+live process/window/UI, local EverQuest logs/config files where available, and
+Synapse action/audit rows before and after each trigger. See
+`26_everquest_live_eval.md` and context issue #491.
+
 ---
 
 ## 8. Updating profile scopes

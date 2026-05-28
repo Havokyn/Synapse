@@ -50,6 +50,7 @@ fn bundled_profiles_parse_and_keep_natural_defaults() -> Result<(), Box<dyn std:
         ids,
         [
             "chrome",
+            "everquest.live",
             "luanti.minetest",
             "minecraft.java",
             "notepad",
