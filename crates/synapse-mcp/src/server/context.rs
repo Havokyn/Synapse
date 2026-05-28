@@ -449,12 +449,38 @@ pub(super) fn maybe_force_panic_during_act(_tool: &'static str) {}
 mod scope_gate_tests {
     use std::{fs, num::NonZeroUsize, path::Path};
 
+    use rmcp::handler::server::wrapper::Parameters;
     use serde_json::json;
+    use synapse_core::{
+        AccessibleNode, EventFilter, FocusedElement, ForegroundContext, Rect, SensorStatus,
+        UiaPattern, element_id,
+    };
+    use synapse_perception::ObservationInput;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
+    use crate::{
+        m1::{FindParams, FindScope, ObserveParams, ReadTextParams},
+        m2::M2ServiceConfig,
+        m3::{M3ServiceConfig, subscribe::SubscribeParams},
+        m4::M4ServiceConfig,
+    };
+
+    const ACTION_WRITE_TOOLS: [&str; 12] = [
+        "act_click",
+        "act_type",
+        "act_press",
+        "act_aim",
+        "act_drag",
+        "act_scroll",
+        "act_pad",
+        "act_clipboard",
+        "act_combo",
+        "act_run_shell",
+        "act_launch",
+        "reflex_register",
+    ];
 
     #[test]
     fn action_scope_gate_denies_no_active_profile_before_dispatch() -> anyhow::Result<()> {
@@ -490,31 +516,117 @@ mod scope_gate_tests {
         let runtime = service.profile_runtime()?;
         runtime.activate("unknown")?;
 
-        let error = match service.ensure_supported_use_allows_action("act_type") {
-            Ok(()) => anyhow::bail!("unknown scope must fail closed without the explicit override"),
-            Err(error) => error,
-        };
+        for tool in ACTION_WRITE_TOOLS {
+            let error = match service.ensure_supported_use_allows_action(tool) {
+                Ok(()) => anyhow::bail!(
+                    "unknown scope must fail closed for {tool} without the explicit override"
+                ),
+                Err(error) => error,
+            };
 
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("code")),
-            Some(&json!(error_codes::SAFETY_PROFILE_ACTION_DENIED))
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("code")),
+                Some(&json!(error_codes::SAFETY_PROFILE_ACTION_DENIED))
+            );
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("tool")),
+                Some(&json!(tool))
+            );
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("reason")),
+                Some(&json!("unknown_scope"))
+            );
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("profile_id")),
+                Some(&json!("unknown"))
+            );
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("use_scope")),
+                Some(&json!("unknown"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn action_scope_gate_allows_single_player_profile_for_all_action_write_tools()
+    -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        write_profile(
+            &profiles.path().join("single-player.toml"),
+            "single-player",
+            "single_player",
+        )?;
+        let service = service_with_profiles(profiles.path(), false)?;
+        install_synthetic_notepad_input(&service)?;
+        let runtime = service.profile_runtime()?;
+        runtime.activate("single-player")?;
+
+        for tool in ACTION_WRITE_TOOLS {
+            service.ensure_supported_use_allows_action(tool)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_remain_available_with_active_unknown_scope() -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        write_profile(&profiles.path().join("unknown.toml"), "unknown", "unknown")?;
+        let service = service_with_profiles(profiles.path(), false)?;
+        install_synthetic_notepad_input(&service)?;
+        let runtime = service.profile_runtime()?;
+        runtime.activate("unknown")?;
+
+        assert!(service.health_payload().ok);
+
+        let observation = service
+            .observe(Parameters(ObserveParams::default()))
+            .await?;
+        assert_eq!(observation.0.foreground.process_name, "notepad.exe");
+
+        let matches = service
+            .find(Parameters(FindParams {
+                query: Some("Document".to_owned()),
+                role: None,
+                name_substring: None,
+                automation_id: None,
+                scope: Some(FindScope::Elements),
+                limit: Some(5),
+                in_window: None,
+            }))
+            .await?;
+        assert!(
+            matches
+                .0
+                .results
+                .iter()
+                .any(|result| result.name.as_deref() == Some("Document"))
         );
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("tool")),
-            Some(&json!("act_type"))
-        );
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("reason")),
-            Some(&json!("unknown_scope"))
-        );
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("profile_id")),
-            Some(&json!("unknown"))
-        );
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("use_scope")),
-            Some(&json!("unknown"))
-        );
+
+        let ocr = service
+            .read_text(Parameters(ReadTextParams {
+                region: Some(Rect {
+                    x: 12,
+                    y: 80,
+                    w: 120,
+                    h: 40,
+                }),
+                element_id: None,
+                backend: synapse_core::OcrBackend::Winrt,
+                lang_hint: None,
+            }))
+            .await?;
+        assert_eq!(ocr.0.full_text, "Synapse");
+
+        let subscription = service
+            .subscribe(Parameters(SubscribeParams {
+                kinds: Vec::new(),
+                filter: Some(EventFilter::All),
+                snapshot_first: false,
+                buffer_size: 4096,
+            }))
+            .await?;
+        assert!(!subscription.0.subscription_id.is_empty());
         Ok(())
     }
 
@@ -569,5 +681,96 @@ max_detections = 8
             ),
         )?;
         Ok(())
+    }
+
+    fn install_synthetic_notepad_input(service: &SynapseService) -> anyhow::Result<()> {
+        let mut state = service.m1_state.lock().map_err(|_err| {
+            anyhow::anyhow!("M1 service state lock poisoned while installing synthetic input")
+        })?;
+        state.synthetic = Some(synthetic_notepad_input());
+        drop(state);
+        Ok(())
+    }
+
+    fn synthetic_notepad_input() -> ObservationInput {
+        let document_id = element_id(0x1234, "0000002a00000001");
+        let mut input = ObservationInput::new(ForegroundContext {
+            hwnd: 0x1234,
+            pid: 44,
+            process_name: "notepad.exe".to_owned(),
+            process_path: "C:\\Windows\\System32\\notepad.exe".to_owned(),
+            window_title: "manual.txt - Notepad".to_owned(),
+            window_bounds: Rect {
+                x: 10,
+                y: 20,
+                w: 800,
+                h: 600,
+            },
+            monitor_index: 0,
+            dpi_scale: 1.0,
+            profile_id: None,
+            steam_appid: None,
+            is_fullscreen: false,
+            is_dwm_composed: true,
+        });
+        input.focused = Some(FocusedElement {
+            element_id: document_id.clone(),
+            name: "Document".to_owned(),
+            role: "Edit".to_owned(),
+            automation_id: Some("15".to_owned()),
+            bbox: Rect {
+                x: 12,
+                y: 80,
+                w: 760,
+                h: 480,
+            },
+            enabled: true,
+            patterns: vec![UiaPattern::Text, UiaPattern::Value],
+            value: Some("Synthetic Synapse text".to_owned()),
+            selected_text: None,
+        });
+        input.elements = vec![
+            AccessibleNode {
+                element_id: element_id(0x1234, "0000002a00000000"),
+                parent: None,
+                name: "Notepad".to_owned(),
+                role: "Window".to_owned(),
+                automation_id: None,
+                bbox: Rect {
+                    x: 10,
+                    y: 20,
+                    w: 800,
+                    h: 600,
+                },
+                enabled: true,
+                focused: false,
+                patterns: Vec::new(),
+                children_count: 1,
+                depth: 0,
+            },
+            AccessibleNode {
+                element_id: document_id,
+                parent: Some(element_id(0x1234, "0000002a00000000")),
+                name: "Document".to_owned(),
+                role: "Edit".to_owned(),
+                automation_id: Some("15".to_owned()),
+                bbox: Rect {
+                    x: 12,
+                    y: 80,
+                    w: 760,
+                    h: 480,
+                },
+                enabled: true,
+                focused: true,
+                patterns: vec![UiaPattern::Text, UiaPattern::Value],
+                children_count: 0,
+                depth: 1,
+            },
+        ];
+        input.a11y_status = SensorStatus::Healthy;
+        input.capture_status = SensorStatus::Healthy;
+        input.detection_status = SensorStatus::Disabled;
+        input.audio_status = SensorStatus::Disabled;
+        input
     }
 }
