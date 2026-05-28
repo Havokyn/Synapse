@@ -6,10 +6,10 @@ use super::{
     Parameters, ReleaseAllParams, ReleaseAllResponse, SynapseService, act_aim_with_handle,
     act_click_with_handle, act_clipboard, act_drag_with_handle, act_keymap_with_handle,
     act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
-    release_all_with_handles, tool, tool_router,
+    action_preflight::ActionPreflightReadback, release_all_with_handles, tool, tool_router,
 };
 use crate::m1::mcp_error;
-use serde_json::json;
+use serde_json::{Value, json};
 use synapse_core::error_codes;
 
 #[tool_router(router = m2_tool_router, vis = "pub(super)")]
@@ -24,11 +24,14 @@ impl SynapseService {
             kind = "act_click",
             "tool.invocation kind=act_click"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_click") {
-            self.audit_action_denied("act_click", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_click")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_click") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_click", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_click", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         let result = act_click_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_click", &result)?;
@@ -45,11 +48,14 @@ impl SynapseService {
             kind = "act_type",
             "tool.invocation kind=act_type"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_type") {
-            self.audit_action_denied("act_type", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_type")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_type") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_type", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_type", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         if let Err(error) = self.ensure_act_type_foreground(recording.as_ref()) {
             let result: Result<ActTypeResponse, ErrorData> = Err(error);
@@ -72,11 +78,14 @@ impl SynapseService {
             "tool.invocation kind=act_press"
         );
         super::context::maybe_force_panic_during_act("act_press");
-        if let Err(error) = self.ensure_supported_use_allows_action("act_press") {
-            self.audit_action_denied("act_press", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_press")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_press") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_press", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_press", &action_preflight_details(&preflight))?;
         let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
         let result =
             act_press_with_handle(handle, recording, connection_closed_cancel, params.0).await;
@@ -101,14 +110,18 @@ impl SynapseService {
             "hold_ms": params.hold_ms,
             "backend": params.backend,
         });
-        if let Err(error) = self.ensure_supported_use_allows_action("act_keymap") {
-            self.audit_action_denied_with_details("act_keymap", &error, &request_details);
-            return Err(error);
-        }
+        let preflight = match self.ensure_supported_use_allows_action("act_keymap") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied_with_details("act_keymap", &error, &request_details);
+                return Err(error);
+            }
+        };
         self.audit_action_started_with_details(
             "act_keymap",
             &json!({
                 "request": request_details,
+                "preflight": preflight,
             }),
         )?;
         let profile = {
@@ -155,11 +168,14 @@ impl SynapseService {
             kind = "act_aim",
             "tool.invocation kind=act_aim"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_aim") {
-            self.audit_action_denied("act_aim", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_aim")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_aim") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_aim", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_aim", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         let result = act_aim_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_aim", &result)?;
@@ -176,11 +192,14 @@ impl SynapseService {
             kind = "act_drag",
             "tool.invocation kind=act_drag"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_drag") {
-            self.audit_action_denied("act_drag", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_drag")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_drag") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_drag", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_drag", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         let result = act_drag_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_drag", &result)?;
@@ -199,11 +218,17 @@ impl SynapseService {
             kind = "act_scroll",
             "tool.invocation kind=act_scroll"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_scroll") {
-            self.audit_action_denied("act_scroll", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_scroll")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_scroll") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_scroll", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details(
+            "act_scroll",
+            &action_preflight_details(&preflight),
+        )?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         let result = act_scroll_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_scroll", &result)?;
@@ -220,11 +245,14 @@ impl SynapseService {
             kind = "act_pad",
             "tool.invocation kind=act_pad"
         );
-        if let Err(error) = self.ensure_supported_use_allows_action("act_pad") {
-            self.audit_action_denied("act_pad", &error);
-            return Err(error);
-        }
-        self.audit_action_started("act_pad")?;
+        let preflight = match self.ensure_supported_use_allows_action("act_pad") {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.audit_action_denied("act_pad", &error);
+                return Err(error);
+            }
+        };
+        self.audit_action_started_with_details("act_pad", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         let result = act_pad_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_pad", &result)?;
@@ -268,4 +296,10 @@ impl SynapseService {
         self.audit_action_result_best_effort("release_all", &result);
         result.map(Json)
     }
+}
+
+fn action_preflight_details(preflight: &ActionPreflightReadback) -> Value {
+    json!({
+        "preflight": preflight,
+    })
 }

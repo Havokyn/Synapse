@@ -1,6 +1,7 @@
 use super::{
     Arc, CancellationToken, ErrorData, M1State, Mutex, MutexGuard, ProfileActivateParams,
     ProfileActivateResponse, RecordingBackend, RequiredPermissions, SseState, SynapseService,
+    action_preflight::{ActionPreflightReadback, attach_action_preflight_to_error},
     activate_profile, authorization_error, error_codes, mcp_error,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,17 +136,30 @@ impl SynapseService {
     pub(super) fn ensure_supported_use_allows_action(
         &self,
         tool: &'static str,
-    ) -> Result<(), ErrorData> {
-        let foreground = {
+    ) -> Result<ActionPreflightReadback, ErrorData> {
+        let runtime = self.profile_runtime()?;
+        let active_profile_id_before = runtime
+            .active_profile_id()
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let initial_foreground = {
             let state = self.m1_state()?;
             let input = crate::m1::current_input(&state, 1)?;
             drop(state);
             input.foreground
         };
-        self.reevaluate_profile_for_foreground(&foreground)?;
-        let runtime = self.profile_runtime()?;
-        ensure_profile_scope_allows_action(&runtime, tool, self.allow_unknown_profile()?)?;
+        let (foreground, preflight) = self.preflight_action_foreground(
+            tool,
+            &runtime,
+            active_profile_id_before,
+            initial_foreground,
+        )?;
+        self.reevaluate_profile_for_foreground(&foreground)
+            .map_err(|error| attach_action_preflight_to_error(&error, &preflight))?;
+        ensure_profile_scope_allows_action(&runtime, tool, self.allow_unknown_profile()?)
+            .map_err(|error| attach_action_preflight_to_error(&error, &preflight))?;
         super::target_policy::ensure_supported_use_allows(&runtime, &foreground, tool)
+            .map_err(|error| attach_action_preflight_to_error(&error, &preflight))?;
+        Ok(preflight)
     }
 
     pub(super) fn m2_release_all_context(
@@ -733,7 +747,7 @@ mod scope_gate_tests {
         install_synthetic_notepad_input(&service)?;
 
         let error = match service.ensure_supported_use_allows_action("act_type") {
-            Ok(()) => anyhow::bail!("action tools must fail closed without an active profile"),
+            Ok(_) => anyhow::bail!("action tools must fail closed without an active profile"),
             Err(error) => error,
         };
 
@@ -763,7 +777,7 @@ mod scope_gate_tests {
 
         for tool in ACTION_WRITE_TOOLS {
             let error = match service.ensure_supported_use_allows_action(tool) {
-                Ok(()) => anyhow::bail!(
+                Ok(_) => anyhow::bail!(
                     "unknown scope must fail closed for {tool} without the explicit override"
                 ),
                 Err(error) => error,
@@ -1049,7 +1063,7 @@ mod scope_gate_tests {
 
         install_synthetic_process_input(&service, "unprofiled.exe", "Unprofiled App", 0x6789)?;
         let error = match service.ensure_supported_use_allows_action("act_press") {
-            Ok(()) => anyhow::bail!("unprofiled foreground must fail closed"),
+            Ok(_) => anyhow::bail!("unprofiled foreground must fail closed"),
             Err(error) => error,
         };
         assert_eq!(runtime.active_profile_id()?, None);
@@ -1083,7 +1097,7 @@ mod scope_gate_tests {
 
         install_synthetic_process_input(&service, "unknown.exe", "Unknown App", 0x4568)?;
         let error = match service.ensure_supported_use_allows_action("act_press") {
-            Ok(()) => anyhow::bail!("unknown-scope foreground must fail closed"),
+            Ok(_) => anyhow::bail!("unknown-scope foreground must fail closed"),
             Err(error) => error,
         };
         assert_eq!(runtime.active_profile_id()?.as_deref(), Some("unknown"));

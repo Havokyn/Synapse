@@ -131,6 +131,16 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 **Side effects:** keystroke synthesis (foreground check enforced)
 **Pre-call check:** `SynapseService::ensure_act_type_foreground` compares `M1State.last_observed_foreground.hwnd` against `synapse_a11y::current_foreground_context().hwnd`. Mismatch → `ACTION_FOREGROUND_LOST` with a structured warn (`M2_ACT_TYPE_FOREGROUND_LOST`).
 
+All foreground-gated action tools call the supported-use/action preflight
+before accepted dispatch. For `everquest.live`, preflight verifies or restores
+the configured `eqgame.exe` foreground window and stores an `action_preflight`
+object as `details.preflight` in `CF_ACTION_LOG` started rows with before/after
+foreground proof, including minimized/iconic state. A minimized EverQuest HWND
+is restored before accepted dispatch and is not considered verified until the
+post-refocus readback reports `is_minimized=false`. Denied rows that fail before
+dispatch include the same object as `error.data.action_preflight` when the
+preflight ran.
+
 | Parameter | Type | Required | Default | Range | Description |
 |---|---|---|---|---|---|
 | `text` | `String` | yes | — | — | UTF-8; surrogate pairs split via `KeystrokeEvent` lowering |
@@ -170,7 +180,7 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 | `backend` | `PressBackend` | no | `Auto` | `Software`/`Hardware`/`Auto` | |
 
 **Returns:** `ActKeymapResponse { ok, alias, resolved_binding, resolved_keys, hold_ms, keys_pressed, elapsed_ms, backend_used }`.
-**Errors:** `PROFILE_NOT_FOUND`, `PROFILE_KEYMAP_INVALID`, `TOOL_PARAMS_INVALID`, `ACTION_UNSUPPORTED_KEY`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, and supported-use foreground/policy denial errors. Action audit rows keep the requested alias plus result/error details so FSV can read the stored intent and resolved key/chord.
+**Errors:** `PROFILE_NOT_FOUND`, `PROFILE_KEYMAP_INVALID`, `TOOL_PARAMS_INVALID`, `ACTION_UNSUPPORTED_KEY`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, and supported-use foreground/policy denial errors. Action audit rows keep the requested alias plus result/error details so FSV can read the stored intent and resolved key/chord. For `everquest.live`, the started row must also carry `details.preflight.status` of `verified_foreground` or `refocused_and_verified` before an emitted action can be treated as an accepted foreground action.
 
 ## 9b. `everquest_loc_probe`
 

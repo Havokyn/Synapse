@@ -42,6 +42,12 @@ pub fn focus_window(_hwnd: i64) -> A11yResult<()> {
     ))
 }
 
+pub fn is_window_minimized(_hwnd: i64) -> A11yResult<bool> {
+    Err(A11yError::not_available(
+        "minimized window readback requires Windows",
+    ))
+}
+
 pub fn close_window(_hwnd: i64) -> A11yResult<()> {
     Err(A11yError::not_available("window close requires Windows"))
 }

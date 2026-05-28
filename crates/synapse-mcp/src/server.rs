@@ -107,6 +107,7 @@ use crate::{
 };
 
 mod action_audit;
+mod action_preflight;
 mod audit_context;
 mod context;
 mod everquest_log;

@@ -40,6 +40,16 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
     platform::focus_window(hwnd)
 }
 
+/// Returns whether a top-level native HWND is minimized/iconic.
+///
+/// # Errors
+///
+/// Returns a structured UIA error when the HWND is invalid, or
+/// `A11Y_NOT_AVAILABLE` on non-Windows platforms.
+pub fn is_window_minimized(hwnd: i64) -> A11yResult<bool> {
+    platform::is_window_minimized(hwnd)
+}
+
 /// Requests that a top-level native HWND close by posting `WM_CLOSE`.
 ///
 /// # Errors

@@ -141,12 +141,27 @@ latest actions, and hazards with source pointers and confidence. Manual FSV for
 the tool still requires an independent post-trigger storage readback; the
 returned readback is supporting evidence, not the only verdict.
 
+#517 adds the foreground-stabilization contract for accepted EverQuest action
+candidates. Before `act_press`, `act_keymap`, mouse, scroll, or pad input is
+emitted under the active `everquest.live` profile, the MCP action path reads
+the current foreground, verifies or restores the configured `eqgame.exe`
+window, then reads the foreground again. The readback includes whether the HWND
+is minimized; a minimized `eqgame.exe` is restored before accepted dispatch,
+and remains fail-closed if the post-refocus state is still minimized or
+unknown. The `CF_ACTION_LOG` started row stores the `details.preflight` proof
+with before/after HWND/process/path/title/minimized state, candidate count,
+focus attempt status, and final preflight state. If a non-EverQuest window
+remains foreground, if `eqgame.exe` is missing, if minimized state cannot be
+proved usable, or if Windows refuses a safe refocus/readback, the action fails
+closed and must not be counted as gameplay progress.
+
 Before claiming an alias effect, manually read the visible UI/log/storage SoT
 before the trigger, call the real MCP `act_keymap` tool while `eqgame.exe` is
 foreground, then separately read the visible UI/log/storage state again. The
 `CF_ACTION_LOG` row must show `tool=act_keymap`, requested alias, resolved
-binding/key list, backend, hold duration, foreground `eqgame.exe`, and the
-allow/deny/error status.
+binding/key list, backend, hold duration, foreground `eqgame.exe`,
+`details.preflight.status` (`verified_foreground` or `refocused_and_verified`
+for accepted actions), and the allow/deny/error status.
 
 ## Log Pipeline
 
@@ -296,7 +311,7 @@ Required edges:
 | Unsupported foreground | Focus a non-EverQuest window, then attempt an EverQuest action | Profile/action gate refuses or the action is not sent to EverQuest; no game state changes |
 | Menu/chat focused | Encounter or simulate pre-existing UI/menu/chat focus, then avoid movement/combat input until the state is read | Readback identifies non-world/action context; agent clears chat text without submitting it, proves the EQ log `You say` count did not change, and restores visible gameplay UI before action |
 | Invalid or empty action | Send an invalid/empty action request through MCP | Tool rejects input and action row/game state do not show unintended input |
-| Loss of game foreground | Alt-tab/minimize or verify another window foreground | `observe` no longer reports `everquest.live`; no level/progress claim is made |
+| Loss of game foreground | Alt-tab/minimize or verify another window foreground | Action preflight either restores and proves `eqgame.exe` before dispatch or fails closed with no gameplay-progress claim |
 
 No GitHub Actions/CI and no FSV scripts are allowed. Supporting local checks may
 be run only as supporting evidence.

@@ -14,8 +14,8 @@ use windows::{
         },
         UI::WindowsAndMessaging::{
             BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-            GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_RESTORE,
-            SetForegroundWindow, ShowWindow, WM_CLOSE,
+            GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SW_RESTORE, SW_SHOW,
+            SetForegroundWindow, ShowWindow, SwitchToThisWindow, WM_CLOSE,
         },
     },
     core::{BOOL, PWSTR},
@@ -63,7 +63,7 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
             detail: "HWND was null".to_owned(),
         });
     }
-    let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    restore_window_for_focus(hwnd);
     let _ = unsafe { SetForegroundWindow(hwnd) };
     if unsafe { GetForegroundWindow() }.0 == hwnd.0 {
         Ok(())
@@ -83,7 +83,9 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
             && target_thread != current_thread
             && unsafe { AttachThreadInput(current_thread, target_thread, true) }.as_bool();
 
+        restore_window_for_focus(hwnd);
         let _ = unsafe { BringWindowToTop(hwnd) };
+        unsafe { SwitchToThisWindow(hwnd, true) };
         let focused = unsafe { SetForegroundWindow(hwnd) }.as_bool()
             || unsafe { GetForegroundWindow() }.0 == hwnd.0;
 
@@ -103,6 +105,23 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
             )))
         }
     }
+}
+
+fn restore_window_for_focus(hwnd: HWND) {
+    let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+    }
+}
+
+pub fn is_window_minimized(hwnd: i64) -> A11yResult<bool> {
+    let hwnd = HWND(hwnd as *mut c_void);
+    if hwnd.0.is_null() {
+        return Err(A11yError::NoForeground {
+            detail: "HWND was null".to_owned(),
+        });
+    }
+    Ok(unsafe { IsIconic(hwnd) }.as_bool())
 }
 
 pub fn close_window(hwnd: i64) -> A11yResult<()> {

@@ -506,6 +506,14 @@ that reason and the readback requirement visible.
 
 Key name vocabulary: standard symbolic names (`a`..`z`, `0`..`9`, `f1`..`f24`, `up`, `down`, `enter`, `space`, `tab`, `esc`, `ctrl`, `shift`, `alt`, `super`, `lmb`, `rmb`, `mmb`, etc.). Per-game profile may extend (e.g., `medkit` → bound to whatever key is configured in that game).
 
+For foreground-only live profiles, `act_press` writes a `details.preflight`
+block into the action audit started row before dispatch. For `everquest.live`
+that block proves the active profile before the check, the before/after
+foreground HWND/process/path/title, whether the tool had to refocus
+`eqgame.exe`, whether the HWND was minimized, and the final preflight status.
+Missing, minimized-after-refocus, or mismatched EverQuest foreground fails
+closed before input is emitted.
+
 ### 3.13a `act_keymap`
 
 ```json
@@ -531,6 +539,11 @@ resolved binding/key list so manual FSV can read both the command intent and
 the physical input that was emitted. Unknown aliases, empty aliases, invalid
 bindings, unsupported foreground, and excessive holds fail closed and still
 write policy/error audit rows when the action gate is reached.
+
+The started row also includes the same `details.preflight` proof as `act_press`.
+For EverQuest manual FSV, denied non-EQ foreground rows must be treated as
+non-progress; only an ok row with verified `eqgame.exe` preflight plus a
+separate game/log/storage readback can support an action-effect claim.
 
 ### 3.13b `everquest_loc_probe`
 

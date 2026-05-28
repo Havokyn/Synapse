@@ -425,6 +425,29 @@ See `11_security_and_safety.md` for the full permission model.
 
 ---
 
+### 12.1 Foreground preflight for live profiles
+
+For foreground-only live profiles such as `everquest.live`, MCP action tools
+run a pre-dispatch foreground readback before accepted input is emitted. The
+preflight reads the current foreground HWND/process/path/title, compares it to
+the active profile target, reads whether the HWND is minimized, and, for
+EverQuest, may restore the visible `eqgame.exe` window through the local UIA
+`focus_window` path before reading the foreground again. A minimized EverQuest
+HWND is not accepted as verified foreground until the post-refocus readback
+shows the target path with `is_minimized=false`. If the configured EverQuest
+window is absent or cannot be verified after refocus, the action fails closed
+with `ACTION_TARGET_INVALID` or `ACTION_FOREGROUND_LOST` and no input is
+dispatched.
+
+`CF_ACTION_LOG` started rows carry `details.preflight`, and denied/error rows
+carry `error.data.action_preflight` when the preflight ran. The object records
+active profile before the check, before/after foreground HWNDs, target process
+path, minimized state, candidate count, focus attempt result, and final status.
+Manual FSV must read that row plus the visible/process/log SoT; a successful
+tool return alone is not proof of gameplay progress.
+
+---
+
 ## 13. Click-on-element semantics
 
 Common agent pattern: "click the Save button." Two resolution layers:
