@@ -10,8 +10,9 @@
    six local profile-authoring candidate tools, and #468 adds the read-only
    registry/audit inspector, #499 adds a profile-keymap action alias tool,
    #508 adds the narrow EverQuest `/loc` probe, #510 adds the compact
-   EverQuest current-state estimator, and #531 adds EverQuest action-prior
-   sample/scorecard tools, bringing the live surface to 56. Any
+   EverQuest current-state estimator, #526 adds compact EverQuest outcome
+   ingest, and #531 adds EverQuest action-prior sample/scorecard tools,
+   bringing the live surface to 57. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -24,8 +25,9 @@
 The first 30 tools below are the live M3 baseline. #499 adds `act_keymap` as a
 profile-keymap action alias, #508 adds `everquest_loc_probe` as a literal
 EverQuest `/loc` readback tool, #510 adds `everquest_current_state` as the
-compact world-state row writer/readback tool, and #531 adds
-`everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
+compact world-state row writer/readback tool, #526 adds
+`everquest_outcome_ingest`, and #531 adds `everquest_action_prior_record` plus
+`everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
 consented redacted audit export bundles.
@@ -96,14 +98,17 @@ future `tools/list` snapshots in #447/#448.
 | 54 | `everquest_current_state` | write/read | fuses foreground, EQ log, map, HUD, and action audit into a compact `CF_KV` row and reads it back |
 | 55 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
 | 56 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 57 | `everquest_outcome_ingest` | write/read | parses bounded EQ log bytes into compact redacted outcome rows with offset/hash readback |
 
-M3 live count: 30 tools. Current live count: 56
+M3 live count: 30 tools. Current live count: 57
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
 live M3/M4 agent-facing tools. `act_keymap` is the #499 profile-keymap alias
 addition; `everquest_loc_probe` is the #508 literal `/loc` readback tool;
 `everquest_current_state` is the #510 current-state row writer/readback tool;
+`everquest_outcome_ingest` is the #526 compact outcome row writer/readback
+tool;
 `everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
 #531 competence scorecard tools;
 `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase plan
@@ -610,7 +615,45 @@ before the trigger, call the real MCP tool, then separately read the
 The returned row readback is useful evidence, but it does not replace the
 separate source-of-truth read after the trigger.
 
-### 3.13d `everquest_action_prior_record`
+### 3.13d `everquest_outcome_ingest`
+
+```json
+{
+  "name": "everquest_outcome_ingest",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "start_offset": {"type": "integer", "minimum": 0},
+      "max_bytes": {"type": "integer", "minimum": 1, "default": 65536},
+      "max_events": {"type": "integer", "minimum": 1, "default": 64},
+      "log_path": {"type": "string"},
+      "allow_explicit_log_path": {"type": "boolean", "default": false},
+      "persist_unknown": {"type": "boolean", "default": true}
+    }
+  }
+}
+```
+
+`everquest_outcome_ingest` reads bounded EverQuest log bytes from the active
+`everquest.live` log or an explicitly approved `eqlog_<character>_<server>.txt`
+path, parses compact outcome events, and writes deterministic rows under
+`CF_KV/everquest/outcome_event/v1/everquest.live/<offset>-<hash>`. Rows include
+source path, byte offsets, line index in the read window, timestamp text, parsed
+timestamp where available, SHA-256 of the source line, compact outcome kind,
+confidence, and redaction evidence.
+
+The compact taxonomy covers combat damage dealt/taken, spell begin/hit/fizzle
+or resist, XP/level, death/respawn, loot, rest/sit, target/consider,
+zone/location, hazard signals, chat-redacted lines, ambiguous combat, and
+explicit timestamp diagnostics. Raw chat bodies are never persisted.
+
+Manual FSV must read the physical log bytes before the trigger, call this real
+MCP tool, then separately read `CF_KV` through storage readback and verify the
+row offsets, hashes, kinds, and redaction flags.
+
+### 3.13e `everquest_action_prior_record`
 
 ```json
 {
@@ -669,7 +712,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13e `everquest_action_prior_scorecard`
+### 3.13f `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -1939,6 +1982,13 @@ profile-authoring and audit-export defaults below.
 | `audit_export_bundle` | `redaction_policy` | runtime-required; omitted by schema | M5 issue #460 |
 | `audit_export_bundle` | `max_rows` | `100` | M5 issue #460 |
 | `audit_export_bundle` | `max_row_bytes` | `65536` | M5 issue #460 |
+| `everquest_outcome_ingest` | `profile_id` | `"everquest.live"` | #526 |
+| `everquest_outcome_ingest` | `start_offset` | omitted; tails bounded recent bytes | #526 |
+| `everquest_outcome_ingest` | `max_bytes` | `65536` | #526 |
+| `everquest_outcome_ingest` | `max_events` | `64` | #526 |
+| `everquest_outcome_ingest` | `log_path` | omitted; active EQ log | #526 |
+| `everquest_outcome_ingest` | `allow_explicit_log_path` | `false` | #526 |
+| `everquest_outcome_ingest` | `persist_unknown` | `true` | #526 |
 | `everquest_action_prior_record` | `sample_id` | required; no default | #531 |
 | `everquest_action_prior_record` | `profile_id` | `"everquest.live"` | #531 |
 | `everquest_action_prior_record` | `prediction_id` | required; no default | #531 |

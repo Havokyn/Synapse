@@ -3,9 +3,10 @@ pub mod map;
 pub mod zone_graph;
 
 pub use log::{
-    EverQuestLocation, EverQuestLogError, EverQuestLogEvent, EverQuestLogFile,
-    EverQuestLogIdentity, EverQuestLogKind, EverQuestLogTailBatch, discover_log_files,
-    parse_log_file_name, parse_log_line, tail_log,
+    EverQuestCompactOutcome, EverQuestLocation, EverQuestLogError, EverQuestLogEvent,
+    EverQuestLogFile, EverQuestLogIdentity, EverQuestLogKind, EverQuestLogTailBatch,
+    EverQuestOutcomeKind, discover_log_files, parse_log_file_name, parse_log_line,
+    parse_outcome_line, tail_log,
 };
 pub use map::{
     DEFAULT_MAX_MAP_FILE_BYTES, EverQuestMapColor, EverQuestMapCoord, EverQuestMapError,

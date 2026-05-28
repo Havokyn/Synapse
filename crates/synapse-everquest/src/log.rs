@@ -7,6 +7,7 @@ use std::{
 
 use chrono::NaiveDateTime;
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -62,7 +63,7 @@ pub enum EverQuestLogKind {
     Other,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EverQuestLocation {
     pub display_y: f64,
     pub display_x: f64,
@@ -94,6 +95,65 @@ pub struct EverQuestLogTailBatch {
     pub truncated_by_bytes: bool,
     pub truncated_by_events: bool,
     pub events: Vec<EverQuestLogEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EverQuestOutcomeKind {
+    CombatDamageDealt,
+    CombatDamageTaken,
+    SpellBegins,
+    SpellHit,
+    SpellFizzle,
+    SpellResist,
+    XpGain,
+    LevelUp,
+    Death,
+    Respawn,
+    Loot,
+    RestSit,
+    TargetNpc,
+    TargetPlayer,
+    TargetCleared,
+    Consider,
+    ZoneEntered,
+    Location,
+    HazardSignal,
+    ChatRedacted,
+    AmbiguousCombat,
+    Unknown,
+    DiagnosticMalformedTimestamp,
+    DiagnosticMissingTimestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EverQuestCompactOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<NaiveDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_text: Option<String>,
+    pub kind: EverQuestOutcomeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<EverQuestLocation>,
+    pub summary: String,
+    pub redacted: bool,
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
 }
 
 #[must_use]
@@ -190,6 +250,37 @@ pub fn parse_log_line(line: &str) -> Result<Option<EverQuestLogEvent>, EverQuest
         return parse_zone_entered_message(timestamp, message).map(Some);
     }
     Ok(Some(classify_event(timestamp, message)))
+}
+
+#[must_use]
+pub fn parse_outcome_line(line: &str) -> EverQuestCompactOutcome {
+    let Some(captures) = line_regex().captures(line) else {
+        return diagnostic_outcome(
+            EverQuestOutcomeKind::DiagnosticMissingTimestamp,
+            None,
+            "missing_timestamp",
+            "line did not match EverQuest timestamp format",
+        );
+    };
+    let timestamp_text = captures
+        .name("timestamp")
+        .map(|value| value.as_str())
+        .unwrap_or_default();
+    let message = captures
+        .name("message")
+        .map(|value| value.as_str())
+        .unwrap_or_default()
+        .trim();
+    let Ok(timestamp) = NaiveDateTime::parse_from_str(timestamp_text, "%a %b %d %H:%M:%S %Y")
+    else {
+        return diagnostic_outcome(
+            EverQuestOutcomeKind::DiagnosticMalformedTimestamp,
+            Some(timestamp_text),
+            "malformed_timestamp",
+            "timestamp did not parse",
+        );
+    };
+    classify_outcome(timestamp, timestamp_text, message)
 }
 
 /// Reads new `EverQuest` log bytes from a cursor and returns compact events.
@@ -294,6 +385,376 @@ fn classify_event(timestamp: NaiveDateTime, message: &str) -> EverQuestLogEvent 
         None,
         compact_text(message),
     )
+}
+
+fn classify_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    message: &str,
+) -> EverQuestCompactOutcome {
+    if let Some(outcome) = classify_damage_outcome(timestamp, timestamp_text, message) {
+        return outcome;
+    }
+    if let Some(outcome) = classify_spell_outcome(timestamp, timestamp_text, message) {
+        return outcome;
+    }
+    if let Some(outcome) = classify_progress_outcome(timestamp, timestamp_text, message) {
+        return outcome;
+    }
+    if let Some(outcome) = classify_rest_loot_death_outcome(timestamp, timestamp_text, message) {
+        return outcome;
+    }
+    match parse_log_line(&format!("[{timestamp_text}] {message}")) {
+        Ok(Some(event)) => outcome_from_log_event(event, timestamp_text),
+        Ok(None) => unknown_outcome(timestamp, timestamp_text, "unclassified log line"),
+        Err(error) => diagnostic_outcome(
+            EverQuestOutcomeKind::Unknown,
+            Some(timestamp_text),
+            "parse_error",
+            format!("log parser rejected line: {error}"),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn classify_damage_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    message: &str,
+) -> Option<EverQuestCompactOutcome> {
+    if let Some(captures) = dot_damage_regex().captures(message) {
+        let actor = captures.name("actor").map(|value| value.as_str());
+        let spell = captures.name("spell").map(|value| value.as_str());
+        let amount = captures
+            .name("amount")
+            .and_then(|value| value.as_str().parse::<u32>().ok());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            if actor.is_some_and(|actor| actor.eq_ignore_ascii_case("you")) {
+                EverQuestOutcomeKind::CombatDamageTaken
+            } else {
+                EverQuestOutcomeKind::HazardSignal
+            },
+            actor,
+            None,
+            spell,
+            None,
+            amount,
+            None,
+            None,
+            None,
+            format!(
+                "{} took {} damage by {}",
+                compact_text(actor.unwrap_or("unknown")),
+                amount.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                compact_text(spell.unwrap_or("unknown"))
+            ),
+            false,
+            0.8,
+            None,
+        ));
+    }
+    if let Some(captures) = damage_taken_regex().captures(message) {
+        let actor = captures.name("actor").map(|value| value.as_str());
+        let amount = captures
+            .name("amount")
+            .and_then(|value| value.as_str().parse::<u32>().ok());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::CombatDamageTaken,
+            actor,
+            Some("you"),
+            None,
+            None,
+            amount,
+            None,
+            None,
+            None,
+            format!(
+                "{} hit you for {} damage",
+                compact_text(actor.unwrap_or("unknown")),
+                amount.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+            ),
+            false,
+            0.85,
+            None,
+        ));
+    }
+    if let Some(captures) = damage_dealt_regex().captures(message) {
+        let target = captures.name("target").map(|value| value.as_str());
+        let amount = captures
+            .name("amount")
+            .and_then(|value| value.as_str().parse::<u32>().ok());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::CombatDamageDealt,
+            Some("you"),
+            target,
+            None,
+            None,
+            amount,
+            None,
+            None,
+            None,
+            format!(
+                "you hit {} for {} damage",
+                compact_text(target.unwrap_or("unknown")),
+                amount.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+            ),
+            false,
+            0.85,
+            None,
+        ));
+    }
+    if message.contains("damage") || message.contains(" hits ") || message.contains(" hit ") {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::AmbiguousCombat,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "ambiguous combat line",
+            true,
+            0.25,
+            Some("ambiguous_combat"),
+        ));
+    }
+    None
+}
+
+fn classify_spell_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    message: &str,
+) -> Option<EverQuestCompactOutcome> {
+    if let Some(captures) = spell_hit_regex().captures(message) {
+        let spell = captures.name("spell").map(|value| value.as_str());
+        let target = captures.name("target").map(|value| value.as_str());
+        let amount = captures
+            .name("amount")
+            .and_then(|value| value.as_str().parse::<u32>().ok());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::SpellHit,
+            Some("you"),
+            target,
+            spell,
+            None,
+            amount,
+            None,
+            None,
+            None,
+            format!(
+                "{} hit {} for {} damage",
+                compact_text(spell.unwrap_or("spell")),
+                compact_text(target.unwrap_or("unknown")),
+                amount.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+            ),
+            false,
+            0.85,
+            None,
+        ));
+    }
+    if message == "Your spell fizzles!" {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::SpellFizzle,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "your spell fizzled",
+            false,
+            0.95,
+            None,
+        ));
+    }
+    if message.to_ascii_lowercase().contains("resist")
+        && message.to_ascii_lowercase().contains("spell")
+    {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::SpellResist,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "spell resisted",
+            true,
+            0.65,
+            Some("spell_resist_unparsed"),
+        ));
+    }
+    None
+}
+
+fn classify_progress_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    message: &str,
+) -> Option<EverQuestCompactOutcome> {
+    if xp_gain_regex().is_match(message) {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::XpGain,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "experience gained",
+            false,
+            0.9,
+            None,
+        ));
+    }
+    if let Some(captures) = level_up_regex().captures(message) {
+        let level = captures
+            .name("level")
+            .and_then(|value| value.as_str().parse::<u32>().ok());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::LevelUp,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            level,
+            None,
+            None,
+            format!(
+                "level up to {}",
+                level.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+            ),
+            false,
+            0.95,
+            None,
+        ));
+    }
+    None
+}
+
+fn classify_rest_loot_death_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    message: &str,
+) -> Option<EverQuestCompactOutcome> {
+    if let Some(captures) = death_regex().captures(message) {
+        let actor = captures.name("actor").map(|value| value.as_str());
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::Death,
+            Some("you"),
+            actor,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            format!(
+                "you were slain by {}",
+                compact_text(actor.unwrap_or("unknown"))
+            ),
+            false,
+            0.95,
+            None,
+        ));
+    }
+    if message.starts_with("LOADING, PLEASE WAIT")
+        || message.starts_with("You regain consciousness")
+    {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::Respawn,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "respawn or loading transition",
+            true,
+            0.55,
+            Some("respawn_or_loading"),
+        ));
+    }
+    if message == "You sit down."
+        || message == "You begin to meditate."
+        || message == "You stand up."
+    {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::RestSit,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            if message == "You stand up." {
+                "you stood"
+            } else {
+                "you rested"
+            },
+            false,
+            0.9,
+            None,
+        ));
+    }
+    if message.starts_with("You receive ") || message.starts_with("You have looted ") {
+        return Some(outcome(
+            timestamp,
+            timestamp_text,
+            EverQuestOutcomeKind::Loot,
+            Some("you"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "loot received",
+            true,
+            0.65,
+            Some("loot_name_redacted"),
+        ));
+    }
+    None
 }
 
 fn parse_location_message(
@@ -561,6 +1022,153 @@ fn event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    kind: EverQuestOutcomeKind,
+    actor: Option<&str>,
+    target: Option<&str>,
+    spell: Option<&str>,
+    channel: Option<&str>,
+    amount: Option<u32>,
+    level: Option<u32>,
+    zone: Option<&str>,
+    location: Option<EverQuestLocation>,
+    summary: impl Into<String>,
+    redacted: bool,
+    confidence: f32,
+    diagnostic_code: Option<&str>,
+) -> EverQuestCompactOutcome {
+    EverQuestCompactOutcome {
+        timestamp: Some(timestamp),
+        timestamp_text: Some(timestamp_text.to_owned()),
+        kind,
+        actor: actor.map(compact_text),
+        target: target.map(compact_text),
+        spell: spell.map(compact_text),
+        channel: channel.map(compact_text),
+        amount,
+        level,
+        zone: zone.map(compact_text),
+        location,
+        summary: summary.into(),
+        redacted,
+        confidence,
+        diagnostic_code: diagnostic_code.map(ToOwned::to_owned),
+    }
+}
+
+fn diagnostic_outcome(
+    kind: EverQuestOutcomeKind,
+    timestamp_text: Option<&str>,
+    code: &str,
+    summary: impl Into<String>,
+) -> EverQuestCompactOutcome {
+    EverQuestCompactOutcome {
+        timestamp: None,
+        timestamp_text: timestamp_text.map(ToOwned::to_owned),
+        kind,
+        actor: None,
+        target: None,
+        spell: None,
+        channel: None,
+        amount: None,
+        level: None,
+        zone: None,
+        location: None,
+        summary: summary.into(),
+        redacted: true,
+        confidence: 0.0,
+        diagnostic_code: Some(code.to_owned()),
+    }
+}
+
+fn unknown_outcome(
+    timestamp: NaiveDateTime,
+    timestamp_text: &str,
+    summary: impl Into<String>,
+) -> EverQuestCompactOutcome {
+    outcome(
+        timestamp,
+        timestamp_text,
+        EverQuestOutcomeKind::Unknown,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        summary,
+        true,
+        0.1,
+        Some("unknown"),
+    )
+}
+
+fn outcome_from_log_event(
+    event: EverQuestLogEvent,
+    timestamp_text: &str,
+) -> EverQuestCompactOutcome {
+    let kind = match event.kind {
+        EverQuestLogKind::Location => EverQuestOutcomeKind::Location,
+        EverQuestLogKind::ZoneEntered => EverQuestOutcomeKind::ZoneEntered,
+        EverQuestLogKind::TargetNpc => EverQuestOutcomeKind::TargetNpc,
+        EverQuestLogKind::TargetPlayer => EverQuestOutcomeKind::TargetPlayer,
+        EverQuestLogKind::TargetCleared => EverQuestOutcomeKind::TargetCleared,
+        EverQuestLogKind::Consider => EverQuestOutcomeKind::Consider,
+        EverQuestLogKind::CastBegins => EverQuestOutcomeKind::SpellBegins,
+        EverQuestLogKind::Say | EverQuestLogKind::Tell => EverQuestOutcomeKind::ChatRedacted,
+        EverQuestLogKind::LoggingEnabled
+        | EverQuestLogKind::CastResult
+        | EverQuestLogKind::System
+        | EverQuestLogKind::Other => EverQuestOutcomeKind::Unknown,
+    };
+    let redacted = matches!(
+        &kind,
+        EverQuestOutcomeKind::ChatRedacted | EverQuestOutcomeKind::Unknown
+    );
+    let summary = if redacted && matches!(&kind, EverQuestOutcomeKind::ChatRedacted) {
+        format!(
+            "chat {}{}",
+            event.channel.as_deref().map_or_else(
+                || "message".to_owned(),
+                |channel| format!("on {}", compact_text(channel))
+            ),
+            event
+                .actor
+                .as_deref()
+                .map_or(String::new(), |actor| format!(
+                    " from {}",
+                    compact_text(actor)
+                ))
+        )
+    } else if redacted {
+        "unclassified log line".to_owned()
+    } else {
+        event.summary.clone()
+    };
+    EverQuestCompactOutcome {
+        timestamp: Some(event.timestamp),
+        timestamp_text: Some(timestamp_text.to_owned()),
+        kind,
+        actor: event.actor.map(|value| compact_text(&value)),
+        target: event.target.map(|value| compact_text(&value)),
+        spell: None,
+        channel: event.channel.map(|value| compact_text(&value)),
+        amount: None,
+        level: event.level,
+        zone: event.zone.map(|value| compact_text(&value)),
+        location: event.location,
+        summary,
+        redacted,
+        confidence: if redacted { 0.35 } else { 0.9 },
+        diagnostic_code: redacted.then(|| "body_redacted_or_unclassified".to_owned()),
+    }
+}
+
 const fn location_prefix() -> &'static str {
     "Your Location is"
 }
@@ -624,6 +1232,62 @@ fn tells_regex() -> &'static Regex {
     REGEX.get_or_init(|| {
         Regex::new(r"^(?P<actor>.+) tells (?P<channel>[^,]+), '.*'$")
             .unwrap_or_else(|error| panic!("EverQuest tell regex invalid: {error}"))
+    })
+}
+
+fn damage_dealt_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^You (?:hit|slash|crush|pierce|kick|bash) (?P<target>.+) for (?P<amount>[0-9]+) points? of damage\.$")
+            .unwrap_or_else(|error| panic!("EverQuest damage-dealt regex invalid: {error}"))
+    })
+}
+
+fn damage_taken_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^(?P<actor>.+) (?:hits|hit|slashes|slash|crushes|crush|pierces|pierce|bites|bite|claws|claw|kicks|kick|bashes|bash) YOU for (?P<amount>[0-9]+) points? of damage\.$")
+            .unwrap_or_else(|error| panic!("EverQuest damage-taken regex invalid: {error}"))
+    })
+}
+
+fn dot_damage_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^(?P<actor>.+) has taken (?P<amount>[0-9]+) damage by (?P<spell>.+)\.$")
+            .unwrap_or_else(|error| panic!("EverQuest dot-damage regex invalid: {error}"))
+    })
+}
+
+fn spell_hit_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^Your (?P<spell>.+) (?:hits|hit) (?P<target>.+) for (?P<amount>[0-9]+) points? of .*damage\.$")
+            .unwrap_or_else(|error| panic!("EverQuest spell-hit regex invalid: {error}"))
+    })
+}
+
+fn xp_gain_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^You gain(?:ed)?(?: party)? experience!+$")
+            .unwrap_or_else(|error| panic!("EverQuest xp regex invalid: {error}"))
+    })
+}
+
+fn level_up_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^You have gained a level! Welcome to level (?P<level>[0-9]+)!$")
+            .unwrap_or_else(|error| panic!("EverQuest level-up regex invalid: {error}"))
+    })
+}
+
+fn death_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^You have been slain by (?P<actor>.+)!$")
+            .unwrap_or_else(|error| panic!("EverQuest death regex invalid: {error}"))
     })
 }
 
@@ -715,5 +1379,51 @@ mod tests {
         assert_eq!(event.actor.as_deref(), Some("You"));
         assert_eq!(event.summary, "You says");
         Ok(())
+    }
+
+    #[test]
+    fn compact_outcome_classifies_damage_and_hazard() {
+        let outcome = parse_outcome_line(
+            "[Thu May 28 15:55:58 2026] Kimmuriel has taken 1 damage by Rabies.",
+        );
+        assert_eq!(outcome.kind, EverQuestOutcomeKind::HazardSignal);
+        assert_eq!(outcome.actor.as_deref(), Some("Kimmuriel"));
+        assert_eq!(outcome.spell.as_deref(), Some("Rabies"));
+        assert_eq!(outcome.amount, Some(1));
+        assert!(!outcome.redacted);
+    }
+
+    #[test]
+    fn compact_outcome_redacts_chat_body() {
+        let outcome = parse_outcome_line(
+            "[Thu May 28 15:52:42 2026] Donafu tells NewPlayers3:1, 'thats me. ill be tanking the floor'",
+        );
+        assert_eq!(outcome.kind, EverQuestOutcomeKind::ChatRedacted);
+        assert_eq!(outcome.actor.as_deref(), Some("Donafu"));
+        assert_eq!(outcome.channel.as_deref(), Some("NewPlayers3:1"));
+        assert!(outcome.redacted);
+        assert!(!outcome.summary.contains("tanking"));
+    }
+
+    #[test]
+    fn compact_outcome_malformed_timestamp_becomes_diagnostic() {
+        let outcome = parse_outcome_line("[Bad Time] You gain experience!!");
+        assert_eq!(
+            outcome.kind,
+            EverQuestOutcomeKind::DiagnosticMalformedTimestamp
+        );
+        assert_eq!(
+            outcome.diagnostic_code.as_deref(),
+            Some("malformed_timestamp")
+        );
+        assert!(outcome.redacted);
+    }
+
+    #[test]
+    fn compact_outcome_ambiguous_combat_fails_to_low_confidence() {
+        let outcome = parse_outcome_line("[Thu May 28 11:00:00 2026] Something hits for damage.");
+        assert_eq!(outcome.kind, EverQuestOutcomeKind::AmbiguousCombat);
+        assert!(outcome.confidence < 0.5);
+        assert_eq!(outcome.diagnostic_code.as_deref(), Some("ambiguous_combat"));
     }
 }

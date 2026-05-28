@@ -4153,13 +4153,14 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_tools.rs`
 - `crates/synapse-mcp/src/server/everquest_log.rs`
 - `crates/synapse-mcp/src/server/everquest_state.rs`
+- `crates/synapse-mcp/src/server/everquest_outcome.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 56 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 57 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4359,7 +4360,27 @@ Manual FSV must read the physical EQ log byte offset, location count, and `You s
 
 Manual FSV must read the EQ log/config/map files and foreground state before the trigger, call the real MCP tool, then independently read `CF_KV/everquest/current_state/v1/everquest.live` through storage readback. The tool's internal row readback is supporting evidence, not the separate manual source-of-truth read required for shipping.
 
-## 9d. `everquest_action_prior_record`
+## 9d. `everquest_outcome_ingest`
+
+**Description:** "Parse active or explicit EverQuest log bytes into compact redacted outcome rows and persist them in CF_KV with offset/hash readback"
+**Side effects:** reads bounded bytes from the active EverQuest log, or an explicit approved `eqlog_<character>_<server>.txt` path, writes deterministic `CF_KV/everquest/outcome_event/v1/everquest.live/<offset>-<hash>` rows, then reads those rows back before returning.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `start_offset` | `Option<u64>` | no | recent bounded tail | Source byte offset |
+| `max_bytes` | `usize` | no | `65536` | Bounded read size; max `524288` |
+| `max_events` | `usize` | no | `64` | Bounded row count; max `256` |
+| `log_path` | `Option<String>` | no | active EQ log | Explicit physical log path |
+| `allow_explicit_log_path` | `bool` | no | `false` | Must be true when `log_path` is set |
+| `persist_unknown` | `bool` | no | `true` | Keeps unknown/diagnostic rows instead of silently dropping them |
+
+**Returns:** `EverQuestOutcomeIngestResponse { ok, row_prefix, source, rows_read, rows_persisted, duplicate_rows, skipped_unknown_rows, truncated_by_bytes, truncated_by_events, rows }`. Each row includes source path, byte offsets, line index in the read window, timestamp text, parsed timestamp when present, SHA-256 of the source line, compact outcome kind, confidence, diagnostic code, and redaction evidence. Raw chat bodies are never persisted.
+**Errors:** `TOOL_PARAMS_INVALID`, `ACTION_TARGET_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV must read the physical log bytes before the trigger, call the real MCP tool, then separately inspect durable `CF_KV` rows afterward for offsets, hashes, outcome kinds, duplicate markers, and redaction flags.
+
+## 9e. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -4379,7 +4400,7 @@ Manual FSV must read the EQ log/config/map files and foreground state before the
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9e. `everquest_action_prior_scorecard`
+## 9f. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

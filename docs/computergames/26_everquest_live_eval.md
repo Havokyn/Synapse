@@ -200,6 +200,27 @@ than loading full raw logs into the model context. Its durable row is
 world-model context injection, surprise detection, and scorecards should read
 that row or derived storage rows instead of rereading unbounded log text.
 
+## Compact Outcome Rows
+
+#526 adds `everquest_outcome_ingest`, the runtime storage surface for compact,
+redacted EverQuest log outcomes. The tool reads bounded log bytes from the
+active `everquest.live` log or an explicitly approved
+`eqlog_<character>_<server>.txt` file, then writes deterministic rows under
+`CF_KV/everquest/outcome_event/v1/everquest.live/<offset>-<hash>`.
+
+Each row stores source path, byte offsets, line index in the read window,
+timestamp text, parsed timestamp when available, source-line SHA-256, compact
+outcome kind, confidence, diagnostic code, and redaction evidence. The taxonomy
+covers combat damage dealt/taken, spell begin/hit/fizzle/resist, XP/level,
+death/respawn, loot, rest/sit, target/consider, zone/location, hazard signals,
+chat-redacted lines, ambiguous combat, unknowns, and malformed/missing timestamp
+diagnostics. Raw chat bodies are never persisted.
+
+These rows feed trajectories, surprise detection, hazard/safe-area memory,
+planner guards, and scorecards without replaying stale raw log text into model
+context. Manual FSV still reads physical log bytes before the trigger, invokes
+the real MCP tool, and separately reads the persisted `CF_KV` rows afterward.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world
