@@ -109,6 +109,17 @@ operator-approved feature explicitly needs them. Runtime integration should feed
 these compact events into `observe`, event streams, profile quality, and audit
 storage without dumping full raw logs into the model context.
 
+The MCP runtime log feed is exposed through `observe(include=["events"])` when
+the foreground profile resolves to `everquest.live`. The first observation for
+a newly discovered log initializes the cursor at the current end of file and
+reports `everquest.log_cursor_initialized` so old log content is not replayed.
+Subsequent observations report `everquest.log_cursor` plus compact
+`everquest.log.*` summaries for new bytes. Disabled logging (`Log=0`), missing
+`Logs` directories, malformed timestamp lines, and cursor offsets beyond the
+current file length fail closed as explicit filesystem events or diagnostics;
+they are not silent fallbacks. Chat-like events must carry actor/channel/summary
+metadata only and mark the body redacted by default.
+
 ## GitHub Issue Map
 
 GitHub issues remain the canonical coordination state:

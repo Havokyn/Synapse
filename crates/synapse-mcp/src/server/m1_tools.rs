@@ -55,6 +55,9 @@ impl SynapseService {
 
         let include = observe_include(&params.0);
         self.resolve_input_profile_and_hud(&mut input, include.hud);
+        if include.events {
+            self.populate_everquest_log_events(&mut input);
+        }
         let observation = ObservationAssembler::new()
             .assemble(include, input)
             .map_err(|err| mcp_error(err.code(), err.to_string()))?;

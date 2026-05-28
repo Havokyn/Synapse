@@ -3632,6 +3632,7 @@ dependencies = [
  "synapse-audio",
  "synapse-capture",
  "synapse-core",
+ "synapse-everquest",
  "synapse-hid-host",
  "synapse-perception",
  "synapse-profiles",

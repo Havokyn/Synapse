@@ -108,6 +108,7 @@ use crate::{
 mod action_audit;
 mod audit_context;
 mod context;
+mod everquest_log;
 mod handler;
 mod health;
 mod m1_tools;

@@ -2,7 +2,10 @@ mod ocr;
 mod search;
 mod sources;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use rmcp::{ErrorData, handler::server::common, model::JsonObject, schemars::JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,8 @@ pub struct M1State {
     pub force_no_perception: bool,
     pub force_observe_internal: bool,
     pub last_observed_foreground: Option<ForegroundContext>,
+    pub everquest_log_cursor: Option<EverQuestLogCursorState>,
+    pub everquest_event_seq: u64,
 }
 
 impl M1State {
@@ -47,8 +52,16 @@ impl M1State {
             force_no_perception,
             force_observe_internal,
             last_observed_foreground: None,
+            everquest_log_cursor: None,
+            everquest_event_seq: 0,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EverQuestLogCursorState {
+    pub path: PathBuf,
+    pub offset: u64,
 }
 
 impl Default for M1State {
