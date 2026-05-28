@@ -732,11 +732,11 @@ code exists; it is done only when the issue is closed with manual FSV evidence.
 
 | Issue | State | Work item |
 |---|---|---|
-| #430 | open | H-01 `action_hardware_press` p99 <= 5 ms. |
-| #431 | open | H-02 `hid_combo_timing` step interval within 0.5 ms. |
-| #432 | open | H-03 `hid_high_volume`, 10k mouse moves no drops. |
-| #433 | open | H-04 HID protocol parser fuzz target as supporting evidence. |
-| #434 | open | H-05 one-hour hardware reconnect soak, unplug/replug x100. |
+| #430 | blocked | H-01 `action_hardware_press` p99 <= 5 ms; waits on physical RP2040 attach per #487. |
+| #431 | blocked | H-02 `hid_combo_timing` step interval within 0.5 ms; waits on physical RP2040 attach per #487. |
+| #432 | blocked | H-03 `hid_high_volume`, 10k mouse moves no drops; waits on physical RP2040 attach per #487. |
+| #433 | closed | H-04 HID protocol parser fuzz target as supporting evidence. |
+| #434 | blocked | H-05 one-hour hardware reconnect soak, unplug/replug x100; waits on physical RP2040 attach per #487. |
 | #435 | open | H-06 M4 manual happy-path and edge-case test plan. |
 | #436 | open | H-07 HID error codes in `synapse-core::error_codes`. |
 | #437 | open | H-08 PRD 09 stale-claim sweep. |

@@ -1,0 +1,20 @@
+[package]
+name = "synapse-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pico-hid = { path = "../firmware/pico-hid", default-features = false }
+synapse-hid-host = { path = "../crates/synapse-hid-host" }
+
+[[bin]]
+name = "hid_protocol_parser"
+path = "fuzz_targets/hid_protocol_parser.rs"
+test = false
+doc = false
+bench = false

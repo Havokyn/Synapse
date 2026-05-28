@@ -36,5 +36,11 @@ tracing-*.log
 # Criterion/critcmp benchmark exports are regenerated and stored off-tree.
 /bench_results/
 
+# cargo-fuzz generated outputs; commit harnesses and locks, not run products.
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus/
+/fuzz/target/
+
 # Playwright MCP session artifacts (console logs, page snapshots).
 .playwright-mcp/

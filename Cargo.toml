@@ -18,7 +18,7 @@ members = [
     "crates/synapse-overlay",
 ]
 default-members = ["crates/synapse-mcp", "crates/synapse-overlay"]
-exclude = ["firmware/pico-hid"]
+exclude = ["firmware/pico-hid", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
