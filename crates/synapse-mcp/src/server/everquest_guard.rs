@@ -504,20 +504,7 @@ fn planner_guard_results(
             source_state.zone_short_name, source_state.zone_confidence
         ),
     );
-    push_guard(
-        &mut guards,
-        "level_known",
-        candidate_requires_level(&params.candidate.candidate_kind)
-            .then_some(())
-            .is_none()
-            || source_state.level.is_some()
-                && source_state.level_confidence >= MIN_STATE_CONFIDENCE,
-        "critical",
-        format!(
-            "level={:?} confidence={:.3}",
-            source_state.level, source_state.level_confidence
-        ),
-    );
+    push_level_guard(&mut guards, &params.candidate.candidate_kind, source_state);
     push_guard(
         &mut guards,
         "location_known_for_movement",
@@ -645,6 +632,40 @@ fn add_candidate_specific_guards(
             add_combat_readiness_guards(guards, params.combat_readiness.as_ref());
         }
     }
+}
+
+fn push_level_guard(
+    guards: &mut Vec<EverQuestPlannerGuardResult>,
+    candidate_kind: &EverQuestPlannerCandidateKind,
+    source_state: &EverQuestPlannerGuardStateReadback,
+) {
+    let reason = format!(
+        "candidate={candidate_kind:?} level={:?} confidence={:.3}",
+        source_state.level, source_state.level_confidence
+    );
+    if !candidate_requires_level(candidate_kind) {
+        push_guard(
+            guards,
+            "level_not_required_for_candidate",
+            true,
+            "info",
+            reason,
+        );
+        return;
+    }
+    let level_known =
+        source_state.level.is_some() && source_state.level_confidence >= MIN_STATE_CONFIDENCE;
+    push_guard(
+        guards,
+        if level_known {
+            "level_required_and_known"
+        } else {
+            "level_required_missing"
+        },
+        level_known,
+        "critical",
+        reason,
+    );
 }
 
 fn add_combat_readiness_guards(
@@ -1227,6 +1248,62 @@ mod tests {
 
         assert!(!row.selected);
         assert!(row.rejected_reasons.contains(&"zone_known".to_owned()));
+    }
+
+    #[test]
+    fn guard_labels_noncombat_level_not_required_when_missing() {
+        let params = normalized_for(
+            "move-with-hidden-level",
+            EverQuestPlannerCandidateKind::BoundedMove,
+            Some("allow_empty_chat_input"),
+        );
+        let row = planner_guard_row(
+            &params,
+            foreground(true),
+            &state(Some("nektulos"), None, true, Vec::new()),
+            chat(false),
+        );
+
+        assert!(row.selected);
+        assert!(row.rejected_reasons.is_empty());
+        assert!(
+            row.guard_results
+                .iter()
+                .any(|guard| guard.guard == "level_not_required_for_candidate" && guard.passed)
+        );
+        assert!(
+            row.guard_results
+                .iter()
+                .all(|guard| guard.guard != "level_known")
+        );
+    }
+
+    #[test]
+    fn guard_rejects_combat_when_level_required_missing() {
+        let mut params = normalized_for(
+            "combat-hidden-level",
+            EverQuestPlannerCandidateKind::CombatSpell,
+            Some("allow_empty_chat_input"),
+        );
+        params.candidate.hotbar_alias = Some("hotbar4".to_owned());
+        params.candidate.target_name = Some("synthetic level-one npc".to_owned());
+        params.candidate.target_level = Some(1);
+        params.candidate.target_con_summary = Some("looks like an even fight. (Lvl: 1)".to_owned());
+        params.combat_readiness = Some(ready_for_combat());
+        let mut source_state = state(Some("nektulos"), None, true, Vec::new());
+        source_state.target_summary = Some("target npc synthetic level-one npc".to_owned());
+        let row = planner_guard_row(&params, foreground(true), &source_state, chat(false));
+
+        assert!(!row.selected);
+        assert!(
+            row.rejected_reasons
+                .contains(&"level_required_missing".to_owned())
+        );
+        assert!(
+            row.guard_results
+                .iter()
+                .all(|guard| guard.guard != "level_known")
+        );
     }
 
     #[test]
