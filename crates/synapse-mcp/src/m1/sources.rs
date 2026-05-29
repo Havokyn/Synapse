@@ -2,9 +2,12 @@ use std::{collections::BTreeMap, time::Instant};
 
 use chrono::Utc;
 use rmcp::ErrorData;
+use sha2::{Digest as _, Sha256};
+use synapse_action::{ClipboardFormat, read_clipboard_text};
 use synapse_core::{
-    AccessibleNode, AudioContext, DetectedEntity, FocusedElement, ForegroundContext, HudReading,
-    HudReadings, HudValue, PerceptionMode, Rect, SensorStatus, UiaPattern, element_id, entity_id,
+    AccessibleNode, AudioContext, ClipboardSummary, DetectedEntity, FocusedElement,
+    ForegroundContext, HudReading, HudReadings, HudValue, PerceptionMode, Rect, SensorStatus,
+    UiaPattern, element_id, entity_id,
 };
 use synapse_perception::ObservationInput;
 
@@ -85,6 +88,97 @@ pub fn synthetic_notepad_input() -> ObservationInput {
         detection_status: SensorStatus::Disabled,
         audio_status: SensorStatus::Disabled,
         mode_override: None,
+    }
+}
+
+pub fn populate_clipboard_summary(input: &mut ObservationInput) {
+    let started = Instant::now();
+    let summary = match read_clipboard_text(ClipboardFormat::Unicode) {
+        Ok(text) => clipboard_summary_from_text(&text),
+        Err(error) => {
+            tracing::debug!(
+                code = "OBSERVE_CLIPBOARD_READ_FAILED",
+                error = %error,
+                "clipboard summary read failed"
+            );
+            ClipboardSummary {
+                formats: Vec::new(),
+                text_len: None,
+                text_excerpt: None,
+                redacted: true,
+            }
+        }
+    };
+    input.sensor_latency_ms.insert(
+        "clipboard".to_owned(),
+        started.elapsed().as_secs_f32() * 1000.0,
+    );
+    input.clipboard_summary = Some(summary);
+}
+
+fn clipboard_summary_from_text(text: &str) -> ClipboardSummary {
+    if text.is_empty() {
+        return ClipboardSummary {
+            formats: Vec::new(),
+            text_len: None,
+            text_excerpt: None,
+            redacted: true,
+        };
+    }
+    ClipboardSummary {
+        formats: vec!["text/plain".to_owned(), "text/unicode".to_owned()],
+        text_len: Some(len_to_u32(text.chars().count())),
+        text_excerpt: Some(sha256_hex(text.as_bytes())),
+        redacted: true,
+    }
+}
+
+fn len_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_summary_hashes_text_without_raw_excerpt() {
+        let summary = clipboard_summary_from_text("issue544-known-input");
+
+        assert_eq!(
+            summary.formats,
+            vec!["text/plain".to_owned(), "text/unicode".to_owned()]
+        );
+        assert_eq!(summary.text_len, Some(20));
+        assert_eq!(summary.redacted, true);
+        let excerpt = summary.text_excerpt.as_deref().unwrap_or_default();
+        assert!(excerpt.starts_with("sha256:"));
+        assert!(!excerpt.contains("issue544-known-input"));
+    }
+
+    #[test]
+    fn clipboard_summary_empty_text_is_redacted_empty_metadata() {
+        let summary = clipboard_summary_from_text("");
+
+        assert!(summary.formats.is_empty());
+        assert_eq!(summary.text_len, None);
+        assert_eq!(summary.text_excerpt, None);
+        assert_eq!(summary.redacted, true);
     }
 }
 

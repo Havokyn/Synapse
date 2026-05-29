@@ -437,7 +437,7 @@ pub struct Observation {
     pub hud: HudReadings,                       // game-only
     pub audio: AudioContext,                    // recent events + direction estimate if any
     pub recent_events: Vec<Event>,              // since last observe(), capped
-    pub clipboard_summary: Option<ClipboardSummary>,
+    pub clipboard_summary: Option<ClipboardSummary>, // redacted metadata only
     pub fs_recent: Vec<FsEvent>,                // last 5 file changes
     pub diagnostics: ObservationDiagnostics,    // perception health (which sensors active, latencies)
 }

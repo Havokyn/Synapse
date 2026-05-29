@@ -16,6 +16,7 @@ use synapse_perception::{ObservationInput, ObserveInclude, parse_perception_mode
 
 pub use ocr::read_text_in_state;
 use search::{element_match, entity_match};
+pub use sources::populate_clipboard_summary;
 use sources::{platform_input, synthetic_notepad_input};
 
 pub type SharedM1State = Arc<Mutex<M1State>>;

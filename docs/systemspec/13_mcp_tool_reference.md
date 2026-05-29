@@ -74,6 +74,10 @@ force rebase.
 | `since_event_seq` | `u64` | no | — | — | When set, `recent_events` filtered to `seq > since` |
 
 **Returns:** `synapse_core::Observation`.
+When `include` contains `clipboard`, the live path samples the system clipboard
+into a redacted `ClipboardSummary` containing format names, optional text
+length, and hash-only excerpt metadata. Raw clipboard text must not be persisted
+by `observe`, `reality_baseline`, or `observe_delta`.
 **Errors:** `OBSERVE_NO_PERCEPTION_AVAILABLE` (forced via `SYNAPSE_MCP_FORCE_NO_PERCEPTION`), `OBSERVE_INTERNAL` (forced or assembler error), `A11Y_NO_FOREGROUND`, `CAPTURE_TARGET_LOST`, perception subsystem errors.
 
 ## 2a. `reality_baseline`

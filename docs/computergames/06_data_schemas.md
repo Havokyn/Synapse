@@ -235,7 +235,7 @@ pub struct DirectionEstimate { pub azimuth_deg: f32, pub confidence: f32 }
 pub struct ClipboardSummary {
     pub formats: Vec<String>,         // "text/plain", "image/png", ...
     pub text_len: Option<u32>,
-    pub text_excerpt: Option<String>, // first ~120 chars, redacted if sensitive pattern matched
+    pub text_excerpt: Option<String>, // hash/source marker only; never raw clipboard text
     pub redacted: bool,
 }
 ```

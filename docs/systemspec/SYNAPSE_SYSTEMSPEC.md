@@ -1876,7 +1876,7 @@ Sub-structs:
 | `AudioContext` | `rms_db: f32`, `vad_speech_recent: bool`, `recent_events: Vec<AudioEvent>`, `direction_estimate: Option<DirectionEstimate>` |
 | `AudioEvent` | `at`, `kind: String`, `azimuth_deg: Option<f32>`, `confidence` |
 | `DirectionEstimate` | `azimuth_deg: f32`, `confidence: f32` |
-| `ClipboardSummary` | `formats: Vec<String>`, `text_len: Option<u32>`, `text_excerpt: Option<String>`, `redacted: bool` |
+| `ClipboardSummary` | `formats: Vec<String>`, `text_len: Option<u32>`, `text_excerpt: Option<String>` containing only hash/source metadata, `redacted: bool` |
 | `FsEvent` | `at`, `path`, `kind: FsEventKind` (Created/Modified/Deleted/Renamed), `size_bytes: Option<u64>` |
 | `ObservationDiagnostics` | `assembled_in_ms`, `sensor_latency_ms: BTreeMap<String, f32>`, `a11y_enabled`, `pixel_enabled`, `audio_enabled`, `a11y_status: SensorStatus`, `capture_status`, `detection_status`, `audio_status`, `elements_truncated`, `entities_truncated`, `size_bytes`, `size_estimate_tokens` |
 | `SensorStatus` | `Healthy` \| `DegradedLatency { last_p99_ms: f32 }` \| `DegradedSensorFailed { reason_code: String }` \| `Disabled` \| `Unavailable` (default) |
@@ -3145,7 +3145,7 @@ of the HUD crop relative to the selected client-rect anchor. For example, a
 ### 4.2 `ObservationAssembler::assemble` algorithm
 
 1. Compute the effective `PerceptionMode`: if `input.mode_override.is_some()` use it, else `auto_mode(input)`.
-2. For each slot enabled by `ObserveInclude` (defaults: focused, elements, entities, hud, events), include the corresponding fields. Otherwise the slot is left at its default (empty vec / None).
+2. For each slot enabled by `ObserveInclude` (defaults: focused, elements, entities, hud, events), include the corresponding fields. Otherwise the slot is left at its default (empty vec / None). When the `clipboard` slot is requested through the live MCP path, the server reads the Win32 clipboard text surface and populates `ClipboardSummary` with formats, text length, a hash-only redacted excerpt marker, and `redacted=true`; raw clipboard text is not persisted into compact reality rows.
 3. Truncate `elements` to `max_subtree_nodes` (default 60, clamp 1..=500) and apply `max_subtree_depth` (clamp ≤ 6). Set `diagnostics.elements_truncated` when truncated.
 4. Truncate `entities` to `max_entities` (default 60). Set `diagnostics.entities_truncated`.
 5. Compute `diagnostics.assembled_in_ms = started.elapsed().as_secs_f32() * 1000`.
@@ -4392,6 +4392,10 @@ force rebase.
 | `since_event_seq` | `u64` | no | — | — | When set, `recent_events` filtered to `seq > since` |
 
 **Returns:** `synapse_core::Observation`.
+When `include` contains `clipboard`, the live path samples the system clipboard
+into a redacted `ClipboardSummary` containing format names, optional text
+length, and hash-only excerpt metadata. Raw clipboard text must not be persisted
+by `observe`, `reality_baseline`, or `observe_delta`.
 **Errors:** `OBSERVE_NO_PERCEPTION_AVAILABLE` (forced via `SYNAPSE_MCP_FORCE_NO_PERCEPTION`), `OBSERVE_INTERNAL` (forced or assembler error), `A11Y_NO_FOREGROUND`, `CAPTURE_TARGET_LOST`, perception subsystem errors.
 
 ## 2a. `reality_baseline`

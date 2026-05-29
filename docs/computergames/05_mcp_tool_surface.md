@@ -38,6 +38,11 @@
    full audits to detect drift and force rebase. #537 defines the canonical
    schemas and #538 exposes the live MCP baseline/delta/audit tools. Manual SoT
    readback remains mandatory because tool returns are attempt evidence only.
+9. **Clipboard is metadata only.** When an MCP request includes the `clipboard`
+   slot, live observation/reality tools may read the system clipboard only to
+   populate redacted summary metadata: formats, optional text length, and a
+   hash-only excerpt marker. Raw clipboard text must not be stored in reality
+   rows.
 
 The first 30 tools below are the live M3 baseline. #499 adds `act_keymap` as a
 profile-keymap action alias, #508 adds `everquest_loc_probe` as a literal

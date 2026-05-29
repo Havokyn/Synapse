@@ -2,8 +2,8 @@ use super::{
     ErrorData, FindParams, FindResponse, Health, Json, ObserveParams, Parameters, ReadTextParams,
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
     SetPerceptionModeResponse, SynapseService, current_input, empty_input_schema, find_in_state,
-    mcp_error, observe_include, read_text_in_state, set_capture_target_in_state,
-    set_perception_mode_in_state, tool, tool_router,
+    mcp_error, observe_include, populate_clipboard_summary, read_text_in_state,
+    set_capture_target_in_state, set_perception_mode_in_state, tool, tool_router,
 };
 
 #[cfg(windows)]
@@ -54,6 +54,9 @@ impl SynapseService {
         drop(state);
 
         let include = observe_include(&params.0);
+        if include.clipboard && input.clipboard_summary.is_none() {
+            populate_clipboard_summary(&mut input);
+        }
         self.resolve_input_profile_and_hud(&mut input, include.hud);
         if include.events {
             self.populate_everquest_log_events(&mut input);

@@ -19,8 +19,8 @@ use synapse_perception::ObservationAssembler;
 use synapse_storage::cf;
 
 use super::{
-    Json, ObserveParams, Parameters, SynapseService, current_input, observe_include, tool,
-    tool_router,
+    Json, ObserveParams, Parameters, SynapseService, current_input, observe_include,
+    populate_clipboard_summary, tool, tool_router,
 };
 use crate::{
     m1::{ObserveSlot, mcp_error},
@@ -879,6 +879,9 @@ impl SynapseService {
         drop(state);
 
         let include = observe_include(&params);
+        if include.clipboard && input.clipboard_summary.is_none() {
+            populate_clipboard_summary(&mut input);
+        }
         self.resolve_input_profile_and_hud(&mut input, include.hud);
         if include.events {
             self.populate_everquest_log_events(&mut input);
