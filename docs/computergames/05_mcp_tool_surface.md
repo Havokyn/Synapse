@@ -20,8 +20,9 @@
    ContextGraph-compatible DynamicJEPA episode exporter, #513 adds EverQuest
    world-model record/inspect storage surfaces, #515 adds the EverQuest
    surprise detector row writer, #516 adds the compact EverQuest world-summary
-   context row writer, and #531 adds EverQuest action-prior sample/scorecard
-   tools, bringing the live surface to 70. Any
+   context row writer, #531 adds EverQuest action-prior sample/scorecard
+   tools, and #522 adds transparent EverQuest predictive-model fit/predict
+   rows, bringing the live surface to 72. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -42,7 +43,8 @@ visible chat-buffer pollution readback that also gates `/loc`, #510 adds
 `everquest_domain_normalize`, #512 adds `everquest_trajectory_record`, #521 adds
 `everquest_episode_export`, #513 adds `everquest_world_model_record` plus
 `everquest_world_model_inspect`, #515 adds `everquest_surprise_detect`, #516 adds
-`everquest_world_summary`, and #531 adds
+`everquest_world_summary`, #522 adds `everquest_predictive_model_fit` plus
+`everquest_predictive_model_predict`, and #531 adds
 `everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
@@ -126,10 +128,12 @@ future `tools/list` snapshots in #447/#448.
 | 66 | `everquest_world_model_inspect` | read | inspects approved EverQuest world-model prefixes, selected keys, counts, and redacted samples |
 | 67 | `everquest_surprise_detect` | write/read | compares predicted EverQuest outcome against observed state/log evidence and stores a compact surprise row |
 | 68 | `everquest_world_summary` | write/read | stores one compact world-state summary row for context injection with map/log/storage provenance and chat redaction |
-| 69 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
-| 70 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 69 | `everquest_predictive_model_fit` | write/read | fits a transparent action-conditioned predictive baseline from verified trajectory/domain rows and reads the model row back |
+| 70 | `everquest_predictive_model_predict` | write/read | stores one calibrated next-outcome prediction row with abstention and exact readback |
+| 71 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 72 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 70
+M3 live count: 30 tools. Current live count: 72
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -157,6 +161,8 @@ export tool;
 writer;
 `everquest_world_summary` is the #516 compact context-injection summary row
 writer;
+`everquest_predictive_model_fit` and `everquest_predictive_model_predict` are
+the #522 transparent action-conditioned predictive-model tools;
 `everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
 #531 competence scorecard tools;
 `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase plan
@@ -1280,7 +1286,96 @@ tool with known expected outputs, then separately inspect `storage_inspect` and
 the physical DB bytes afterward. The summary is context evidence only; movement
 and level-progress claims still require separate gameplay FSV.
 
-### 3.13q `everquest_action_prior_record`
+### 3.13q `everquest_predictive_model_fit`
+
+```json
+{
+  "name": "everquest_predictive_model_fit",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["model_id"],
+    "properties": {
+      "model_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "trajectory_row_keys": {"type": "array", "items": {"type": "string"}, "default": []},
+      "max_trajectories": {"type": "integer", "minimum": 1, "maximum": 128, "default": 64},
+      "min_transition_support": {"type": "integer", "minimum": 1, "default": 1},
+      "min_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+      "source_refs": {"type": "array", "items": {"type": "object"}, "default": []},
+      "limitations": {"type": "array", "items": {"type": "string"}, "default": []}
+    }
+  }
+}
+```
+
+`everquest_predictive_model_fit` reads verified #512 trajectory rows plus their
+linked #511 DynamicJEPA state/action/outcome/transition rows, builds a
+transparent action-conditioned Markov baseline, writes
+`CF_KV/everquest/predictive_model/v1/everquest.live/<model_id>`, computes a
+stable model hash, and reads the exact row back. Empty or sparse data writes an
+explicit `no_verified_trajectories` or `insufficient_transition_support` model
+instead of pretending competence.
+
+The model stores state-action entries, action fallbacks, a global fallback,
+source trajectory/transition keys, conflict counts, confidence thresholds, and
+an evidence boundary that says this is planning-quality evidence only. It is not
+a training script, FSV substitute, or gameplay-progress proof.
+
+### 3.13r `everquest_predictive_model_predict`
+
+```json
+{
+  "name": "everquest_predictive_model_predict",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["prediction_id", "model_id", "state_row_key", "candidate_actions"],
+    "properties": {
+      "prediction_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "model_id": {"type": "string"},
+      "state_row_key": {"type": "string"},
+      "candidate_actions": {
+        "type": "array",
+        "maxItems": 16,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action_kind"],
+          "properties": {
+            "action_kind": {"enum": ["loc_probe", "target_consider", "bounded_move", "combat_spell", "sit_rest", "inventory_read", "map_read", "denied_unsafe"]},
+            "alias": {"type": "string"},
+            "tool_name": {"type": "string"}
+          }
+        }
+      },
+      "expected_model_hash": {"type": "string"},
+      "min_transition_support": {"type": "integer", "minimum": 1, "default": 1},
+      "min_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+      "source_refs": {"type": "array", "items": {"type": "object"}, "default": []},
+      "limitations": {"type": "array", "items": {"type": "string"}, "default": []}
+    }
+  }
+}
+```
+
+`everquest_predictive_model_predict` reads the model row and current
+DynamicJEPA state row, ranks candidate actions by exact state-action entry,
+action fallback, then global fallback, writes
+`CF_KV/everquest/prediction/v1/everquest.live/<prediction_id>`, and reads the
+exact prediction row back. It abstains for stale model hashes, no data, no
+candidate actions, no matching entry, insufficient support, or confidence below
+threshold.
+
+Manual FSV for both #522 tools must read the trajectory/domain/state/model/
+prediction `CF_KV` rows before the trigger, call the real MCP tool with known
+inputs, then separately inspect the persisted rows afterward. The happy path
+must compare one prediction to a later observed outcome through the real
+action-prior sample surface; edges must include no data, conflicting data,
+stale model hash, and uncertainty above threshold.
+
+### 3.13s `everquest_action_prior_record`
 
 ```json
 {
@@ -1339,7 +1434,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13r `everquest_action_prior_scorecard`
+### 3.13t `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -2691,6 +2786,24 @@ profile-authoring and audit-export defaults below.
 | `everquest_world_summary` | `max_hazards` | `5` | #516 |
 | `everquest_world_summary` | `stale_after_seconds` | `300` | #516 |
 | `everquest_world_summary` | `source_refs` | `[]` | #516 |
+| `everquest_predictive_model_fit` | `model_id` | required; no default | #522 |
+| `everquest_predictive_model_fit` | `profile_id` | `"everquest.live"` | #522 |
+| `everquest_predictive_model_fit` | `trajectory_row_keys` | `[]`; scans `everquest/trajectory/v1/<profile>/` | #522 |
+| `everquest_predictive_model_fit` | `max_trajectories` | `64` | #522 |
+| `everquest_predictive_model_fit` | `min_transition_support` | `1` | #522 |
+| `everquest_predictive_model_fit` | `min_confidence` | `0.60` | #522 |
+| `everquest_predictive_model_fit` | `source_refs` | `[]` | #522 |
+| `everquest_predictive_model_fit` | `limitations` | `[]` | #522 |
+| `everquest_predictive_model_predict` | `prediction_id` | required; no default | #522 |
+| `everquest_predictive_model_predict` | `profile_id` | `"everquest.live"` | #522 |
+| `everquest_predictive_model_predict` | `model_id` | required; no default | #522 |
+| `everquest_predictive_model_predict` | `state_row_key` | required; no default | #522 |
+| `everquest_predictive_model_predict` | `candidate_actions` | required; max 16 | #522 |
+| `everquest_predictive_model_predict` | `expected_model_hash` | omitted; stale hash causes abstention when provided and mismatched | #522 |
+| `everquest_predictive_model_predict` | `min_transition_support` | `1` | #522 |
+| `everquest_predictive_model_predict` | `min_confidence` | `0.60` | #522 |
+| `everquest_predictive_model_predict` | `source_refs` | `[]` | #522 |
+| `everquest_predictive_model_predict` | `limitations` | `[]` | #522 |
 | `everquest_action_prior_record` | `sample_id` | required; no default | #531 |
 | `everquest_action_prior_record` | `profile_id` | `"everquest.live"` | #531 |
 | `everquest_action_prior_record` | `prediction_id` | required; no default | #531 |

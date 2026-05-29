@@ -36,7 +36,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 70 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 72 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -48,6 +48,7 @@ crates/synapse-mcp/
     │   ├── everquest_map_sensor.rs # EverQuest visible map/current-state/map-file calibration rows
     │   ├── everquest_memory.rs     # EverQuest hazard/safe-area memory and planner consult rows
     │   ├── everquest_outcome.rs    # EverQuest compact outcome log ingestion rows
+    │   ├── everquest_predictive_model.rs # EverQuest transparent predictive model and prediction rows
     │   ├── everquest_route.rs      # EverQuest bounded map/route plan rows
     │   ├── everquest_scorecard.rs  # EverQuest action-prior sample and scorecard rows
     │   ├── everquest_state.rs      # EverQuest current-state row fusion

@@ -129,7 +129,8 @@ visible chat-input state, current-state, map-sensor, outcome, route, memory,
 planner guard, DynamicJEPA domain normalization, linked trajectory rows,
 ContextGraph/DynamicJEPA episode export, approved-prefix world-model
 rows/readback, surprise detection, compact world-summary context rows, and
-action-prior tools, bringing the current approved live surface to 70
+predictive-model fit/predict rows plus action-prior tools, bringing the
+current approved live surface to 72
 agent-facing tools. The same EverQuest crate also
 ships local support binaries: `eq-map-inspect`, `eq-zone-graph`, and #520
 `eq-map-inventory` for physical map-directory/community-map-pack inventory,

@@ -524,6 +524,32 @@ Neriak context reporting level 1, `neriaka`, and the `to_Nektulos_Forest`
 candidate without raw chat bodies. Required edges are unknown zone, map missing,
 stale state, and chat redaction.
 
+## Predictive Model Rows
+
+#522 adds the transparent local predictive-model bridge from verified
+EverQuest trajectories into a calibrated action prior. `everquest_predictive_model_fit`
+reads #512 trajectory rows plus linked #511 DynamicJEPA state/action/outcome
+rows, fits an action-conditioned Markov baseline, writes
+`CF_KV/everquest/predictive_model/v1/everquest.live/<model_id>`, and reads the
+model row back with a stable hash. `everquest_predictive_model_predict` reads
+that model plus a current DynamicJEPA state row, ranks candidate actions, writes
+`CF_KV/everquest/prediction/v1/everquest.live/<prediction_id>`, and reads the
+prediction row back.
+
+The first model is intentionally transparent: exact state-action entries first,
+then action fallback, then global fallback. Confidence is winning-count divided
+by sample-count for the bucket. The row preserves source trajectory keys,
+source transition keys, conflict counts, thresholds, limitations, and an
+evidence boundary saying the model supports attended planning only. The 0.60
+minimum confidence is the useful supervised floor, not an optimization ceiling.
+
+Manual FSV for this bridge must read `CF_KV` before the trigger, call the real
+MCP tools with known trajectory/state/candidate inputs, then separately inspect
+the persisted model and prediction rows. The happy path must compare one
+prediction to a later observed outcome by recording a real action-prior sample.
+Required edges are no verified data, conflicting outcomes, stale model hash, and
+uncertainty above threshold.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world

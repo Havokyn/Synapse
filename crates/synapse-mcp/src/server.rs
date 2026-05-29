@@ -117,6 +117,7 @@ mod everquest_log;
 mod everquest_map_sensor;
 mod everquest_memory;
 mod everquest_outcome;
+mod everquest_predictive_model;
 mod everquest_route;
 mod everquest_scorecard;
 mod everquest_state;
@@ -247,6 +248,7 @@ impl SynapseService {
             + Self::everquest_map_sensor_tool_router()
             + Self::everquest_memory_tool_router()
             + Self::everquest_outcome_tool_router()
+            + Self::everquest_predictive_model_tool_router()
             + Self::everquest_route_tool_router()
             + Self::everquest_scorecard_tool_router()
             + Self::everquest_surprise_tool_router()

@@ -18,13 +18,14 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_surprise/{model,compare,validation}.rs`
 - `crates/synapse-mcp/src/server/everquest_world_summary.rs`
 - `crates/synapse-mcp/src/server/everquest_world_summary/{model,validation}.rs`
+- `crates/synapse-mcp/src/server/everquest_predictive_model.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 70 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 72 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -529,7 +530,49 @@ Manual FSV must read physical EQ log/current-state/storage before the trigger, c
 
 Manual FSV must read physical EQ map/log/current-state/storage before the trigger, call this real MCP tool with known expected outputs, then separately inspect `storage_inspect` and DB/WAL bytes for the exact summary key. The row is compact context evidence only and not movement, combat, or level-progress proof.
 
-## 9q. `everquest_action_prior_record`
+## 9q. `everquest_predictive_model_fit`
+
+**Description:** "Fit a transparent EverQuest action-conditioned predictive baseline from verified trajectory/domain rows with exact CF_KV readback"
+**Side effects:** reads #512 trajectory rows and linked #511 DynamicJEPA rows, writes `CF_KV/everquest/predictive_model/v1/everquest.live/<model_id>`, computes a stable model hash, then reads that exact row back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `model_id` | `String` | yes | - | ASCII id used in the model row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `trajectory_row_keys` | `Vec<String>` | no | `[]` | Empty scans `everquest/trajectory/v1/<profile>/` |
+| `max_trajectories` | `u32` | no | `64` | Scan cap; allowed `1..=128` |
+| `min_transition_support` | `u32` | no | `1` | Minimum samples required for prediction use |
+| `min_confidence` | `f32` | no | `0.60` | Minimum useful supervised confidence |
+| `source_refs` | `Vec<EverQuestPredictiveSourceRef>` | no | `[]` | Compact provenance refs |
+| `limitations` | `Vec<String>` | no | `[]` | Known model limitations |
+
+**Returns:** `EverQuestPredictiveModelFitResponse { ok, row_key, stored_value_len_bytes, model }`. The model row records status (`trained`, `no_verified_trajectories`, or `insufficient_transition_support`), training counts, conflict counts, source trajectory/transition keys, state-action entries, action fallbacks, global fallback, confidence thresholds, model hash, and evidence-boundary flags.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+## 9r. `everquest_predictive_model_predict`
+
+**Description:** "Persist one EverQuest predictive-model next-outcome prediction row with calibrated abstention and exact CF_KV readback"
+**Side effects:** reads the model row and DynamicJEPA state row, ranks candidate actions, writes `CF_KV/everquest/prediction/v1/everquest.live/<prediction_id>`, then reads that exact row back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `prediction_id` | `String` | yes | - | ASCII id used in the prediction row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `model_id` | `String` | yes | - | Model row id to read |
+| `state_row_key` | `String` | yes | - | Existing DynamicJEPA state row key |
+| `candidate_actions` | `Vec<EverQuestPredictiveCandidateAction>` | yes | - | Candidate actions, max 16 |
+| `expected_model_hash` | `Option<String>` | no | - | Mismatch persists `abstain_stale_model_hash` |
+| `min_transition_support` | `u32` | no | `1` | Minimum selected-entry sample count |
+| `min_confidence` | `f32` | no | `0.60` | Below this, prediction abstains |
+| `source_refs` | `Vec<EverQuestPredictiveSourceRef>` | no | `[]` | Compact provenance refs |
+| `limitations` | `Vec<String>` | no | `[]` | Known prediction limits |
+
+**Returns:** `EverQuestPredictiveModelPredictResponse { ok, row_key, stored_value_len_bytes, prediction }`. Decisions include `predict`, `abstain_stale_model_hash`, `abstain_no_verified_trajectories`, `abstain_no_candidate_actions`, `abstain_no_matching_model_entry`, `abstain_insufficient_transition_support`, and `abstain_uncertain_prediction`.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV for both #522 tools must read trajectory/domain/state/model/prediction `CF_KV` rows before the trigger, call the real MCP tool with known inputs, then separately inspect the durable rows afterward. The happy path must compare one prediction to a later observed outcome through the real action-prior sample surface; edges must include no data, conflicting data, stale artifact hash, and uncertainty above threshold.
+
+## 9s. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -549,7 +592,7 @@ Manual FSV must read physical EQ map/log/current-state/storage before the trigge
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9r. `everquest_action_prior_scorecard`
+## 9t. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

@@ -108,7 +108,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 70 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 72 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -218,7 +218,7 @@ paths propagate that same context into `CF_ACTION_LOG` and
 
 Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.md).
 
-### 4.6 EverQuest live evaluation/world model (18 tools)
+### 4.6 EverQuest live evaluation/world model (20 tools)
 
 | Tool | Description | Source |
 |---|---|---|
@@ -238,6 +238,8 @@ Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.m
 | `everquest_world_model_inspect` | Inspect approved world-model prefixes, selected keys, counts, and redacted samples | `server/everquest_world_model.rs` |
 | `everquest_surprise_detect` | Compare predicted outcome with observed state/log evidence and store a surprise stop/repair row | `server/everquest_surprise.rs` |
 | `everquest_world_summary` | Store compact world-summary context rows with map/log/storage provenance and redaction | `server/everquest_world_summary.rs` |
+| `everquest_predictive_model_fit` | Fit transparent action-conditioned predictive model rows from verified trajectories | `server/everquest_predictive_model.rs` |
+| `everquest_predictive_model_predict` | Persist calibrated next-outcome prediction rows with abstention and readback | `server/everquest_predictive_model.rs` |
 | `everquest_action_prior_record` | Store prediction/outcome samples with correctness and readback | `server/everquest_scorecard.rs` |
 | `everquest_action_prior_scorecard` | Aggregate action-prior samples into a floor-not-ceiling competence scorecard | `server/everquest_scorecard.rs` |
 
