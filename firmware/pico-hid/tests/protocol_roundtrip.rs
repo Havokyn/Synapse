@@ -1,7 +1,8 @@
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
+use pico_hid::dispatch::IDENTIFY_FW_MAJOR;
 #[cfg(not(feature = "loopback"))]
 use pico_hid::dispatch::{
-    DispatchOutcome, DispatchState, IDENTIFY_FW_MAJOR, IdentifyInfo, MAX_RESPONSE_PAYLOAD_LEN,
-    dispatch_frame,
+    DispatchOutcome, DispatchState, IdentifyInfo, MAX_RESPONSE_PAYLOAD_LEN, dispatch_frame,
 };
 #[cfg(not(feature = "loopback"))]
 use pico_hid::protocol::DeviceCommand;
@@ -10,6 +11,7 @@ use pico_hid::protocol::{
     ParseResult, crc16_ccitt_false, encode_host_frame, next_sequence, parse_host_frame,
 };
 #[cfg(not(feature = "loopback"))]
+#[cfg(not(feature = "force-first-nak"))]
 use pico_hid::reports::{GAMEPAD_REPORT_LEN, GamepadReport};
 
 #[test]
@@ -118,7 +120,7 @@ fn protocol_roundtrips_1000_deterministic_frames() {
 }
 
 #[test]
-#[cfg(not(feature = "loopback"))]
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
 fn dispatcher_applies_mouse_keyboard_pad_and_release_all() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -165,7 +167,7 @@ fn dispatcher_applies_mouse_keyboard_pad_and_release_all() {
 }
 
 #[test]
-#[cfg(not(feature = "loopback"))]
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
 fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -215,6 +217,41 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
 }
 
 #[test]
+#[cfg(all(not(feature = "loopback"), feature = "force-first-nak"))]
+fn force_first_nak_feature_only_rejects_the_first_ack_command() {
+    let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
+    let mut state = DispatchState::new();
+
+    let identify_response =
+        dispatch_frame(&mut state, frame(1, HostCommand::Identify, &[]), identify);
+    assert_eq!(identify_response.command, DeviceCommand::IdentifyResp);
+    assert_eq!(state.telemetry.commands_executed, 1);
+
+    let mouse_move = frame(2, HostCommand::MouseMoveRel, &[1, 0, 1, 0]);
+    assert_eq!(
+        dispatch_frame(&mut state, mouse_move, identify),
+        nak(2, NakReason::BufferFull)
+    );
+    assert_eq!(state.telemetry.link_errors, 1);
+    assert_eq!(state.telemetry.commands_executed, 1);
+
+    assert_eq!(dispatch_frame(&mut state, mouse_move, identify), ack(2));
+    assert_eq!(state.telemetry.link_errors, 1);
+    assert_eq!(state.telemetry.commands_executed, 2);
+
+    assert_eq!(
+        dispatch_frame(
+            &mut state,
+            frame(3, HostCommand::MouseMoveRel, &[2, 0, 2, 0]),
+            identify
+        ),
+        ack(3)
+    );
+    assert_eq!(state.telemetry.link_errors, 1);
+    assert_eq!(state.telemetry.commands_executed, 3);
+}
+
+#[test]
 #[cfg(not(feature = "loopback"))]
 fn telemetry_response_contains_all_counter_fields() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
@@ -245,7 +282,7 @@ fn telemetry_response_contains_all_counter_fields() {
 }
 
 #[test]
-#[cfg(not(feature = "loopback"))]
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
 fn release_all_does_not_reset_telemetry_counters() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();
@@ -272,7 +309,7 @@ fn release_all_does_not_reset_telemetry_counters() {
 }
 
 #[test]
-#[cfg(not(feature = "loopback"))]
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
 fn dispatcher_rejects_invalid_payload_boundaries() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut state = DispatchState::new();

@@ -53,6 +53,17 @@ That writes
 The image changes only the `IDENTIFY_RESP.fw_major` byte so the host can prove
 the `HID_FIRMWARE_VERSION_MISMATCH` path against a real Pico.
 
+ACK/NAK retry acceptance firmware forces one retry through the real CDC
+dispatcher:
+
+```powershell
+.\scripts\release\firmware\build_pico_hid.ps1 -Features force-first-nak
+```
+
+That writes `scripts\release\firmware\pico-hid-force-first-nak-<version>.uf2`.
+The image leaves `IDENTIFY` untouched, returns one `NAK_BUFFER_FULL` for the
+first normal ACK-style command, then accepts the retry and all later commands.
+
 For a local conversion while already inside `firmware\pico-hid`, the lower
 level command remains:
 
@@ -73,7 +84,8 @@ The CDC dispatcher handles identity, mouse, keyboard, gamepad, release-all,
 watchdog, and telemetry commands. Runtime state drives HID reports, telemetry
 counters, watchdog release-all behavior, and LED status. Building with the
 `loopback` feature enables a debug firmware path that responds with PONG frames
-instead of driving HID reports.
+instead of driving HID reports. Building with `force-first-nak` preserves the
+normal HID runtime but forces one retry for ACK/NAK pipeline acceptance.
 
 ## Flash
 

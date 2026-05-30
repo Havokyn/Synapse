@@ -251,6 +251,10 @@ CDC packets into a `MAX_FRAME_LEN` receive buffer, parses complete frames
 synchronously, and dispatches each parsed frame immediately. `NAK_BUFFER_FULL`
 is currently emitted when command state cannot accept more data, such as the
 6-key boot-keyboard rollover slots already being full.
+The real-device single-retry acceptance image is built with
+`.\scripts\release\firmware\build_pico_hid.ps1 -Features force-first-nak`; it
+leaves `IDENTIFY` untouched, emits one `NAK_BUFFER_FULL` for the first normal
+ACK-style command, then accepts the retry with the same sequence.
 
 ADR-0012 reduces unnecessary hardware mouse traffic before this pipeline sees
 curve-generated batches. After action curve sampling and `-127..=127`
@@ -441,6 +445,7 @@ firmware range check still prevents overlarge mouse payloads.
 | Protocol roundtrip | `cd firmware/pico-hid; cargo test --tests` (host-side parser tests with hand-crafted frames) |
 | Firmware loopback | Build with `.\scripts\release\firmware\build_pico_hid.ps1 -Features loopback`; firmware echoes every command back as `PONG`. Host driver sends 1000 commands, asserts all return. |
 | Firmware major mismatch | Build with `.\scripts\release\firmware\build_pico_hid.ps1 -Features fake-fw-major-mismatch`; host `IDENTIFY` must fail with `HID_FIRMWARE_VERSION_MISMATCH` after flashing the image to a real Pico. |
+| Firmware forced retry | Build with `.\scripts\release\firmware\build_pico_hid.ps1 -Features force-first-nak`; first ACK-style command must return one `NAK_BUFFER_FULL`, retry the same sequence, then ACK. |
 | Watchdog | Connect, send commands, stop >1s, observe `RELEASE_ALL` via internal telemetry. |
 | Stress | Send 10,000 mouse-move-rel commands at full rate; assert no drops, all acked. |
 | Re-enumeration | Trigger `RESET_TO_BOOTLOADER`, observe device drops, mass storage appears, reflash, reconnect. |

@@ -1,4 +1,4 @@
-#![cfg(not(feature = "loopback"))]
+#![cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
 
 use pico_hid::dispatch::IdentifyInfo;
 use pico_hid::led::{LedMode, led_output};

@@ -80,6 +80,8 @@ pub struct DispatchState {
     pub gamepad: GamepadReport,
     pub telemetry: Telemetry,
     pub watchdog_timeout_ms: u32,
+    #[cfg(feature = "force-first-nak")]
+    pub force_first_nak_sent: bool,
 }
 
 impl DispatchState {
@@ -90,6 +92,8 @@ impl DispatchState {
             gamepad: GamepadReport::neutral(),
             telemetry: Telemetry::new(),
             watchdog_timeout_ms: DEFAULT_WATCHDOG_TIMEOUT_MS,
+            #[cfg(feature = "force-first-nak")]
+            force_first_nak_sent: false,
         }
     }
 
@@ -240,7 +244,7 @@ pub fn dispatch_frame(
 
     state.telemetry.record_frame_received();
 
-    let outcome = match command {
+    let mut outcome = match command {
         HostCommand::Ping => dispatch_ping(frame),
         HostCommand::Identify => dispatch_identify(frame, identify),
         HostCommand::MouseMoveRel => dispatch_mouse_move_rel(state, frame),
@@ -255,6 +259,9 @@ pub fn dispatch_frame(
         HostCommand::GetTelemetry => dispatch_get_telemetry(state, frame),
         HostCommand::ResetToBootloader => dispatch_empty_ack(frame),
     };
+    if should_force_first_nak(state, command, outcome.command) {
+        outcome = DispatchOutcome::nak(frame.seq, NakReason::BufferFull);
+    }
 
     if outcome.command == DeviceCommand::Nak {
         state.telemetry.record_link_error();
@@ -263,6 +270,47 @@ pub fn dispatch_frame(
     }
 
     outcome
+}
+
+#[cfg(all(not(feature = "loopback"), feature = "force-first-nak"))]
+fn should_force_first_nak(
+    state: &mut DispatchState,
+    command: HostCommand,
+    outcome_command: DeviceCommand,
+) -> bool {
+    if state.force_first_nak_sent {
+        return false;
+    }
+    if outcome_command != DeviceCommand::Ack {
+        return false;
+    }
+
+    if matches!(
+        command,
+        HostCommand::MouseMoveRel
+            | HostCommand::MouseButton
+            | HostCommand::MouseWheel
+            | HostCommand::KeyDown
+            | HostCommand::KeyUp
+            | HostCommand::KeyMods
+            | HostCommand::PadReport
+            | HostCommand::ReleaseAll
+            | HostCommand::WatchdogKick
+    ) {
+        state.force_first_nak_sent = true;
+        return true;
+    }
+
+    false
+}
+
+#[cfg(all(not(feature = "loopback"), not(feature = "force-first-nak")))]
+const fn should_force_first_nak(
+    _state: &mut DispatchState,
+    _command: HostCommand,
+    _outcome_command: DeviceCommand,
+) -> bool {
+    false
 }
 
 #[cfg(not(feature = "loopback"))]
