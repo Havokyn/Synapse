@@ -3242,7 +3242,13 @@ architecture in #536 keeps that path for baseline/debug/full-audit reads but
   source refs from a bounded full observation plus profile-specific SoTs.
 - `RealityDelta` records ordered foreground/focus/UIA element/HUD
   value+error/entity/audio/log/action/clipboard/filesystem/storage changes
-  after that baseline.
+  after that baseline. UIA fanout is bounded: eight or more
+  appeared/disappeared elements become one `uia_structure_changed` delta, while
+  eight or more reused-element field changes become one `uia_elements_changed`
+  delta. Both use `/elements` with capped IDs and compact hashes, while
+  low-fanout UIA changes remain individual element/field deltas. If even that
+  coalesced batch would exceed the compact snapshot budget, the tool returns
+  rebase guidance instead of writing oversized delta rows.
 - `RealityAudit` periodically re-reads physical SoTs and compares actual state
   to the baseline+delta assumption; drift produces explicit rebase guidance.
 
@@ -4460,6 +4466,16 @@ epoch for foreground/focus, UIA elements, HUD values/errors, entity fields,
 audio, log/runtime action outcomes, clipboard, filesystem, and diagnostics.
 Delta `source_refs` are scoped to the changed physical surface instead of
 repeating the whole observation ref set on every row.
+High-fanout UIA element changes coalesce at eight or more affected elements:
+appeared/disappeared fanout becomes one bounded `uia_structure_changed` delta,
+and reused-element field fanout becomes one bounded `uia_elements_changed`
+delta. Both use `/elements` and carry appeared/disappeared/changed counts, up
+to 32 changed IDs per side, truncation flags, and compact hashes for the full
+changed element sets.
+If the coalesced batch is still larger than the compact snapshot budget,
+`observe_delta` returns `delta_snapshot_budget_exceeded` rebase guidance before
+writing delta rows. Low-fanout UIA changes remain individual element or field
+deltas.
 Because the head comparison is against the latest compact state, rapid repeated
 changes coalesce into the final before/after pair persisted for that path.
 

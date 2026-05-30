@@ -253,8 +253,17 @@ These are the live delta-first reality surfaces registered by
   values and errors, entity appear/disappear/move/class/confidence changes,
   audio summaries, log/runtime action outcomes, clipboard summaries,
   filesystem summaries, and diagnostics.
+  High-fanout UIA element changes coalesce at eight or more affected elements:
+  appeared/disappeared fanout becomes one bounded `uia_structure_changed`
+  delta, and reused-element field fanout becomes one bounded
+  `uia_elements_changed` delta. Both use `/elements` with counts, capped
+  changed IDs, and compact hashes; low-fanout element changes stay as
+  individual element or field deltas.
   Each delta scopes `source_refs` to the changed physical surface so high-fanout
   UIA changes do not repeat unrelated observation refs on every row.
+  If a coalesced UIA batch is still larger than the compact snapshot budget,
+  `observe_delta` returns `delta_snapshot_budget_exceeded` rebase guidance
+  before writing bloated delta rows.
   Missing baselines, stale epochs, profile changes, and overflowed cursors
   return explicit rebase guidance; invalid future `since_seq` fails closed.
 - `reality_audit` re-reads physical SoTs, compares them against the

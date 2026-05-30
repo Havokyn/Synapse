@@ -141,6 +141,16 @@ epoch for foreground/focus, UIA elements, HUD values/errors, entity fields,
 audio, log/runtime action outcomes, clipboard, filesystem, and diagnostics.
 Delta `source_refs` are scoped to the changed physical surface instead of
 repeating the whole observation ref set on every row.
+High-fanout UIA element changes coalesce at eight or more affected elements:
+appeared/disappeared fanout becomes one bounded `uia_structure_changed` delta,
+and reused-element field fanout becomes one bounded `uia_elements_changed`
+delta. Both use `/elements` and carry appeared/disappeared/changed counts, up
+to 32 changed IDs per side, truncation flags, and compact hashes for the full
+changed element sets.
+If the coalesced batch is still larger than the compact snapshot budget,
+`observe_delta` returns `delta_snapshot_budget_exceeded` rebase guidance before
+writing delta rows. Low-fanout UIA changes remain individual element or field
+deltas.
 Because the head comparison is against the latest compact state, rapid repeated
 changes coalesce into the final before/after pair persisted for that path.
 

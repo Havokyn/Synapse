@@ -242,7 +242,13 @@ architecture in #536 keeps that path for baseline/debug/full-audit reads but
   source refs from a bounded full observation plus profile-specific SoTs.
 - `RealityDelta` records ordered foreground/focus/UIA element/HUD
   value+error/entity/audio/log/action/clipboard/filesystem/storage changes
-  after that baseline.
+  after that baseline. UIA fanout is bounded: eight or more
+  appeared/disappeared elements become one `uia_structure_changed` delta, while
+  eight or more reused-element field changes become one `uia_elements_changed`
+  delta. Both use `/elements` with capped IDs and compact hashes, while
+  low-fanout UIA changes remain individual element/field deltas. If even that
+  coalesced batch would exceed the compact snapshot budget, the tool returns
+  rebase guidance instead of writing oversized delta rows.
 - `RealityAudit` periodically re-reads physical SoTs and compares actual state
   to the baseline+delta assumption; drift produces explicit rebase guidance.
 

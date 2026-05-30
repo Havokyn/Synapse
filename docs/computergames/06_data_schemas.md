@@ -384,6 +384,15 @@ pub struct RealityDelta {
     pub redaction: RedactionSummary,
 }
 
+// High-fanout UIA changes use path="/elements". Appeared/disappeared fanout
+// uses kind="uia_structure_changed"; reused-element field fanout uses
+// kind="uia_elements_changed". The after payload contains element_count,
+// elements_hash, appeared/disappeared/changed counts, up to 32 changed IDs per
+// side, truncation flags, and compact hashes for the full changed element sets.
+// Low-fanout UIA changes stay as individual element or field deltas. If that
+// coalesced batch would exceed the compact snapshot budget, observe_delta
+// returns delta_snapshot_budget_exceeded rebase guidance before writing rows.
+
 pub struct RealityTargetRef {
     pub kind: RealityTargetKind,
     pub entity_id: Option<EntityId>,

@@ -37,6 +37,8 @@ const DEFAULT_MAX_DELTAS: u32 = 64;
 const MAX_DEPTH: u32 = 6;
 const MAX_ELEMENTS: usize = 500;
 const MAX_DELTAS: u32 = 256;
+const UIA_STRUCTURE_COALESCE_THRESHOLD: usize = 8;
+const UIA_STRUCTURE_ID_CAP: usize = 32;
 const SCHEMA_VERSION: u32 = 1;
 const UNPROFILED_PROFILE_KEY: &str = "unprofiled";
 
@@ -401,6 +403,45 @@ struct RealityChange {
     after: Value,
 }
 
+#[derive(Clone, Debug)]
+struct PendingRealityDelta {
+    row_key: String,
+    delta: RealityDelta,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct UiaStructureAggregate {
+    element_count: u32,
+    elements_hash: String,
+    appeared_count: u32,
+    disappeared_count: u32,
+    changed_count: u32,
+    appeared_ids: Vec<String>,
+    disappeared_ids: Vec<String>,
+    changed_ids: Vec<String>,
+    appeared_ids_truncated: bool,
+    disappeared_ids_truncated: bool,
+    changed_ids_truncated: bool,
+    appeared_elements_hash: Option<String>,
+    disappeared_elements_hash: Option<String>,
+    before_changed_elements_hash: Option<String>,
+    after_changed_elements_hash: Option<String>,
+    id_cap: u32,
+}
+
+struct UiaElementMaps {
+    before_by_id: BTreeMap<String, CompactElement>,
+    after_by_id: BTreeMap<String, CompactElement>,
+}
+
+struct UiaElementFanout {
+    appeared_ids: Vec<String>,
+    disappeared_ids: Vec<String>,
+    changed_ids: Vec<String>,
+    changed_id_set: BTreeSet<String>,
+    coalesce: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RectTranslation {
     dx: i64,
@@ -647,7 +688,7 @@ impl SynapseService {
         let mut write_readbacks = Vec::new();
         let mut published_sse_events = 0_u32;
         if head.compact_state_hash != captured.compact_state_hash {
-            let changes = reality_changes(&head.compact_state, &captured.compact_state);
+            let changes = reality_changes(&head.compact_state, &captured.compact_state)?;
             if changes.len() > max_deltas {
                 return Ok(ObserveDeltaResponse {
                     ok: true,
@@ -669,49 +710,53 @@ impl SynapseService {
                     size_estimate_tokens: 0,
                 });
             }
-            let mut previous_seq = head.head_seq;
-            let mut previous_hash = head.compact_state_hash.clone();
-            for change in changes {
-                let seq = previous_seq.saturating_add(1);
-                let source_refs = source_refs_for_change(change.kind, &captured.source_refs);
-                let delta = RealityDelta {
-                    epoch_id: head.epoch_id.clone(),
-                    seq,
-                    previous_seq,
-                    at: captured.observation.at,
-                    source: EventSource::Perception,
-                    kind: change.kind.to_owned(),
-                    path: change.path,
-                    target: change.target,
-                    before: change.before,
-                    after: change.after,
-                    confidence: 0.95,
-                    expected_previous_hash: Some(previous_hash.clone()),
-                    source_refs,
-                    correlations: Vec::new(),
-                    conflict: None,
-                    redaction: reality_redaction(),
-                };
-                delta.validate_append_order().map_err(|error| {
-                    mcp_error(
-                        error_codes::TOOL_INTERNAL_ERROR,
-                        format!("generated invalid reality delta: {error}"),
-                    )
-                })?;
-                let row_key = delta_row_key(&head.profile_key, &head.epoch_id, seq);
+            let has_coalesced_uia = changes.iter().any(|change| {
+                matches!(
+                    change.kind,
+                    "uia_elements_changed" | "uia_structure_changed"
+                )
+            });
+            let pending_deltas = pending_reality_deltas(&head, &captured, changes)?;
+            if has_coalesced_uia {
+                let delta_refs = pending_deltas
+                    .iter()
+                    .map(|pending| &pending.delta)
+                    .collect::<Vec<_>>();
+                let (pending_size_bytes, _) = json_size_estimate(&delta_refs)?;
+                if pending_size_bytes > captured.size_bytes {
+                    return Ok(ObserveDeltaResponse {
+                        ok: true,
+                        profile_key: Some(head.profile_key.clone()),
+                        epoch_id: Some(head.epoch_id.clone()),
+                        from_seq: Some(since_seq),
+                        to_seq: Some(head.head_seq),
+                        deltas: Vec::new(),
+                        cursor: Some(cursor(&head, head.head_seq, true)),
+                        baseline_required: false,
+                        rebase_required: true,
+                        reason: Some(format!(
+                            "delta_snapshot_budget_exceeded: coalesced delta batch {pending_size_bytes} bytes exceeds compact snapshot {} bytes; capture reality_baseline to rebase",
+                            captured.size_bytes
+                        )),
+                        readback_rows: Vec::new(),
+                        published_sse_events: 0,
+                        size_bytes: 0,
+                        size_estimate_tokens: 0,
+                    });
+                }
+            }
+            let mut last_seq = head.head_seq;
+            for pending in pending_deltas {
+                let row_key = pending.row_key;
+                let delta = pending.delta;
+                last_seq = delta.seq;
                 let readback =
                     self.write_kv_json_readback(&row_key, &delta, "reality delta row")?;
                 write_readbacks.push(readback);
                 self.publish_reality_delta(&head.profile_key, &row_key, &delta);
                 published_sse_events = published_sse_events.saturating_add(1);
-                previous_seq = seq;
-                previous_hash = hash_json(&json!({
-                    "previous": previous_hash,
-                    "delta_row_key": row_key,
-                    "after": delta.after,
-                }))?;
             }
-            head.head_seq = previous_seq;
+            head.head_seq = last_seq;
             head.compact_state_hash = captured.compact_state_hash;
             head.updated_at = Utc::now();
             head.compact_state = captured.compact_state;
@@ -1463,6 +1508,8 @@ fn source_ref_matches_change(kind: &str, surface: RealitySourceSurface) -> bool 
         "focus_changed"
         | "uia_element_appeared"
         | "uia_element_disappeared"
+        | "uia_elements_changed"
+        | "uia_structure_changed"
         | "uia_element_name_changed"
         | "uia_element_moved"
         | "uia_element_changed" => matches!(surface, RealitySourceSurface::A11yUia),
@@ -1651,7 +1698,7 @@ fn log_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorD
 fn reality_changes(
     before: &CompactRealityState,
     after: &CompactRealityState,
-) -> Vec<RealityChange> {
+) -> Result<Vec<RealityChange>, ErrorData> {
     let mut changes = Vec::new();
     let foreground_translation = rect_translation(
         &before.foreground.window_bounds,
@@ -1664,7 +1711,7 @@ fn reality_changes(
         after.focused.as_ref(),
         foreground_translation,
     );
-    push_element_changes(&mut changes, before, after, foreground_translation);
+    push_element_changes(&mut changes, before, after, foreground_translation)?;
     push_hud_changes(&mut changes, before, after);
     push_entity_changes(&mut changes, before, after);
     push_sensor_summary_changes(&mut changes, before, after);
@@ -1684,7 +1731,54 @@ fn reality_changes(
             },
         );
     }
-    changes
+    Ok(changes)
+}
+
+fn pending_reality_deltas(
+    head: &RealityHeadRow,
+    captured: &CapturedReality,
+    changes: Vec<RealityChange>,
+) -> Result<Vec<PendingRealityDelta>, ErrorData> {
+    let mut pending = Vec::with_capacity(changes.len());
+    let mut previous_seq = head.head_seq;
+    let mut previous_hash = head.compact_state_hash.clone();
+    for change in changes {
+        let seq = previous_seq.saturating_add(1);
+        let row_key = delta_row_key(&head.profile_key, &head.epoch_id, seq);
+        let source_refs = source_refs_for_change(change.kind, &captured.source_refs);
+        let delta = RealityDelta {
+            epoch_id: head.epoch_id.clone(),
+            seq,
+            previous_seq,
+            at: captured.observation.at,
+            source: EventSource::Perception,
+            kind: change.kind.to_owned(),
+            path: change.path,
+            target: change.target,
+            before: change.before,
+            after: change.after,
+            confidence: 0.95,
+            expected_previous_hash: Some(previous_hash.clone()),
+            source_refs,
+            correlations: Vec::new(),
+            conflict: None,
+            redaction: reality_redaction(),
+        };
+        delta.validate_append_order().map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!("generated invalid reality delta: {error}"),
+            )
+        })?;
+        previous_seq = seq;
+        previous_hash = hash_json(&json!({
+            "previous": previous_hash,
+            "delta_row_key": row_key,
+            "after": &delta.after,
+        }))?;
+        pending.push(PendingRealityDelta { row_key, delta });
+    }
+    Ok(pending)
 }
 
 fn push_foreground_changes(
@@ -2014,54 +2108,311 @@ fn push_element_changes(
     before: &CompactRealityState,
     after: &CompactRealityState,
     foreground_translation: Option<RectTranslation>,
-) {
-    let before_by_id = before
-        .elements
-        .iter()
-        .map(|element| (element.element_id.clone(), element.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let after_by_id = after
-        .elements
-        .iter()
-        .map(|element| (element.element_id.clone(), element.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let element_ids = before_by_id
+) -> Result<(), ErrorData> {
+    let maps = uia_element_maps(before, after);
+    let element_ids = maps
+        .before_by_id
         .keys()
-        .chain(after_by_id.keys())
+        .chain(maps.after_by_id.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
+    let fanout = uia_element_fanout(&maps, foreground_translation);
+    let mut structure_aggregate_emitted = false;
     for element_id in element_ids {
-        let before_element = before_by_id.get(&element_id);
-        let after_element = after_by_id.get(&element_id);
+        let before_element = maps.before_by_id.get(&element_id);
+        let after_element = maps.after_by_id.get(&element_id);
         match (before_element, after_element) {
-            (None, Some(after_element)) => push_change(
-                changes,
-                Option::<CompactElement>::None,
-                Some(after_element.clone()),
-                "uia_element_appeared",
-                format!("/elements/{}", json_pointer_segment(&element_id)),
-                ui_element_target(&element_id, "element"),
-            ),
-            (Some(before_element), None) => push_change(
-                changes,
-                Some(before_element.clone()),
-                Option::<CompactElement>::None,
-                "uia_element_disappeared",
-                format!("/elements/{}", json_pointer_segment(&element_id)),
-                ui_element_target(&element_id, "element"),
-            ),
+            (None, Some(after_element)) => {
+                if fanout.coalesce {
+                    maybe_push_uia_structure_change(
+                        changes,
+                        before,
+                        after,
+                        &maps,
+                        &fanout,
+                        &mut structure_aggregate_emitted,
+                    )?;
+                } else {
+                    push_change(
+                        changes,
+                        Option::<CompactElement>::None,
+                        Some(after_element.clone()),
+                        "uia_element_appeared",
+                        format!("/elements/{}", json_pointer_segment(&element_id)),
+                        ui_element_target(&element_id, "element"),
+                    );
+                }
+            }
+            (Some(before_element), None) => {
+                if fanout.coalesce {
+                    maybe_push_uia_structure_change(
+                        changes,
+                        before,
+                        after,
+                        &maps,
+                        &fanout,
+                        &mut structure_aggregate_emitted,
+                    )?;
+                } else {
+                    push_change(
+                        changes,
+                        Some(before_element.clone()),
+                        Option::<CompactElement>::None,
+                        "uia_element_disappeared",
+                        format!("/elements/{}", json_pointer_segment(&element_id)),
+                        ui_element_target(&element_id, "element"),
+                    );
+                }
+            }
             (Some(before_element), Some(after_element)) => {
-                push_element_field_changes(
-                    changes,
-                    &element_id,
-                    before_element,
-                    after_element,
-                    foreground_translation,
-                );
+                if fanout.coalesce && fanout.changed_id_set.contains(&element_id) {
+                    maybe_push_uia_structure_change(
+                        changes,
+                        before,
+                        after,
+                        &maps,
+                        &fanout,
+                        &mut structure_aggregate_emitted,
+                    )?;
+                } else {
+                    push_element_field_changes(
+                        changes,
+                        &element_id,
+                        before_element,
+                        after_element,
+                        foreground_translation,
+                    );
+                }
             }
             (None, None) => {}
         }
     }
+    Ok(())
+}
+
+fn uia_element_maps(before: &CompactRealityState, after: &CompactRealityState) -> UiaElementMaps {
+    UiaElementMaps {
+        before_by_id: before
+            .elements
+            .iter()
+            .map(|element| (element.element_id.clone(), element.clone()))
+            .collect(),
+        after_by_id: after
+            .elements
+            .iter()
+            .map(|element| (element.element_id.clone(), element.clone()))
+            .collect(),
+    }
+}
+
+fn uia_element_fanout(
+    maps: &UiaElementMaps,
+    foreground_translation: Option<RectTranslation>,
+) -> UiaElementFanout {
+    let appeared_ids = maps
+        .after_by_id
+        .keys()
+        .filter(|element_id| !maps.before_by_id.contains_key(*element_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let disappeared_ids = maps
+        .before_by_id
+        .keys()
+        .filter(|element_id| !maps.after_by_id.contains_key(*element_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed_ids = changed_uia_element_ids(maps, foreground_translation);
+    let changed_id_set = changed_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let structural_count = appeared_ids.len().saturating_add(disappeared_ids.len());
+    let fanout_count = structural_count.saturating_add(changed_ids.len());
+    UiaElementFanout {
+        appeared_ids,
+        disappeared_ids,
+        changed_ids,
+        changed_id_set,
+        coalesce: fanout_count >= UIA_STRUCTURE_COALESCE_THRESHOLD,
+    }
+}
+
+fn changed_uia_element_ids(
+    maps: &UiaElementMaps,
+    foreground_translation: Option<RectTranslation>,
+) -> Vec<String> {
+    maps.before_by_id
+        .keys()
+        .filter(|element_id| {
+            match (
+                maps.before_by_id.get(*element_id),
+                maps.after_by_id.get(*element_id),
+            ) {
+                (Some(before_element), Some(after_element)) => compact_element_has_field_change(
+                    before_element,
+                    after_element,
+                    foreground_translation,
+                ),
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+fn maybe_push_uia_structure_change(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+    maps: &UiaElementMaps,
+    fanout: &UiaElementFanout,
+    emitted: &mut bool,
+) -> Result<(), ErrorData> {
+    if *emitted {
+        return Ok(());
+    }
+    push_uia_structure_change(changes, before, after, maps, fanout)?;
+    *emitted = true;
+    Ok(())
+}
+
+fn push_uia_structure_change(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+    maps: &UiaElementMaps,
+    fanout: &UiaElementFanout,
+) -> Result<(), ErrorData> {
+    let before_summary = uia_structure_aggregate(before, maps, fanout, false)?;
+    let after_summary = uia_structure_aggregate(after, maps, fanout, true)?;
+    let kind = if fanout.appeared_ids.is_empty() && fanout.disappeared_ids.is_empty() {
+        "uia_elements_changed"
+    } else {
+        "uia_structure_changed"
+    };
+    push_change(
+        changes,
+        before_summary,
+        after_summary,
+        kind,
+        "/elements".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Other,
+            entity_id: None,
+            field: Some("elements".to_owned()),
+        },
+    );
+    Ok(())
+}
+
+fn uia_structure_aggregate(
+    state: &CompactRealityState,
+    maps: &UiaElementMaps,
+    fanout: &UiaElementFanout,
+    include_change: bool,
+) -> Result<UiaStructureAggregate, ErrorData> {
+    let appeared_elements = fanout
+        .appeared_ids
+        .iter()
+        .filter_map(|element_id| maps.after_by_id.get(element_id))
+        .collect::<Vec<_>>();
+    let disappeared_elements = fanout
+        .disappeared_ids
+        .iter()
+        .filter_map(|element_id| maps.before_by_id.get(element_id))
+        .collect::<Vec<_>>();
+    let before_changed_elements = fanout
+        .changed_ids
+        .iter()
+        .filter_map(|element_id| maps.before_by_id.get(element_id))
+        .collect::<Vec<_>>();
+    let after_changed_elements = fanout
+        .changed_ids
+        .iter()
+        .filter_map(|element_id| maps.after_by_id.get(element_id))
+        .collect::<Vec<_>>();
+    Ok(UiaStructureAggregate {
+        element_count: saturating_u32(state.elements.len()),
+        elements_hash: hash_json(&state.elements)?,
+        appeared_count: if include_change {
+            saturating_u32(fanout.appeared_ids.len())
+        } else {
+            0
+        },
+        disappeared_count: if include_change {
+            saturating_u32(fanout.disappeared_ids.len())
+        } else {
+            0
+        },
+        changed_count: if include_change {
+            saturating_u32(fanout.changed_ids.len())
+        } else {
+            0
+        },
+        appeared_ids: if include_change {
+            capped_ids(&fanout.appeared_ids)
+        } else {
+            Vec::new()
+        },
+        disappeared_ids: if include_change {
+            capped_ids(&fanout.disappeared_ids)
+        } else {
+            Vec::new()
+        },
+        changed_ids: if include_change {
+            capped_ids(&fanout.changed_ids)
+        } else {
+            Vec::new()
+        },
+        appeared_ids_truncated: include_change && fanout.appeared_ids.len() > UIA_STRUCTURE_ID_CAP,
+        disappeared_ids_truncated: include_change
+            && fanout.disappeared_ids.len() > UIA_STRUCTURE_ID_CAP,
+        changed_ids_truncated: include_change && fanout.changed_ids.len() > UIA_STRUCTURE_ID_CAP,
+        appeared_elements_hash: if include_change && !appeared_elements.is_empty() {
+            Some(hash_json(&appeared_elements)?)
+        } else {
+            None
+        },
+        disappeared_elements_hash: if include_change && !disappeared_elements.is_empty() {
+            Some(hash_json(&disappeared_elements)?)
+        } else {
+            None
+        },
+        before_changed_elements_hash: if include_change && !before_changed_elements.is_empty() {
+            Some(hash_json(&before_changed_elements)?)
+        } else {
+            None
+        },
+        after_changed_elements_hash: if include_change && !after_changed_elements.is_empty() {
+            Some(hash_json(&after_changed_elements)?)
+        } else {
+            None
+        },
+        id_cap: saturating_u32(UIA_STRUCTURE_ID_CAP),
+    })
+}
+
+fn compact_element_has_field_change(
+    before: &CompactElement,
+    after: &CompactElement,
+    foreground_translation: Option<RectTranslation>,
+) -> bool {
+    before.name_sha256 != after.name_sha256
+        || (!same_rect_translation(&before.bbox, &after.bbox, foreground_translation)
+            && before.bbox != after.bbox)
+        || before.parent != after.parent
+        || before.role != after.role
+        || before.automation_id != after.automation_id
+        || before.enabled != after.enabled
+        || before.focused != after.focused
+        || before.patterns != after.patterns
+        || before.children_count != after.children_count
+        || before.depth != after.depth
+}
+
+fn capped_ids(ids: &[String]) -> Vec<String> {
+    ids.iter().take(UIA_STRUCTURE_ID_CAP).cloned().collect()
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn push_element_field_changes(
@@ -3137,6 +3488,255 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn observe_delta_coalesces_high_fanout_uia_appears() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        install_synthetic_input(&service, synthetic_input("Coalesce Window"))?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("uia-coalesce-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let mut after = synthetic_input("Coalesce Window");
+        after.elements = synthetic_elements(UIA_STRUCTURE_ID_CAP + 5)?;
+        install_synthetic_input(&service, after)?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("uia-coalesce-epoch".to_owned()),
+                since_seq: Some(0),
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+
+        assert!(!deltas.0.rebase_required, "{:?}", deltas.0.reason);
+        let structure_delta = deltas
+            .0
+            .deltas
+            .iter()
+            .find(|delta| delta.kind == "uia_structure_changed")
+            .ok_or_else(|| anyhow::anyhow!("missing coalesced structure delta"))?;
+        assert_eq!(structure_delta.path, "/elements");
+        assert_eq!(structure_delta.target.field.as_deref(), Some("elements"));
+        assert!(
+            structure_delta
+                .source_refs
+                .iter()
+                .all(|source| source.surface == RealitySourceSurface::A11yUia),
+            "{:?}",
+            structure_delta.source_refs
+        );
+        assert!(
+            !deltas
+                .0
+                .deltas
+                .iter()
+                .any(|delta| delta.kind == "uia_element_appeared")
+        );
+        assert_eq!(
+            structure_delta
+                .after
+                .get("appeared_count")
+                .and_then(Value::as_u64),
+            Some(u64::try_from(UIA_STRUCTURE_ID_CAP + 5)?)
+        );
+        assert_eq!(
+            structure_delta
+                .after
+                .get("appeared_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(UIA_STRUCTURE_ID_CAP)
+        );
+        assert_eq!(
+            structure_delta
+                .after
+                .get("appeared_ids_truncated")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            structure_delta
+                .after
+                .get("appeared_elements_hash")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_delta_keeps_low_fanout_uia_appears_individual() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        install_synthetic_input(&service, synthetic_input("Low Fanout Window"))?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("uia-low-fanout-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let count = UIA_STRUCTURE_COALESCE_THRESHOLD - 1;
+        let mut after = synthetic_input("Low Fanout Window");
+        after.elements = synthetic_elements(count)?;
+        install_synthetic_input(&service, after)?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("uia-low-fanout-epoch".to_owned()),
+                since_seq: Some(0),
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+
+        assert!(
+            !deltas
+                .0
+                .deltas
+                .iter()
+                .any(|delta| delta.kind == "uia_structure_changed")
+        );
+        assert_eq!(
+            deltas
+                .0
+                .deltas
+                .iter()
+                .filter(|delta| delta.kind == "uia_element_appeared")
+                .count(),
+            count
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_delta_coalesces_high_fanout_uia_field_changes() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        let mut before = synthetic_input("Field Fanout Window");
+        before.elements = synthetic_elements(UIA_STRUCTURE_COALESCE_THRESHOLD + 2)?;
+        install_synthetic_input(&service, before.clone())?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("uia-field-fanout-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let mut after = before;
+        for (index, element) in after.elements.iter_mut().enumerate() {
+            element.name = format!("Renamed Item {index}");
+        }
+        install_synthetic_input(&service, after)?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("uia-field-fanout-epoch".to_owned()),
+                since_seq: Some(0),
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+
+        let elements_delta = deltas
+            .0
+            .deltas
+            .iter()
+            .find(|delta| delta.kind == "uia_elements_changed")
+            .ok_or_else(|| anyhow::anyhow!("missing coalesced field fanout delta"))?;
+        assert!(
+            !deltas
+                .0
+                .deltas
+                .iter()
+                .any(|delta| delta.kind == "uia_element_name_changed")
+        );
+        assert_eq!(
+            elements_delta
+                .after
+                .get("changed_count")
+                .and_then(Value::as_u64),
+            Some(u64::try_from(UIA_STRUCTURE_COALESCE_THRESHOLD + 2)?)
+        );
+        assert!(
+            elements_delta
+                .after
+                .get("after_changed_elements_hash")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_delta_rebases_when_coalesced_uia_exceeds_snapshot_budget() -> anyhow::Result<()>
+    {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        let mut before = synthetic_input("Disappearing Window");
+        before.elements = synthetic_elements(UIA_STRUCTURE_ID_CAP + 5)?;
+        install_synthetic_input(&service, before)?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("uia-rebase-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        install_synthetic_input(&service, synthetic_input("Disappearing Window"))?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("uia-rebase-epoch".to_owned()),
+                since_seq: Some(0),
+                include: vec![ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+
+        assert!(deltas.0.rebase_required);
+        assert!(deltas.0.deltas.is_empty());
+        assert!(
+            deltas
+                .0
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("delta_snapshot_budget_exceeded")),
+            "{:?}",
+            deltas.0.reason
+        );
+        Ok(())
+    }
+
     fn service_with_db(path: &Path) -> anyhow::Result<SynapseService> {
         service_with_profile_dir(path, path)
     }
@@ -3244,6 +3844,34 @@ max_detections = 8
             ObserveSlot::Fs,
             ObserveSlot::Diagnostics,
         ]
+    }
+
+    fn synthetic_elements(count: usize) -> anyhow::Result<Vec<AccessibleNode>> {
+        let mut elements = Vec::with_capacity(count);
+        for index in 0..count {
+            let offset = i32::try_from(index)
+                .unwrap_or(i32::MAX / 20)
+                .saturating_mul(20);
+            elements.push(AccessibleNode {
+                element_id: ElementId::parse(&format!("0x1234:{:04x}", index + 1))?,
+                parent: None,
+                name: format!("Synthetic Item {index}"),
+                role: "MenuItem".to_owned(),
+                automation_id: Some(format!("SyntheticItem{index}")),
+                bbox: Rect {
+                    x: 10,
+                    y: 20_i32.saturating_add(offset),
+                    w: 160,
+                    h: 18,
+                },
+                enabled: true,
+                focused: false,
+                patterns: vec![UiaPattern::Invoke],
+                children_count: 0,
+                depth: 2,
+            });
+        }
+        Ok(elements)
     }
 
     fn install_rich_sensor_state(
