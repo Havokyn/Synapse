@@ -69,11 +69,15 @@ Authoritative local readbacks:
 * `HKCU\Environment\EXA_API_KEY` is the primary user-scoped environment value.
 * `C:\Users\hotra\.codex\secrets\exa_api_key.dpapi` is the current-user DPAPI
   fallback.
-* `C:\Users\hotra\.codex\bin\exa-mcp-server.ps1` is the Codex wrapper. It
-  resolves the key in this order: process environment, User environment,
-  Machine environment, DPAPI fallback.
-* `C:\Users\hotra\.codex\config.toml` points `[mcp_servers.exa]` at the wrapper
-  by absolute path.
+* `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` is the Codex MCP launcher. It
+  preserves stdin/stdout for the stdio MCP protocol, then starts the global npm
+  `exa-mcp-server.cmd`.
+* `C:\Users\hotra\.codex\bin\exa-mcp-server.ps1` is the key resolver used by
+  the launcher when the process environment does not already contain
+  `EXA_API_KEY`. It resolves the key in this order: process environment, User
+  environment, Machine environment, DPAPI fallback.
+* `C:\Users\hotra\.codex\config.toml` points `[mcp_servers.exa]` at
+  `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` by absolute path.
 * `C:\Users\hotra\.codex\bin` should be first in the User `Path`, and
   `%APPDATA%\npm` should be present for the global `exa-mcp-server` npm package.
 
@@ -81,9 +85,9 @@ Never commit, log, or paste the raw key. Verification evidence should print only
 presence, length, a short SHA-256 prefix, the wrapper/config/package paths, MCP
 `initialize`/`tools/list` success, and a live Exa API result shape. If the
 current Codex session reports `Transport closed`, treat that as stale client
-transport state: use the wrapper or restart the Codex session. Do not request
-the key from the operator unless both the user environment and DPAPI fallback
-are physically absent after direct readback.
+transport state: use the launcher from a fresh process or restart the Codex
+session. Do not request the key from the operator unless both the user
+environment and DPAPI fallback are physically absent after direct readback.
 
 ## Windows Cargo supporting-check profile (#502)
 
