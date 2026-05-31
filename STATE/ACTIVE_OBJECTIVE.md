@@ -7,7 +7,7 @@ Complete and resolve every open GitHub issue in `chrisroyse/synapse`. Continue u
 - owner/name: chrisroyse/synapse
 - local path: `C:\code\Synapse`
 - branch: `main`
-- scope: GitHub issues only; current open queue is #590, #589, #588, #585.
+- scope: GitHub issues only; live queue must be read from GitHub every wake. As of 2026-05-31T10:49:28-05:00 the open queue is the #594 whole-body stress campaign plus child issues #595-#635.
 
 ## Definition of Done
 - Each open issue has implementation or disposition completed in repo/GitHub.
@@ -15,4 +15,3 @@ Complete and resolve every open GitHub issue in `chrisroyse/synapse`. Continue u
 - Manual FSV recorded on the relevant issue for shipped behavior, using physical SoT readback and real MCP trigger where applicable.
 - Issue comments record RESOLVED or BLOCKED with evidence.
 - No GitHub Actions/CI dispatched or used as acceptance.
-

@@ -171,6 +171,19 @@ async fn run() -> anyhow::Result<ExitCode> {
         code = "CAPTURE_DPI_AWARENESS_INITIALIZED",
         "capture dpi awareness initialized"
     );
+    let recovery_file = synapse_action::configure_crash_recovery_file(cli.db.as_deref())
+        .context("configure action crash recovery ledger")?;
+    let recovery_report = synapse_action::recover_stale_inputs_from_configured_path()
+        .context("recover stale action inputs from previous daemon")?;
+    tracing::info!(
+        code = "ACTION_CRASH_RECOVERY_CONFIGURED",
+        recovery_file = %recovery_file.display(),
+        recovered_keys = recovery_report.recovered_keys,
+        recovered_buttons = recovery_report.recovered_buttons,
+        recovered_pads = recovery_report.recovered_pads,
+        ignored_trailing_bytes = recovery_report.ignored_trailing_bytes,
+        "action crash recovery ledger configured"
+    );
 
     let m2_config = Cli::m2_config();
     let m3_config = cli.m3_config();

@@ -27,7 +27,7 @@ use super::{
     utils::sleep_ms,
 };
 use crate::backend::mouse_coordinates::{VirtualDesktop, normalize_absolute_mouse_point};
-use crate::{ActionError, EmitState, sample_curve};
+use crate::{ActionError, EmitState, recovery, sample_curve};
 
 const WHEEL_DELTA: i32 = 120;
 const XBUTTON1_DATA: u32 = 0x0001;
@@ -95,6 +95,7 @@ pub(super) fn mouse_button(
 ) -> Result<(), ActionError> {
     match action {
         ButtonAction::Down => {
+            recovery::record_held_button(button)?;
             send_mouse_button_event(button, ButtonAction::Down)?;
             state.apply_mouse_button(button, ButtonAction::Down);
             Ok(())
@@ -102,14 +103,17 @@ pub(super) fn mouse_button(
         ButtonAction::Up => {
             send_mouse_button_event(button, ButtonAction::Up)?;
             state.apply_mouse_button(button, ButtonAction::Up);
+            recovery::clear_held_button(button)?;
             Ok(())
         }
         ButtonAction::Press => {
+            recovery::record_held_button(button)?;
             send_mouse_button_event(button, ButtonAction::Down)?;
             state.apply_mouse_button(button, ButtonAction::Down);
             let _interrupted = sleep_ms(hold_ms);
             send_mouse_button_event(button, ButtonAction::Up)?;
             state.apply_mouse_button(button, ButtonAction::Up);
+            recovery::clear_held_button(button)?;
             Ok(())
         }
     }

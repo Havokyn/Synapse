@@ -1,7 +1,7 @@
 use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard};
 use synapse_core::{Key, KeyCode};
 
-use crate::{ActionError, EmitState};
+use crate::{ActionError, EmitState, recovery};
 
 use super::utils::{enigo, enigo_error, enigo_preserving_held_keys, sleep_ms};
 
@@ -9,11 +9,17 @@ use super::utils::{enigo, enigo_error, enigo_preserving_held_keys, sleep_ms};
 pub(super) fn press_key(key: &Key, hold_ms: u32, state: &mut EmitState) -> Result<(), ActionError> {
     validate_key(key)?;
     let mut enigo = enigo()?;
+    recovery::record_held_key(key)?;
     state.hold_key(key);
-    emit_key(&mut enigo, key, Direction::Press)?;
+    if let Err(error) = emit_key(&mut enigo, key, Direction::Press) {
+        state.release_key(key);
+        let _clear_result = recovery::clear_held_key(key);
+        return Err(error);
+    }
     let _interrupted = sleep_ms(hold_ms);
     emit_key(&mut enigo, key, Direction::Release)?;
     state.release_key(key);
+    recovery::clear_held_key(key)?;
     Ok(())
 }
 
@@ -21,8 +27,14 @@ pub(super) fn press_key(key: &Key, hold_ms: u32, state: &mut EmitState) -> Resul
 pub(super) fn key_down(key: &Key, state: &mut EmitState) -> Result<(), ActionError> {
     validate_key(key)?;
     let mut enigo = enigo_preserving_held_keys()?;
+    recovery::record_held_key(key)?;
     state.hold_key(key);
-    emit_key(&mut enigo, key, Direction::Press)
+    if let Err(error) = emit_key(&mut enigo, key, Direction::Press) {
+        state.release_key(key);
+        let _clear_result = recovery::clear_held_key(key);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_key_state"))]
@@ -30,6 +42,7 @@ pub(super) fn key_up(key: &Key, state: &mut EmitState) -> Result<(), ActionError
     let mut enigo = enigo()?;
     emit_key(&mut enigo, key, Direction::Release)?;
     state.release_key(key);
+    recovery::clear_held_key(key)?;
     Ok(())
 }
 
@@ -43,14 +56,42 @@ pub(super) fn key_chord(
     for key in keys {
         validate_key(key)?;
     }
+    let mut pressed = Vec::with_capacity(keys.len());
     for key in keys {
+        recovery::record_held_key(key)?;
         state.hold_key(key);
-        emit_key(&mut enigo, key, Direction::Press)?;
+        if let Err(error) = emit_key(&mut enigo, key, Direction::Press) {
+            state.release_key(key);
+            let _clear_result = recovery::clear_held_key(key);
+            release_keys_with(&mut enigo, &pressed)?;
+            for pressed_key in pressed.iter().rev() {
+                state.release_key(pressed_key);
+                let _clear_result = recovery::clear_held_key(pressed_key);
+            }
+            return Err(error);
+        }
+        pressed.push(key.clone());
     }
     let _interrupted = sleep_ms(hold_ms);
-    for key in keys.iter().rev() {
-        emit_key(&mut enigo, key, Direction::Release)?;
-        state.release_key(key);
+    let mut first_error = None;
+    for key in pressed.iter().rev() {
+        match emit_key(&mut enigo, key, Direction::Release) {
+            Ok(()) => {
+                state.release_key(key);
+                if let Err(error) = recovery::clear_held_key(key)
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) if first_error.is_none() => {
+                first_error = Some(error);
+            }
+            Err(_error) => {}
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(())
 }

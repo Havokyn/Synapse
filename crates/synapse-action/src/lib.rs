@@ -11,6 +11,7 @@ pub mod handle;
 pub mod hotkey;
 pub mod invoke;
 pub mod rate_limit;
+pub mod recovery;
 pub mod safety;
 pub mod validation;
 
@@ -48,6 +49,10 @@ pub use invoke::{
 };
 pub use rate_limit::{
     SOFTWARE_RATE_LIMIT_PER_S, TokenBucket, TokenBucketSnapshot, VIGEM_RATE_LIMIT_PER_S,
+};
+pub use recovery::{
+    ActionCrashRecoveryReport, configure_crash_recovery_file,
+    recover_stale_inputs_from_configured_path,
 };
 pub use safety::install_panic_hook;
 pub use validation::{MAX_DRAG_DISTANCE_PX, validate_action};

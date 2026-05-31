@@ -3434,6 +3434,7 @@ dependencies = [
  "synapse-a11y",
  "synapse-capture",
  "synapse-core",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

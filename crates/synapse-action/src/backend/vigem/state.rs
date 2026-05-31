@@ -101,7 +101,7 @@ const fn neutral_x360_gamepad_report() -> GamepadReport {
 }
 
 #[cfg(any(windows, test))]
-fn is_neutral_report(report: &GamepadReport) -> bool {
+pub(super) fn is_neutral_report(report: &GamepadReport) -> bool {
     report.buttons.is_empty()
         && report.thumb_l == (0.0, 0.0)
         && report.thumb_r == (0.0, 0.0)

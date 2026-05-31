@@ -13,3 +13,7 @@
 - 2026-05-31T10:00:57-05:00 | iteration=#585-mta-worker | Re-read doctrine/state/issues after compaction, patched stale UIA API docs, regenerated systemspec, and recorded #585 implementation state before runtime FSV.
 - 2026-05-31T10:23:35-05:00 | iteration=#585-fsv | Completed repo-built MCP manual FSV for #585, stopped the FSV daemon, and recorded the required SoT evidence.
 - 2026-05-31T10:27:00-05:00 | iteration=all-issues-closed | Posted #585 RESOLVED evidence, closed #585, and verified the open GitHub issue queue is empty.
+- 2026-05-31T10:49:28-05:00 | iteration=#594-queue-reopen | Re-read required wake-up files after compaction, found #594-#635 open, updated state, and selected #635 as the first active stress issue.
+- 2026-05-31T11:20:00-05:00 | iteration=#635-happy-crash-fsv | Real Inspector act_press crash left Shift held; stable-path repo daemon restart recovered it and removed the action recovery ledger.
+- 2026-05-31T11:29:00-05:00 | iteration=#635-edge-fsv | Completed combo crash, storage-write crash, concurrent calls, invalid-param, and rapid-restart manual FSV edges for #635.
+- 2026-05-31T11:38:00-05:00 | iteration=#635-checks | Stopped the FSV daemon, verified cleanup state, reran local supporting checks, and reviewed the #635 diff.

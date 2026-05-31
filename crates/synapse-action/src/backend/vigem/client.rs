@@ -8,7 +8,7 @@ use synapse_core::{
     ButtonAction, GamepadController, GamepadReport, PadButton, PadId, Stick, Trigger,
 };
 
-use crate::{ActionError, EmitState};
+use crate::{ActionError, EmitState, recovery};
 
 #[cfg(windows)]
 use super::{
@@ -16,7 +16,7 @@ use super::{
     pad::VigemPad,
     reports::{ds4_report_snapshot, x360_report_snapshot, xgamepad_from_snapshot},
     state::{
-        apply_pad_button, apply_pad_report, apply_pad_stick, apply_pad_trigger,
+        apply_pad_button, apply_pad_report, apply_pad_stick, apply_pad_trigger, is_neutral_report,
         neutral_gamepad_report, push_unique, report_for_pad,
     },
 };
@@ -218,6 +218,13 @@ impl VigemBackendInner {
         pad: PadId,
         report: GamepadReport,
     ) -> Result<(), ActionError> {
+        if is_neutral_report(&report) {
+            self.send_report(pad, &report)?;
+            apply_pad_report(state, pad, report);
+            recovery::clear_held_pad(pad)?;
+            return Ok(());
+        }
+        recovery::record_held_pad_report(pad, &report)?;
         self.send_report(pad, &report)?;
         apply_pad_report(state, pad, report);
         Ok(())
@@ -233,6 +240,7 @@ impl VigemBackendInner {
             target
                 .neutralize()
                 .map_err(|err| add_pad_context(*pad, err))?;
+            recovery::clear_held_pad(*pad)?;
         }
         state.pad_state.clear();
         Ok(())
