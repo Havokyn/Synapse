@@ -678,8 +678,8 @@ impl SynapseService {
     }
 
     async fn release_all_best_effort(&self) -> Result<(), ErrorData> {
-        let (handle, snapshot) = self.m2_release_all_context()?;
-        release_all_with_handles(handle, snapshot, ReleaseAllParams {})
+        let (handle, snapshot, reflex_runtime) = self.m2_release_all_context()?;
+        release_all_with_handles(handle, snapshot, reflex_runtime, ReleaseAllParams {})
             .await
             .map(|_response| ())
     }

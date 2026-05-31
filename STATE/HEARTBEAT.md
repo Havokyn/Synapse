@@ -17,3 +17,9 @@
 - 2026-05-31T11:20:00-05:00 | iteration=#635-happy-crash-fsv | Real Inspector act_press crash left Shift held; stable-path repo daemon restart recovered it and removed the action recovery ledger.
 - 2026-05-31T11:29:00-05:00 | iteration=#635-edge-fsv | Completed combo crash, storage-write crash, concurrent calls, invalid-param, and rapid-restart manual FSV edges for #635.
 - 2026-05-31T11:38:00-05:00 | iteration=#635-checks | Stopped the FSV daemon, verified cleanup state, reran local supporting checks, and reviewed the #635 diff.
+- 2026-05-31T11:47:00-05:00 iteration #605-start: wake context/queue re-read; #605 claimed; old leaked stdio daemons stopped except active PID 45712; code paths for release_all, panic hook, hotkey, and held-key auto-release read.
+- 2026-05-31T12:21:00-05:00 iteration #605-fix: first real release_all FSV pass exposed stale recovery button ledger rows; patched release_all ledger clearing and hold_move auto-release timing, then rebuilt release synapse-mcp.
+- 2026-05-31T12:58:00-05:00 iteration #605-reflex-quiesce: patched release_all to disable initialized reflexes before draining held action state, stopped active scheduler ticks on operator disable, rebuilt release daemon, and verified strict Inspector tools/list on PID 52416.
+- 2026-05-31T13:18:00-05:00 iteration #605-release-fsv: completed release-daemon manual FSV for empty, active key, active mouse/pad, stuck-key auto-release, operator hotkey, and invalid-param cases; panic-hook debug daemon is next.
+- 2026-05-31T13:24:00-05:00 iteration #605-panic-fsv: completed debug forced-panic manual FSV; panic hook released Shift, cleared ledger, daemon stayed healthy, and debug daemon was stopped.
+- 2026-05-31T13:37:00-05:00 iteration #605-checks: final local supporting checks and diff review passed; preparing #605 commit and issue closure.

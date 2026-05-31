@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use chrono::Utc;
 use synapse_action::{
     ActionBackend, ActionEmitter, ActionEmitterSnapshotHandle, ActionHandle, ActionStateSnapshot,
-    RecordedInput, RecordingBackend,
+    HELD_KEY_MAX_DURATION_MS, RecordedInput, RecordingBackend,
 };
 use synapse_core::{
     Action, Backend, ButtonAction, Event, EventFilter, EventSource, Key, KeyCode, MouseButton,
@@ -158,7 +158,11 @@ fn hold_move_safety_cap_expires_after_held_key_limit() -> Result<(), Box<dyn std
 
     controller.register_dispatch(&handle)?;
     let down = drain(&mut rx);
-    let result = controller.step_dispatch(&context(30_001, &[], false), &handle, &bus);
+    let result = controller.step_dispatch(
+        &context(HELD_KEY_MAX_DURATION_MS + 1_001, &[], false),
+        &handle,
+        &bus,
+    );
     let up = drain(&mut rx);
     let events = subscriber.drain();
 

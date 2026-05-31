@@ -1,6 +1,6 @@
 use synapse_core::{Action, ComboInput, Point};
 
-use crate::{ActionBackend, ActionError, EmitState};
+use crate::{ActionBackend, ActionError, EmitState, recovery};
 
 mod input;
 mod keyboard;
@@ -103,6 +103,12 @@ fn release_all(state: &mut EmitState) -> Result<(), ActionError> {
     let mut enigo = utils::enigo()?;
     keyboard::release_keys_with(&mut enigo, &snapshot.held_keys)?;
     mouse::release_buttons_with(&mut enigo, &snapshot.held_buttons)?;
+    for key in &snapshot.held_keys {
+        recovery::clear_held_key(key)?;
+    }
+    for button in &snapshot.held_buttons {
+        recovery::clear_held_button(*button)?;
+    }
     state.release_all();
     Ok(())
 }

@@ -1,6 +1,115 @@
 # CURRENT STATE - Synapse
 
-## 2026-05-31T10:49:28-05:00
+## 2026-05-31T13:18:00-05:00
+- Active work remains #605 `scenario(stress): release_all + panic-hook + stuck-key auto-release safety`.
+- Required wake-up context was re-read after compaction and reconciled with live GitHub/git state:
+  - branch `main`; HEAD `632a834 fix(action): recover held inputs after daemon crash (#635) [skip ci]`
+  - live queue still has #594 plus #595-#634 open; #605 active with START comment only.
+- Current #605 patched release FSV daemon:
+  - PID `50668`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`
+  - bind `127.0.0.1:7797`
+  - run dir `.runs\605\release-fsv-final2-20260531T130745`
+  - DB `.runs\605\release-fsv-final2-20260531T130745\db`
+  - recovery ledger `.runs\605\release-fsv-final2-20260531T130745\action_recovery.jsonl`
+  - health ok, action `operator_hotkey=registered`, strict Inspector `tools/list` count 80 with #605 tools present.
+- #605 manual FSV evidence captured so far on PID `50668` using official MCP Inspector `tools/call` triggers and separate SoT reads:
+  - Empty `release_all`: before OS inputs up/recovery ledger absent/storage zero-ish; trigger returned zero releases; after OS up, ledger absent, storage `CF_ACTION_LOG` advanced with release_all ok.
+  - Active reflex + pad cleanup after compaction delay: trigger `release_all` returned `released_buttons=2`, `neutralized_pads=1`; after OS buttons up, XInput slot0 neutral, recovery ledger absent, `CF_ACTION_LOG=4`, `CF_REFLEX_AUDIT=6`, disabled hold-button audit rows have `details.reason="release_all"`.
+  - Active key cleanup: registered `hold_move` Shift+Ctrl, before OS Shift/Ctrl down and ledger had key_held rows; trigger `release_all` returned `released_keys=2`; after OS all up, ledger absent, `CF_ACTION_LOG=8`, `CF_REFLEX_AUDIT=12`, log `M2_RELEASE_ALL_READBACK` shows `before_held_keys=[shift,ctrl]`, `cancelled_key_timers=2`, disabled reflex id `019e7f3f-ab15-77a3-81d8-99331c4fea83`.
+  - Stuck-key auto-release: registered `hold_move` Shift, before OS Shift down and ledger key_held; after 32s OS Shift up, ledger absent, `reflex_list` showed `019e7f40-4621-7522-9204-1590fdd0dced` expired with `REFLEX_LIFETIME_EXPIRED`, log showed `STUCK_KEY_AUTO_RELEASED key=shift`.
+  - Operator hotkey: held middle mouse via `hold_button` and XInput A via `act_pad`; before MBUTTON true, XInput A true, ledger had button_held/pad_held; trigger `act_press keys=[ctrl,alt,shift,p]`; after OS all up, XInput neutral, ledger absent, `CF_ACTION_LOG=12`, `CF_REFLEX_AUDIT=16`, log `SAFETY_OPERATOR_HOTKEY_FIRED` with `release_all_result="ok"` and disabled reflex `019e7f41-6785-7221-b2a2-fcc32fa9cdf1` reason `operator_hotkey`.
+  - Invalid params edge: before OS all up, ledger absent, `CF_ACTION_LOG=12`; trigger `act_press keys=[]`; after OS all up, ledger absent, `CF_ACTION_LOG=14`; log/audit show `TOOL_PARAMS_INVALID` and message `act_press keys must contain at least one key`.
+- #605 panic-hook debug FSV evidence captured on repo-built debug daemon:
+  - PID `53320`, binary `C:\code\Synapse\target\debug\synapse-mcp.exe`, bind `127.0.0.1:7798`, run dir `.runs\605\panic-fsv-20260531T132034`, DB `.runs\605\panic-fsv-20260531T132034\db`, ledger `.runs\605\panic-fsv-20260531T132034\action_recovery.jsonl`.
+  - Started with `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT=act_press_after_keydown`, `SYNAPSE_MCP_REQUIRE_OPERATOR_HOTKEY=1`, isolated log/recovery env, and repo-built debug binary.
+  - Precondition: startup log `ACTION_CRASH_RECOVERY_READBACK ... after=no_stale_inputs`, operator hotkey registered, health ok, strict Inspector `tools/list` count 80 with `act_press`, `release_all`, `storage_inspect`.
+  - Before trigger: OS Shift/Ctrl/Alt/P/LBUTTON/RBUTTON/MBUTTON all false, panic ledger absent, storage `CF_ACTION_LOG=0`.
+  - Trigger: real Inspector `tools/call act_press keys=["shift"] hold_ms=30000 backend=software`; Inspector exited 1 with `MCP error -32001: Request timed out`, because the request task panicked.
+  - After readback: OS all inputs false, ledger absent, process PID `53320` still alive and port `7798` listening, health ok, storage `CF_ACTION_LOG=1`, logs contain `M2_ACT_PRESS_FORCE_PANIC_AFTER_KEYDOWN`, panic hook `SAFETY_RELEASE_ALL_FIRED reason="panic" result="ok"`, emitter release readback `released_keys=1 cancelled_key_timers=1`, and telemetry panic capture for `forced panic during act_press after keydown`.
+  - Stopped debug daemon PID `53320`; port `7798` closed.
+- Final #605 supporting checks after the last edit:
+  - `cargo fmt --check`
+  - `cargo check -p synapse-action`
+  - `cargo check -p synapse-reflex`
+  - `cargo check -p synapse-mcp`
+  - `cargo test -p synapse-mcp release_all_disables_reflexes_before_draining_actor_state -- --nocapture`
+  - `cargo test -p synapse-reflex hold_move_safety_cap_expires_after_held_key_limit --test hold_move_behavior -- --nocapture`
+  - `cargo clippy -p synapse-action -p synapse-reflex -p synapse-mcp --all-targets -- -D warnings`
+  - `cargo build --release -p synapse-mcp`
+  - `git diff --check` exited 0 with only line-ending warnings.
+- Diff review completed for the code and state changes.
+- Next: commit/push with `[skip ci]`, post #605 RESOLVED evidence, close #605, then continue the open issue queue.
+
+## 2026-05-31T12:58:00-05:00
+- Active work remains #605 `scenario(stress): release_all + panic-hook + stuck-key auto-release safety`.
+- Second #605 defect found from manual run: active hold-button reflexes reasserted mouse buttons after `release_all` because the tool drained only M2 actor state and did not quiesce M3 reflex scheduling. Cleaned the stale daemon through real Inspector `reflex_cancel` calls, then old `release_all`; OS key/button SoT readback showed Shift/Ctrl/Alt/P/LBUTTON/RBUTTON/MBUTTON all up and the recovery ledger absent.
+- Patched:
+  - `crates/synapse-reflex/src/lifecycle.rs`: `disable_all_by_operator` now stops the scheduler after disabling active reflexes so no in-flight tick can reassert held input after the action emitter drains.
+  - `crates/synapse-mcp/src/m2/release_all.rs`: `release_all_with_handles` accepts the initialized reflex runtime, disables active reflexes before draining M2 held state, logs disabled reflex ids/result, and still attempts M2 release even if reflex disable reports an error.
+  - `crates/synapse-mcp/src/server/context.rs`, `server/m2_tools.rs`, and `server/everquest_autocombat.rs`: release-all context now carries the optional initialized reflex runtime.
+  - Added focused regression `release_all_disables_reflexes_before_draining_actor_state`.
+- Supporting checks after patch:
+  - `cargo fmt`
+  - `cargo check -p synapse-reflex`
+  - `cargo check -p synapse-mcp`
+  - `cargo check -p synapse-action`
+  - `cargo test -p synapse-mcp release_all_disables_reflexes_before_draining_actor_state -- --nocapture`
+  - `cargo test -p synapse-reflex hold_move_safety_cap_expires_after_held_key_limit --test hold_move_behavior -- --nocapture`
+  - `cargo build --release -p synapse-mcp`
+- Fresh patched release daemon for #605 manual FSV:
+  - PID `52416`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`
+  - bind `127.0.0.1:7797`
+  - run dir `.runs\605\release-fsv-final-20260531T125355`
+  - DB `.runs\605\release-fsv-final-20260531T125355\db`
+  - recovery ledger `.runs\605\release-fsv-final-20260531T125355\action_recovery.jsonl`
+  - logs `.runs\605\release-fsv-final-20260531T125355\logs`
+  - startup log readback: `ACTION_CRASH_RECOVERY_READBACK ... after=no_stale_inputs recovered_keys=0 recovered_buttons=0 recovered_pads=0`, `operator hotkey registered`, `MCP_HTTP_STARTED bind=127.0.0.1:7797`
+  - Inspector `health` readback: `ok=true`, `operator_hotkey=registered`, DB path isolated.
+  - Strict Inspector `tools/list` readback: 80 tools; `release_all`, `act_press`, `act_pad`, `reflex_register`, `reflex_list`, and `storage_inspect` present.
+- Next: run #605 manual behavior FSV on the patched daemon: empty release_all, active reflex + pad release_all, stuck-key auto-release, operator hotkey, invalid params, and debug panic-hook recovery.
+
+## 2026-05-31T12:21:00-05:00
+- Active work remains #605 `scenario(stress): release_all + panic-hook + stuck-key auto-release safety`.
+- During the first #605 release run, the real MCP path proved `release_all` physically released held mouse buttons and neutralized the ViGEm pad, but separate recovery-ledger SoT readback still showed unmatched `button_held` rows after release. That was treated as a real state-reset defect.
+- Code changes now staged in the worktree:
+  - `crates/synapse-action/src/backend/software.rs`: `software::release_all` clears crash-recovery key/button ledger entries after successful release.
+  - `crates/synapse-reflex/src/kinds/hold_move.rs`: hold-move reflex safety cap now waits 1000 ms beyond `HELD_KEY_MAX_DURATION_MS` so action-emitter stuck-key auto-release can fire deterministically instead of racing the reflex lifetime cap.
+  - `crates/synapse-reflex/tests/hold_move_behavior.rs`: updated the supporting safety-cap regression to the new cap.
+- Supporting checks passed after the patch:
+  - `cargo fmt`
+  - `cargo check -p synapse-action`
+  - `cargo check -p synapse-reflex`
+  - `cargo test -p synapse-reflex hold_move_safety_cap_expires_after_held_key_limit --test hold_move_behavior -- --nocapture`
+  - `cargo build --release -p synapse-mcp`
+- Old #605 release daemon PID `9276` was stopped; port `127.0.0.1:7797` is closed; OS key/button SoT reads clean.
+- Next: launch a fresh post-fix repo-built daemon, strict Inspector `tools/list`, then redo #605 manual FSV from a clean run directory.
+
+## 2026-05-31T11:47:00-05:00
+- Required wake-up context was re-read after compaction:
+  - `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`
+  - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`
+  - `AGENTS.md`
+  - #351 manual-FSV/no-CI decision and context comments
+  - live open queue and active issue comments
+  - `git status`, `git log -10`, and current branch
+- Git state readback:
+  - branch `main`
+  - `git status --short --branch`: `## main...origin/main`
+  - `HEAD`: `632a834 fix(action): recover held inputs after daemon crash (#635) [skip ci]`
+- #635 is closed with RESOLVED evidence at https://github.com/ChrisRoyse/Synapse/issues/635#issuecomment-4587371130.
+- Live open queue now contains #594 plus #595-#634. Active work is #605 `scenario(stress): release_all + panic-hook + stuck-key auto-release safety`.
+- Posted #605 START comment: https://github.com/ChrisRoyse/Synapse/issues/605#issuecomment-4587382776.
+- Current wired `mcp__synapse.health` loads and reports `ok=true`; its action subsystem is usable but `operator_hotkey=unavailable` because it started while an older leaked daemon owned Ctrl+Alt+Shift+P.
+- Process SoT before cleanup showed five `synapse-mcp.exe` processes. I preserved likely active chat MCP PID `45712` and stopped leaked siblings `50580`, `49028`, `51096`, and `43260`; process readback now shows only PID `45712`.
+- #605 code read so far:
+  - `release_all` snapshots actor held state before/after and logs `M2_RELEASE_ALL_READBACK`.
+  - action panic hook calls `RELEASE_ALL_HANDLE.fire_release_all_blocking_with_timeout` with a 10 ms timeout and logs `SAFETY_RELEASE_ALL_FIRED`.
+  - operator hotkey disables reflexes and calls the same release path with a 50 ms budget.
+  - key auto-release timers are scheduled on `KeyDown` and emit `STUCK_KEY_AUTO_RELEASED` at `HELD_KEY_MAX_DURATION_MS=30000`.
+  - debug-only `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT=act_press_after_keydown` panics after a real `act_press` keydown, giving a real held-key panic trigger.
+- Next: build repo runtime, launch an isolated HTTP daemon with `SYNAPSE_MCP_REQUIRE_OPERATOR_HOTKEY=1`, strict Inspector `tools/list`, and run #605 manual FSV against OS key/button state, XInput/ViGEm state, storage samples, process/log bytes, and recovery ledger state.
+
+## Previous 2026-05-31T10:49:28-05:00 Snapshot
 - Required wake-up context was re-read after compaction:
   - `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`
   - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`

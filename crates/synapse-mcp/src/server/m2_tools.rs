@@ -297,8 +297,9 @@ impl SynapseService {
             kind = "release_all",
             "tool.invocation kind=release_all"
         );
-        let (handle, snapshot_handle) = self.m2_release_all_context()?;
-        let result = release_all_with_handles(handle, snapshot_handle, params.0).await;
+        let (handle, snapshot_handle, reflex_runtime) = self.m2_release_all_context()?;
+        let result =
+            release_all_with_handles(handle, snapshot_handle, reflex_runtime, params.0).await;
         self.audit_action_result_best_effort("release_all", &result);
         result.map(Json)
     }

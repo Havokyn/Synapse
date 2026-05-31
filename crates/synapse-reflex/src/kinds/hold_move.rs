@@ -10,6 +10,8 @@ use super::hold_lifetime::{
     lifetime_expired,
 };
 
+const HELD_KEY_REFLEX_SAFETY_GRACE_MS: u64 = 1_000;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HoldMoveParams {
     pub keys: Vec<Key>,
@@ -277,5 +279,5 @@ fn dispatch(action_handle: &ActionHandle, action: Action) -> ReflexResult<()> {
 }
 
 const fn held_key_cap() -> Duration {
-    Duration::from_millis(HELD_KEY_MAX_DURATION_MS)
+    Duration::from_millis(HELD_KEY_MAX_DURATION_MS + HELD_KEY_REFLEX_SAFETY_GRACE_MS)
 }

@@ -1,10 +1,14 @@
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use rmcp::ErrorData;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use synapse_action::{ActionEmitterSnapshotHandle, ActionError, ActionHandle, ActionStateSnapshot};
 use synapse_core::{Action, error_codes};
+use synapse_reflex::ReflexRuntime;
 
 use crate::m1::mcp_error;
 
@@ -23,9 +27,11 @@ pub struct ReleaseAllResponse {
 pub async fn release_all_with_handles(
     handle: ActionHandle,
     snapshot_handle: ActionEmitterSnapshotHandle,
+    reflex_runtime: Option<Arc<Mutex<ReflexRuntime>>>,
     _params: ReleaseAllParams,
 ) -> Result<ReleaseAllResponse, ErrorData> {
     let started = Instant::now();
+    let reflex_report = disable_reflexes_for_release_all(reflex_runtime.as_ref());
     let before = snapshot_handle
         .snapshot()
         .await
@@ -49,6 +55,11 @@ pub async fn release_all_with_handles(
         released_keys = response.released_keys,
         released_buttons = response.released_buttons,
         neutralized_pads = response.neutralized_pads,
+        reflex_result = reflex_report.result,
+        disabled_reflexes = reflex_report.disabled_ids.len(),
+        disabled_reflex_ids = ?reflex_report.disabled_ids,
+        reflex_error_code = ?reflex_report.error_code,
+        reflex_detail = ?reflex_report.detail,
         before_held_keys = ?before.held_keys,
         before_held_buttons = ?before.held_buttons,
         before_pad_state_len = before.pad_state.len(),
@@ -59,7 +70,64 @@ pub async fn release_all_with_handles(
         "readback=action_emitter_state tool=release_all after_snapshot_readback"
     );
 
+    if reflex_report.result == "error" {
+        return Err(mcp_error(
+            reflex_report
+                .error_code
+                .unwrap_or(error_codes::TOOL_INTERNAL_ERROR),
+            reflex_report
+                .detail
+                .unwrap_or_else(|| "release_all could not disable active reflexes".to_owned()),
+        ));
+    }
+
     Ok(response)
+}
+
+#[derive(Debug)]
+struct ReflexDisableReport {
+    result: &'static str,
+    disabled_ids: Vec<String>,
+    error_code: Option<&'static str>,
+    detail: Option<String>,
+}
+
+fn disable_reflexes_for_release_all(
+    reflex_runtime: Option<&Arc<Mutex<ReflexRuntime>>>,
+) -> ReflexDisableReport {
+    let Some(runtime) = reflex_runtime else {
+        return ReflexDisableReport {
+            result: "not_initialized",
+            disabled_ids: Vec::new(),
+            error_code: None,
+            detail: None,
+        };
+    };
+    let mut runtime = match runtime.lock() {
+        Ok(runtime) => runtime,
+        Err(_err) => {
+            return ReflexDisableReport {
+                result: "error",
+                disabled_ids: Vec::new(),
+                error_code: Some(error_codes::TOOL_INTERNAL_ERROR),
+                detail: Some("reflex runtime lock poisoned".to_owned()),
+            };
+        }
+    };
+    match runtime.disable_all_for_release_all() {
+        Ok(disabled) => ReflexDisableReport {
+            result: "ok",
+            disabled_ids: disabled.into_iter().map(|status| status.id).collect(),
+            error_code: None,
+            detail: None,
+        },
+        Err(error) => ReflexDisableReport {
+            result: "error",
+            disabled_ids: Vec::new(),
+            error_code: Some(error.code()),
+            detail: Some(error.to_string()),
+        },
+    }
 }
 
 fn response_from_snapshot(snapshot: &ActionStateSnapshot) -> Result<ReleaseAllResponse, ErrorData> {
@@ -100,15 +168,22 @@ fn action_error_to_mcp(error: &ActionError) -> ErrorData {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use tokio_util::sync::CancellationToken;
 
-    use synapse_action::{ActionBackend, ActionEmitter, RecordingBackend};
+    use serde_json::Value;
+    use synapse_action::{
+        ActionBackend, ActionEmitter, ActionEmitterSnapshotHandle, ActionStateSnapshot,
+        RecordingBackend,
+    };
     use synapse_core::{
         Backend, ButtonAction, GamepadController, GamepadReport, Key, KeyCode, MouseButton,
-        PadButton,
+        PadButton, ReflexButtonTarget, ReflexState, StoredReflexAudit,
     };
+    use synapse_reflex::{EventBus, HoldButtonParams, ReflexRuntime, ScheduledReflex};
+    use synapse_storage::{Db, cf, decode_json};
+    use tempfile::TempDir;
 
     use super::{ReleaseAllParams, release_all_with_handles};
 
@@ -159,10 +234,14 @@ mod tests {
         assert_eq!(before.held_buttons, vec![MouseButton::Left]);
         assert_eq!(before.pad_state.len(), 1);
 
-        let response =
-            release_all_with_handles(handle.clone(), snapshot_handle.clone(), ReleaseAllParams {})
-                .await
-                .unwrap_or_else(|error| panic!("release_all should succeed: {error}"));
+        let response = release_all_with_handles(
+            handle.clone(),
+            snapshot_handle.clone(),
+            None,
+            ReleaseAllParams {},
+        )
+        .await
+        .unwrap_or_else(|error| panic!("release_all should succeed: {error}"));
         assert_eq!(response.released_keys, 3);
         assert_eq!(response.released_buttons, 1);
         assert_eq!(response.neutralized_pads, 1);
@@ -188,6 +267,99 @@ mod tests {
         assert!(final_snapshot.pad_state.is_empty());
     }
 
+    #[tokio::test]
+    async fn release_all_disables_reflexes_before_draining_actor_state() {
+        let cancel = CancellationToken::new();
+        let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
+        let (handle, snapshot_handle, join) =
+            ActionEmitter::spawn_with_backend(cancel.clone(), backend);
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
+        let db = Arc::new(
+            Db::open(&temp.path().join("db"), synapse_core::SCHEMA_VERSION)
+                .unwrap_or_else(|error| panic!("test db should open: {error}")),
+        );
+        let runtime = Arc::new(Mutex::new(
+            ReflexRuntime::spawn(Arc::clone(&db), handle.clone(), EventBus::default())
+                .unwrap_or_else(|error| panic!("reflex runtime should spawn: {error}")),
+        ));
+        let reflex = ScheduledReflex::hold_button(
+            "release-all-held-button",
+            HoldButtonParams::new(ReflexButtonTarget::Mouse {
+                button: MouseButton::Left,
+            }),
+        );
+        runtime
+            .lock()
+            .unwrap_or_else(|error| panic!("reflex runtime lock should not poison: {error}"))
+            .register(&reflex)
+            .unwrap_or_else(|error| panic!("hold_button reflex should register: {error}"));
+
+        let before = wait_for_snapshot(&snapshot_handle, |snapshot| {
+            snapshot.held_buttons == vec![MouseButton::Left]
+        })
+        .await;
+        println!(
+            "readback=action_emitter_state tool=release_all edge=active_reflex before={before:?}"
+        );
+
+        let response = release_all_with_handles(
+            handle.clone(),
+            snapshot_handle.clone(),
+            Some(Arc::clone(&runtime)),
+            ReleaseAllParams {},
+        )
+        .await
+        .unwrap_or_else(|error| panic!("release_all should disable reflex and drain: {error}"));
+        assert_eq!(response.released_buttons, 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let after = snapshot_handle
+            .snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("snapshot after release_all should succeed: {error}"));
+        let reflexes = runtime
+            .lock()
+            .unwrap_or_else(|error| panic!("reflex runtime lock should not poison: {error}"))
+            .list(false)
+            .unwrap_or_else(|error| panic!("reflex list should succeed: {error}"));
+        println!(
+            "readback=action_emitter_state tool=release_all edge=active_reflex after={after:?} response={response:?} reflexes={reflexes:?}"
+        );
+        assert!(after.held_keys.is_empty());
+        assert!(after.held_buttons.is_empty());
+        assert!(after.pad_state.is_empty());
+        assert_eq!(after.held_key_timer_count, 0);
+        assert_eq!(
+            reflexes
+                .iter()
+                .find(|status| status.id == "release-all-held-button")
+                .map(|status| status.state),
+            Some(ReflexState::Disabled)
+        );
+        let audits = db
+            .scan_cf(cf::CF_REFLEX_AUDIT)
+            .unwrap_or_else(|error| panic!("reflex audit scan should succeed: {error}"))
+            .into_iter()
+            .map(|(_key, value)| {
+                decode_json::<StoredReflexAudit>(&value)
+                    .unwrap_or_else(|error| panic!("reflex audit row should decode: {error}"))
+            })
+            .collect::<Vec<_>>();
+        let disabled_reason = audits
+            .iter()
+            .filter(|audit| audit.reflex_id == "release-all-held-button")
+            .filter(|audit| audit.status == ReflexState::Disabled)
+            .filter_map(|audit| reason(&audit.details))
+            .next_back();
+        assert_eq!(disabled_reason.as_deref(), Some("release_all"));
+
+        cancel.cancel();
+        let final_snapshot = join
+            .await
+            .unwrap_or_else(|error| panic!("emitter task should join: {error}"));
+        assert!(final_snapshot.held_buttons.is_empty());
+    }
+
     fn key(value: &str) -> Key {
         Key {
             code: KeyCode::Named {
@@ -195,5 +367,29 @@ mod tests {
             },
             use_scancode: false,
         }
+    }
+
+    async fn wait_for_snapshot(
+        snapshot_handle: &ActionEmitterSnapshotHandle,
+        predicate: impl Fn(&ActionStateSnapshot) -> bool,
+    ) -> ActionStateSnapshot {
+        for _attempt in 0..50 {
+            let snapshot = snapshot_handle
+                .snapshot()
+                .await
+                .unwrap_or_else(|error| panic!("snapshot should succeed: {error}"));
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("action emitter snapshot did not reach expected state");
+    }
+
+    fn reason(details: &Value) -> Option<String> {
+        details
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
     }
 }

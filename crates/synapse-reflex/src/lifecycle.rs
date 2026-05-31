@@ -130,7 +130,9 @@ impl ReflexRuntime {
         Ok(ReflexCancelOutcome::Cancelled { status })
     }
 
-    /// Disables every active scheduler reflex for the operator panic hotkey.
+    /// Disables every active scheduler reflex for the operator panic hotkey and
+    /// stops the scheduler so no in-flight tick can reassert held input after
+    /// the action emitter drains state.
     ///
     /// # Errors
     ///
@@ -138,14 +140,34 @@ impl ReflexRuntime {
     /// persisted.
     #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
     pub fn disable_all_by_operator(&mut self) -> ReflexResult<Vec<ReflexStatus>> {
-        let Some(scheduler) = &self.scheduler else {
+        self.disable_all_with_reason("operator_hotkey")
+    }
+
+    /// Disables every active scheduler reflex for a tool-triggered `release_all`
+    /// and stops the scheduler so no in-flight tick can reassert held input
+    /// after the action emitter drains state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ReflexError`] when stopping the scheduler or writing the
+    /// disabled audit rows fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn disable_all_for_release_all(&mut self) -> ReflexResult<Vec<ReflexStatus>> {
+        self.disable_all_with_reason("release_all")
+    }
+
+    fn disable_all_with_reason(&mut self, reason: &'static str) -> ReflexResult<Vec<ReflexStatus>> {
+        let Some(scheduler) = self.scheduler.as_mut() else {
             return Ok(Vec::new());
         };
         let disabled = scheduler.disable_all_reflexes();
+        if !disabled.is_empty() {
+            scheduler.stop()?;
+        }
         for status in &disabled {
             self.disabled_reflex_ids.insert(status.id.clone());
         }
-        self.write_disabled_audits(&disabled)?;
+        self.write_disabled_audits_with_reason(&disabled, reason)?;
         Ok(disabled)
     }
 }

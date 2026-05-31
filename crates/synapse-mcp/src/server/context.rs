@@ -20,6 +20,11 @@ type M2ActionContext = (
     Option<Arc<RecordingBackend>>,
     Option<CancellationToken>,
 );
+type M2ReleaseAllContext = (
+    synapse_action::ActionHandle,
+    synapse_action::ActionEmitterSnapshotHandle,
+    Option<Arc<Mutex<synapse_reflex::ReflexRuntime>>>,
+);
 
 const PROFILE_CHANGED_KIND: &str = "profile-changed";
 const SCOPE_TRANSITIONED_KIND: &str = "scope-transitioned";
@@ -168,16 +173,9 @@ impl SynapseService {
         Ok(preflight)
     }
 
-    pub(super) fn m2_release_all_context(
-        &self,
-    ) -> Result<
-        (
-            synapse_action::ActionHandle,
-            synapse_action::ActionEmitterSnapshotHandle,
-        ),
-        ErrorData,
-    > {
-        self.m2_state
+    pub(super) fn m2_release_all_context(&self) -> Result<M2ReleaseAllContext, ErrorData> {
+        let (handle, snapshot_handle) = self
+            .m2_state
             .lock()
             .map(|state| (state.emitter_handle.clone(), state.snapshot_handle.clone()))
             .map_err(|_err| {
@@ -185,7 +183,19 @@ impl SynapseService {
                     synapse_core::error_codes::OBSERVE_INTERNAL,
                     "M2 service state lock poisoned",
                 )
-            })
+            })?;
+        let reflex_runtime = self
+            .m3_state
+            .lock()
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned",
+                )
+            })?
+            .reflex_runtime
+            .clone();
+        Ok((handle, snapshot_handle, reflex_runtime))
     }
 
     pub(super) fn profile_runtime(

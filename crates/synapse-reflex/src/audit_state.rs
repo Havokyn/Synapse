@@ -67,7 +67,11 @@ impl ReflexRuntime {
         })
     }
 
-    pub(crate) fn write_disabled_audits(&self, statuses: &[ReflexStatus]) -> ReflexResult<()> {
+    pub(crate) fn write_disabled_audits_with_reason(
+        &self,
+        statuses: &[ReflexStatus],
+        reason: &'static str,
+    ) -> ReflexResult<()> {
         if statuses.is_empty() {
             return Ok(());
         }
@@ -88,7 +92,7 @@ impl ReflexRuntime {
                     "priority": status.priority,
                     "lifetime": status.lifetime,
                     "exclusive": status.exclusive,
-                    "reason": "operator_hotkey",
+                    "reason": reason,
                 }),
                 redacted: false,
                 redactions: Vec::new(),
