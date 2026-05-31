@@ -1,8 +1,5 @@
 use std::{net::TcpListener, process::Stdio, sync::OnceLock, time::Duration};
 
-#[cfg(windows)]
-use std::process::Command as StdCommand;
-
 use anyhow::Context;
 use tempfile::TempDir;
 use tokio::{
@@ -119,78 +116,12 @@ async fn stdio_mode_reaches_transport_path_on_closed_stdin() -> anyhow::Result<(
 }
 
 #[tokio::test]
-async fn hardware_hid_missing_literal_fails_startup_with_hid_code() -> anyhow::Result<()> {
-    let _guard = cli_mode_test_lock().lock().await;
-    let dir = TempDir::new()?;
-    let agreement_path = dir.path().join("agreement.json");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
-        .args([
-            "--mode",
-            "stdio",
-            "--hardware-hid",
-            "SYNAPSE_MISSING_PORT_393",
-        ])
-        .env("SYNAPSE_AGREEMENT_PATH", &agreement_path)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(b"I AUTHORIZE HARDWARE INPUT\n")
-            .await
-            .context("write hardware consent phrase")?;
-    }
-    drop(child.stdin.take());
-    let output = child.wait_with_output().await?;
-
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("HID_PORT_NOT_FOUND"), "{stderr}");
-    assert!(stderr.contains("SYNAPSE_MISSING_PORT_393"), "{stderr}");
-    #[cfg(windows)]
-    if agreement_path.exists() {
-        restore_test_acl_for_cleanup(&agreement_path)?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn hardware_hid_refuses_missing_or_wrong_consent_before_backend_startup() -> anyhow::Result<()>
-{
-    let _guard = cli_mode_test_lock().lock().await;
-    let dir = TempDir::new()?;
-    let agreement_path = dir.path().join("agreement.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
-        .args(["--mode", "stdio", "--hardware-hid", "COM426"])
-        .env("SYNAPSE_LOG_DIR", dir.path())
-        .env("APPDATA", dir.path())
-        .env("SYNAPSE_AGREEMENT_PATH", &agreement_path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
-        .await?;
-
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("SAFETY_PROFILE_ACTION_DENIED"), "{stderr}");
-    assert!(stderr.contains("hardware_consent_refused"), "{stderr}");
-    assert!(!agreement_path.exists());
-    let logs = read_logs(dir.path())?;
-    assert!(logs.contains("hardware_consent_refused"), "{logs}");
-    Ok(())
-}
-
-#[tokio::test]
-async fn help_lists_m4_policy_flags_and_envs() -> anyhow::Result<()> {
+async fn help_lists_m4_policy_flags_and_omits_removed_hardware_hid() -> anyhow::Result<()> {
     let _guard = cli_mode_test_lock().lock().await;
     let output = Command::new(env!("CARGO_BIN_EXE_synapse-mcp"))
         .arg("--help")
         .env_remove("SYNAPSE_ALLOW_SHELL")
         .env_remove("SYNAPSE_ALLOW_LAUNCH")
-        .env_remove("SYNAPSE_HARDWARE_HID")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
@@ -202,9 +133,9 @@ async fn help_lists_m4_policy_flags_and_envs() -> anyhow::Result<()> {
     assert!(stdout.contains("SYNAPSE_ALLOW_SHELL"), "{stdout}");
     assert!(stdout.contains("--allow-launch <REGEX>"), "{stdout}");
     assert!(stdout.contains("SYNAPSE_ALLOW_LAUNCH"), "{stdout}");
-    assert!(stdout.contains("--hardware-hid <PORT_OR_AUTO>"), "{stdout}");
-    assert!(stdout.contains("SYNAPSE_HARDWARE_HID"), "{stdout}");
-    assert!(stdout.contains("--reset-hardware-consent"), "{stdout}");
+    assert!(!stdout.contains("--hardware-hid"), "{stdout}");
+    assert!(!stdout.contains("SYNAPSE_HARDWARE_HID"), "{stdout}");
+    assert!(!stdout.contains("--reset-hardware-consent"), "{stdout}");
     Ok(())
 }
 
@@ -236,7 +167,6 @@ async fn http_health_reads_m4_policy_counts_from_repeated_cli_flags() -> anyhow:
         // reports the configured allowlist counts rather than "any".
         .env("SYNAPSE_ALLOW_SHELL_ANY", "0")
         .env("SYNAPSE_ALLOW_LAUNCH_ANY", "0")
-        .env_remove("SYNAPSE_HARDWARE_HID")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -270,7 +200,6 @@ async fn http_health_reads_m4_policy_counts_from_comma_env() -> anyhow::Result<(
         // reports the configured allowlist counts rather than "any".
         .env("SYNAPSE_ALLOW_SHELL_ANY", "0")
         .env("SYNAPSE_ALLOW_LAUNCH_ANY", "0")
-        .env_remove("SYNAPSE_HARDWARE_HID")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -411,19 +340,4 @@ fn read_logs(path: &std::path::Path) -> anyhow::Result<String> {
         }
     }
     Ok(logs)
-}
-
-#[cfg(windows)]
-fn restore_test_acl_for_cleanup(path: &std::path::Path) -> anyhow::Result<()> {
-    let principal = format!(
-        r"{}\{}:F",
-        std::env::var("USERDOMAIN")?,
-        std::env::var("USERNAME")?
-    );
-    let status = StdCommand::new("icacls")
-        .arg(path)
-        .args(["/grant", &principal])
-        .status()?;
-    assert!(status.success(), "icacls cleanup grant failed: {status}");
-    Ok(())
 }

@@ -38,12 +38,8 @@ dpi_scale_min = 1.0
 dpi_scale_max = 2.0
 
 [input]
-backends = ["software", "hardware", "vigem"]
+backends = ["software", "vigem"]
 
-[[input.firmware]]
-id = "synapse.pico_hid"
-version = "0.1.0"
-digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 [[input.models]]
 id = "minecraft_like_local_world_v0"

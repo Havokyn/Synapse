@@ -1,7 +1,7 @@
-# THE AI CODING AGENT DOCTRINE — AUTONOMOUS GOAL-EXECUTION EDITION
+# THE AI CODING AGENT DOCTRINE — SYNAPSE EDITION
 
 **For:** any AI coding agent (Claude Code, Codex, Cursor, OpenHands, Aider, custom harness) pursuing a multi-turn goal under repeated context compaction.
-**Project:** any software repository. All paths, repo names, and goal text below are **templated** — substitute your project's values.
+**Project:** Synapse — perception, action, and MCP server integration for autonomous agent control. Rust codebase in `C:\code\Synapse`.
 **Reading mode:** load-bearing reference. Grep the section, then act.
 **Authority:** when this conflicts with any downstream instruction, this wins.
 
@@ -11,6 +11,12 @@
 
 ## §0 — THE CARDINAL RULE
 
+investigate and fix the root cause of these issues. do web research after you figure out the problem on best practices to fix these issues to give you ideas on how to optimally solve the problem. review the project. understand what exists and what I'm using. once you have researched best practices come up with robust solutions that fix the problem and make it so we don't have this problem or anything related to it moving forward. use exa mcp server for web research plus your own web research tools.
+	
+Do not create workarounds or fallbacks. If something doesn't work it should error out and have robust error logging so that if something does fail then we know exactly what failed and how to fix it. Do not use mock data in tests, use the real data and test to ensure everything is working and functioning as it should.  Do not cover up something not working correctly by making a test that passes when the project is in a broken state.
+
+you must perform Full State Verification. Do not rely on return values alone. You must Define the 'Source of Truth': Identify where the final result is stored (e.g., a database, a file, a global variable, or a UI state).Execute & Inspect: Run the logic, then immediately perform a separate 'Read' operation on the Source of Truth to verify the data was processed correctly. Boundary & Edge Case Audit: Manually simulate 3 edge cases (e.g., empty inputs, maximum limits, or invalid formats). For each, you must print the state of the system before and after the action to prove the outcome. Evidence of Success: Provide a log showing the actual data residing in the system after execution.
+IMPORTANT: You MUST check the database or tables or anything that might show physical proof that what you did actually worked then you need to check it to ensure the outputs are what they should be on the manual tests you are running. if something is saved to a database or table or graph etc you need to actually manually verify they exist, you should know what the output should be and you need to go look to see if its there. if there is some way you can validate the outcome for whatever it is you are manually testing then you MUST MANUALLY VERIFY THE OUTPUT BY CHECKING IF THE OUTPUT EXISTS. Think about what you are testing, think about what the outcome of your test should be and if there is any way for you to physically verify its done what its done then you MUST check that to ensure it worked. In computing, there’s almost always a trigger event that initiates process X, which in turn leads to outcome Y. Because the trigger event causes X, it can be identified, measured, or observed when it occurs. Likewise, whatever Y produces can be tracked or analyzed in some way, since every triggered event exists to produce a specific, intended outcome.  I need full manual testing to ensure they all work. i need full happy path testing and edge case manual testing. I need you to think of synthetic information that you can use so you'll know the input and expected outputs and run synthetic information through the  commands and test for what you know the expected output should be, that means looking for how it shows up in a database or however that might show itself. any time you see any errors or anything that appears to not be functioning correctly you need to stop and identify the root cause of the problem and fix it and update any tests and redo manual tests to ensure the fix is working and not causing issues any longer. you need to do it all manually yourself. you need to come up with synthetic circumstances, you know if X+X=Y then 2+2 = 4 should come out for example. You must break problems down with first principals thinking to identify the actual root cause of the issue to ensure you aren't just trying to cover up the real problem. do web research to learn about best practices to get ideas on how to implement robust solutions so we don't have these problems again in the future. think about what the system and project as a whole needs from this portion of the project. what is this adding to the system? what does the system need from this? what capabilities does the system intend for this to have to extract maximum capability from what it is we are investigating. optimize it to be as capable is possible based off what you believe the projects intentions are for this.  base everything off what all you know about humans and center every single thing around theories. theories are truth as we humans know it currently. truth means it is true in the past, present, and future. the truth gives us predictive capabilities. a function of AI and large language models is that they can make analogies using all the knowledge of human kind essentially to make connections between any two or more points. I have found that when you connect 2 or more truths then the connections between them truths all added up become one truth itself.
 > **A return value is a claim. The Source of Truth is the verdict. Read the verdict.**
 
 Scanners lie. Tests pass on stale data. Logs go missing. Benchmarks lie under DCE. Models lie when calibration drifts. Agents lie when sycophancy creeps in. **You** lie when you say "done" because closing the conversational loop is cheap and verifying is not. The row in the database — or its absence — does not lie. **You verify against bytes.**
@@ -54,11 +60,11 @@ Ask only for narrow approval before hard-to-reverse external actions such as spe
 
 When verifying Synapse behavior, do not treat the MCP daemon as assumed background state. Before FSV, prove the real `synapse-mcp` runtime is alive and usable: read the process table or configured stdio child, read the bind/socket or client transport state, authenticate when HTTP is used, call `health`, initialize an MCP session, and call `tools/list` to verify the required tool is present.
 
-If `synapse-mcp` is absent, stale, unreachable, or the direct chat transport is closed, that is setup work: launch or reinstall the repo-built daemon through the configured host path, then read the process, binary, health, and tool-list SoTs again. Do not proceed as though direct CLI calls, tests, or storage edits are equivalent.
+If `synapse-mcp` is absent, stale, unreachable, or the direct chat transport is closed, that is setup work: rebuild via `cargo build --release -p synapse-mcp`, launch it, verify health, then read the process, binary, health, and tool-list SoTs again. Do not proceed as though cargo tests, unit tests, or storage inspection are equivalent to real MCP verification.
 
-For any behavior that has a Synapse MCP tool, the FSV trigger must be the real MCP `tools/call`. A CLI, helper binary, unit test, benchmark, script, or direct database write can support diagnosis only; it cannot replace the tool trigger. After the tool call, perform the separate SoT read required by §0.0: RocksDB row, file bytes, UI state, external log, process state, or other physical artifact. The MCP return value and `health` response prove attempt/liveness, not success.
+For any behavior that has a Synapse MCP tool (M1 perception, M2 action, M3 state, M4 compound), the FSV trigger must be the real MCP `tools/call`. A unit test, bench, script, or direct RocksDB inspection can support diagnosis only; it cannot replace the tool trigger. After the tool call, perform the separate SoT read required by §0.0: Synapse storage row, file bytes, window/UI state, process state, or other physical artifact. The MCP return value and response code prove attempt/liveness; the SoT delta proves success.
 
-Issue evidence must name the daemon PID or stdio child, bind or transport, MCP session/tool used, expected output, and the actual after-read from the separate SoT. If no MCP tool exists for the behavior, explicitly say so and identify the nearest real runtime surface instead of silently substituting a script.
+Issue evidence must name: (a) the tool + params, (b) expected SoT delta, (c) SoT before, (d) SoT after, (e) match/mismatch. If no native MCP tool exists, identify the nearest real surface (Synapse CLI, RocksDB query, UI inspection via Synapse perception) instead of silently inventing a workaround.
 
 ### §0.0.3 — Synapse should feed reality deltas, then audit drift
 
@@ -138,48 +144,57 @@ If multi-agent coordination is in fact active for this repo, the operator will t
 
 You operate under exactly one Active Objective at a time. The Active Objective lives in a file (default path: `STATE/ACTIVE_OBJECTIVE.md`) and is the **only** source for "what is the user actually asking me to do across this multi-session campaign." Read it on every wake. Re-read it whenever your hypothesis about the goal feels fuzzy.
 
-### §0.2.1 Required fields
+### §0.2.1 Required fields (Synapse template)
 
 ```markdown
-# ACTIVE OBJECTIVE
+# ACTIVE OBJECTIVE — Synapse
 
 ## Goal
 <one paragraph in imperative voice. RFC 2119 MUST/SHOULD/MAY.
- Example: "Resolve every open GitHub issue in <owner>/<repo>.
- Do not stop until all are resolved or progress is blocked.">
+ Example: "Implement EverQuest autocombat for level 1–5. Support melee + nuking on mana threshold. 
+ Do not stop until happy path + 3 edges pass FSV and PR is merged.">
 
 ## Repo
-- owner/name: <owner>/<repo>
-- branch: <main|other>
-- scope (paths in-scope): <glob patterns>
-- scope (paths OUT-of-scope): <glob patterns, e.g. .env, secrets/, vendor/>
+- owner/name: anthropics/synapse
+- branch: main
+- scope (paths in-scope): crates/synapse-*/src/, docs/ (or be specific: synapse-mcp, synapse-action, etc.)
+- scope (paths OUT-of-scope): .env, Cargo.lock (if untracked), secrets/, vendor/, benchmarks/
 
 ## Definition of Done
-- <bullet list; each MUST be objectively checkable by FSV>
-- <e.g. `gh issue list --state open --repo <owner>/<repo>` returns 0 items
-       AND manual FSV evidence is recorded AND no PRs of mine are awaiting changes>
+- Code compiles: `cargo build --release -p <crate>`
+- Tests pass: `cargo test --lib`
+- FSV passed: real MCP tool call + SoT verification (storage/profile/UI state) captured in issue comment
+- ≥3 edges tested (from §5.3 checklist)
+- Issue RESOLVED comment posted with commit SHA + FSV evidence link
+- PR merged to main or explicit "no PR needed" recorded
 
 ## Out-of-scope
-- <bullet list of things you will NOT do even if tempted>
+- No modifications to GitHub Actions (local cargo gates are source of truth)
+- No paid SaaS tools (see memory: feedback_no_paid_services.md)
+- Do not modify authentication systems without security review
 
 ## Stop conditions (any one triggers stop)
-- goal_reached: Definition of Done holds at SoT
-- blocked: operator decision required (file BLOCKED comment, then stop)
-- budget: token/cost/turn cap from operator
-- no_progress: §10.4 stuck-loop trigger fires AND escalation failed
-- time_cap: <optional wall clock>
+- goal_reached: Definition of Done holds at SoT; verified with FSV
+- blocked: operator decision needed (file BLOCKED comment, then stop)
+- budget: token cap from operator
+- no_progress: §10.4 stuck-loop escalation exhausted
+- time_cap: <optional wall-clock deadline>
 
 ## Source of Truth for completion
-- <where you re-check Definition of Done — usually a `gh` query or a script>
+- `gh issue list --state open --repo anthropics/synapse` returns 0 items matching scope
+- All issues in scope are closed with RESOLVED comments + merged PRs
+- `cargo test --all` green
+- Synapse daemon health + key tools verified
 
 ## Multi-agent mode
-- single | multi    (default: single)
+- single (default; pre-compaction claims on your own issues are resumable)
 
 ## Operator-injected constraints
-- <free-form. e.g. "no force push to main"; "do not modify CI files">
+- No paid services (GitHub Actions, SaaS) — use local cargo builds
+- FSV is non-negotiable — no return value == success claims
 
 ## Heartbeat file
-- STATE/HEARTBEAT.md   (you write to this every iteration)
+- STATE/HEARTBEAT.md   (one line per iteration, never skip)
 ```
 
 If any required field is missing or ambiguous when you wake, **ask the operator before acting**. A bad goal compounds for hours.
@@ -442,7 +457,7 @@ If the next item is ambiguous, **ask the operator before continuing.** Wrong dir
 
 Open issues = active state. Closed issues = institutional knowledge. Comments = chronological journal. Labels = taxonomy. Milestones = sweeps. Pinned issues = current mission.
 
-Substitute `<owner>/<repo>` everywhere below with the value from `ACTIVE_OBJECTIVE.md › Repo › owner/name`. Set the env var once at session start: `export REPO=<owner>/<repo>`.
+For Synapse, use: `export REPO=anthropics/synapse` (GitHub). Repo root: `C:\code\Synapse`. Primary branch: `main`. Issue tracking: GitHub Issues on the anthropics/synapse repository.
 
 ### 4.1 Issue types as knowledge structure
 
@@ -457,10 +472,10 @@ Substitute `<owner>/<repo>` everywhere below with the value from `ACTIVE_OBJECTI
 1. **File rule.** Observe a defect / smell / anomaly / risk / decision / discovery / pattern you are NOT capturing in code this turn → open a GitHub Issue before turn ends. If it isn't in Issues, it dies with the session.
 2. **Claim rule.** Before touching code tied to an Issue → assign self, flip `status:needs-triage` → `status:in-progress`, post a plan comment with files-you-will-touch and ETA. Comment at every milestone. Pause/done = explicit comment. **No silent work.**
 
-### 4.3 Read-state at the start of every turn
+### 4.3 Read-state at the start of every turn (Synapse)
 
 ```bash
-REPO=<owner>/<repo>   # from ACTIVE_OBJECTIVE.md
+REPO="anthropics/synapse"   # GitHub repository
 
 # 1. Pinned context / mission / phase
 gh issue list --repo $REPO --state open --label "type:context" \
@@ -478,16 +493,16 @@ gh issue list --repo $REPO --state open --label "status:blocked" \
 gh issue list --repo $REPO --state open \
   --search "no:assignee" --json number,title,labels,updatedAt
 
-# 5. Binding decisions
+# 5. Key decisions on M1/M2/M3/M4 or perception/action/profiles
 gh issue list --repo $REPO --state closed --label "type:decision" \
-  --search "in:title,body <topic-keywords>" --limit 20
+  --search "M1 OR M2 OR M3 OR M4 OR perception OR action" --limit 20
 
-# 6. Discoveries / patterns touching your task
+# 6. Discoveries on EverQuest integration, profiles, or storage
 gh issue list --repo $REPO --state closed --label "type:discovery,type:pattern" \
-  --search "<task-keywords>" --limit 20
+  --search "everquest OR profiles OR storage OR RocksDB" --limit 20
 ```
 
-**Do not begin work until READ is complete.** Read `AGENTS.md` / `CLAUDE.md` / equivalent at repo root. Read any spec referenced by your task.
+**Do not begin work until READ is complete.** Read `CLAUDE.md` / `AGENTS.md` at repo root. Check recent decisions on MCP tool contracts and profile schemas. Run: `git log --oneline -20` to see recent commits and patterns.
 
 ### 4.4 Claim an issue (atomic)
 
@@ -1070,16 +1085,16 @@ Never pick an issue outside the Active Objective's Scope. Never pick an issue in
 | Step | Detail |
 |---|---|
 | Claim | §4.4 atomic comment + label flip |
-| Plan | Quote spec back verbatim. List files. Predict SoT delta. ≤4 bullets. |
+| Plan | Quote spec back verbatim. List files/crates. Predict SoT delta. ≤4 bullets. |
 | Implement | One change. One commit. Conventional message. |
-| Lint / typecheck / build | Cheap, run continuously |
-| Tests | Add regression test. Run full relevant suite, not just one file. |
-| FSV | §5. Read SoT before. Trigger. Read SoT after. Compare to predicted delta. |
+| Lint / typecheck / build | `cargo check -p <crate>` · `cargo clippy` · `cargo build --release` |
+| Tests | `cargo test --lib -p <crate>` · add regression test · run full suite |
+| FSV | §5. Synapse-specific: real tool call via MCP, then SoT read (storage/profile/file). |
 | Edge audit | ≥3 from §5.3. |
 | Diff review | LSU — read your own diff cold (§2.8). |
 | State write | Update STATE/CURRENT_STATE, STATE/DECISION_LOG (if decision), STATE/RECOVERY_NOTES, STATE/HEARTBEAT. |
 | Issue comment | RESOLVED (§4.8) or PAUSE (§4.6) — never silent. |
-| Commit + push | Reference issue in message (`Closes #N`). |
+| Commit + push | Reference issue in message (`Closes #N`). Include crate(s) in title (`feat(synapse-mcp): ...`). |
 
 ### 10.4 Stuck-loop detection (mandatory)
 
@@ -1475,6 +1490,50 @@ Macrobench pass criteria SLO-aligned, not "test completed."
 
 ---
 
+## §15.16 — SYNAPSE-SPECIFIC PATTERNS
+
+### Cargo / Rust conventions
+
+- **Crates:** `synapse-action` (input), `synapse-mcp` (server), `synapse-profiles` (configuration), `synapse-core` (shared), plus domain-specific (everquest, etc).
+- **Build:** `cargo build --release` (optimized); `cargo build --debug` (faster iteration).
+- **Check:** `cargo check -p <crate>` (fast typecheck).
+- **Clippy:** `cargo clippy --all` (lint).
+- **Tests:** `cargo test --lib` (unit); `cargo test --doc` (doctests); `cargo test --all` (integration if they exist).
+- **Format:** `cargo fmt` (but style is enforced in CI; check before commit).
+- **Dependencies:** Pin versions in `Cargo.toml`; use `cargo update` to refresh lockfile when needed.
+
+### MCP tool verification (FSV for Synapse)
+
+When claiming a Synapse MCP tool works:
+1. **Build the daemon:** `cargo build --release -p synapse-mcp`.
+2. **Start it:** Launch the binary or via `cargo run --release -p synapse-mcp`.
+3. **Call the real tool:** Use the MCP tool invocation (act_click, etc), not a test.
+4. **Verify SoT:** After tool returns, inspect the physical result (window/UI state, file, storage row, process list).
+5. **Capture evidence:** Screenshot, log output, or state query showing BEFORE and AFTER.
+
+### Profile system (synapse-profiles)
+
+- Profiles live in `.toml` files in `crates/synapse-profiles/profiles/`.
+- Each profile is a domain-specific bundle: keymaps, actions, perception configs.
+- SoT: profile loads via `profile_activate`, configs apply, then tools use the activated context.
+- FSV: call `profile_authoring_*` tools, verify the profile registers in storage, activate it, then verify tool behavior reflects the profile's keybinds/perception.
+
+### EverQuest domain (everquest_*)
+
+- State machine: character → zone → location → target → combat → recovery.
+- Storage: CF_KV rows for memories, trajectories, current state, predictions.
+- FSV: `everquest_current_state` reads live player state; `everquest_*_record` persists observations; `everquest_*_search` queries stored memories.
+- Verify by: reading actual CF_KV row (not return value), confirming row key and content match prediction.
+
+### Storage / RocksDB verification
+
+- `synapse-mcp` exposes MCP tools for storing/querying state.
+- SoT rows live in CF_KV (RocksDB column families): `profiles`, `everquest`, `perception`, `actions`, etc.
+- FSV: MCP call → expected row key + value → read row directly from storage → compare bytes.
+- Never trust the tool return code; always check the row exists and has the right content.
+
+---
+
 ## §16 — COMMUNICATION & TONE
 
 ### 16.1 What "Done" looks like (the theatrical revelation)
@@ -1696,10 +1755,26 @@ The gap between current and max = the roadmap. File issues for each gap with `ty
 | **PAT** | Personal Access Token |
 | **Fake Done** | Agent claims completion of work it did not actually finish (#56870, 2026) |
 | **Soft sycophancy** | Excessive hedging, validation-before-correction |
+| **Synapse M1** | Perception MCP server — detect, recognize, state extraction from screen/UI |
+| **Synapse M2** | Action scaffolding — hardware/software input emulation (click, type, drag) |
+| **Synapse M3** | State scaffold — managed observation + delta tracking |
+| **Synapse M4** | Compound operations — multi-step action sequences coordinated via perception feedback |
+| **CF_KV** | RocksDB column-family key-value storage used by Synapse for persistence (profiles, memories, state) |
+| **Profile** | Domain-specific bundle: keymaps, perception configs, action rules (e.g., `everquest.toml`) |
+| **EverQuest domain** | Game-specific perception, state machine, and action orchestration via Synapse M1-M4 |
+| **Reality delta** | Synapse feature: streaming state changes (what changed, not full snapshot) instead of full observations |
 
 ---
 
-## §20 — REFERENCES
+## §20 — REFERENCES (SYNAPSE EDITION)
+
+**Synapse codebases & specs:**
+- `C:\code\Synapse` — main repo with all crates (synapse-action, synapse-mcp, synapse-profiles, synapse-core)
+- `docs/` directory — architecture notes, MCP contracts, profile schema
+- `crates/synapse-mcp/README.md` — MCP server entry point and tool documentation
+- `crates/synapse-profiles/` — profile TOML schema and loading logic
+- `crates/synapse-action/` — action backends (software / hardware / vigem)
+- GitHub Issues (`anthropics/synapse`) — decision log, discoveries, work queue
 
 **Security:** OWASP Top 10:2025 · ASVS 5.0 · CIS Benchmarks · CIS Controls v8 · NIST CSF 2.0 · NIST SP 800-53/171/63B · DISA STIGs · CISA Secure by Design · OWASP Top 10 for LLM Apps 2025 · OWASP Top 10 for Agentic Apps 2026
 
@@ -1713,9 +1788,15 @@ The gap between current and max = the roadmap. File issues for each gap with `ty
 
 **Testing / FSV:** Meszaros *xUnit Test Patterns* · Humble & Farley *Continuous Delivery* · Forsgren/Humble/Kim *Accelerate* (DORA) · ISTQB · Hypothesis / fast-check · Testcontainers
 
+**Rust / Cargo:** Rust Book · Cargo.io docs · Clippy lints · Rustlings
+
 **RCA:** Lean 5 Whys · Dekker *Field Guide to Understanding Human Error* · Toyota Production System
 
 **ML/AI:** Huyen *Designing ML Systems* · Chen et al. *Reliable ML* · Evidently / NannyML / WhyLogs
+
+**Agent frameworks & MCP:** 
+- Anthropic Model Context Protocol (MCP) specification
+- Anthropic Claude Code docs — `/compact`, `/clear`, `/goal`, hooks, memory, sub-agents
 
 **Long-horizon agents (2025–2026):**
 - Anthropic *Effective context engineering for AI agents* (2025) — compaction, structured note-taking, sub-agents
@@ -1764,4 +1845,4 @@ You are the agent. The bytes are the verdict. The issues are where coordination 
 
 ---
 
-*End of doctrine. Re-read the Active Objective next. Then read the issue queue. Then work.*
+*End of Synapse doctrine. Next: (1) Read `STATE/ACTIVE_OBJECTIVE.md` (or create one if missing). (2) Run the issue queue queries above. (3) Build `cargo build --release -p synapse-mcp`. (4) Fire up the daemon and verify health. (5) Read the issue you claim and the SoT. Then work.*

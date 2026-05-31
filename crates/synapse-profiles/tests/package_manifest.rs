@@ -21,10 +21,7 @@ fn package_manifest_accepts_happy_fixture() -> TestResult {
         manifest.permissions.use_scope,
         ProfileUseScope::OperatorOwnedTest
     );
-    assert_eq!(
-        manifest.input.backends,
-        [Backend::Software, Backend::Hardware, Backend::Vigem]
-    );
+    assert_eq!(manifest.input.backends, [Backend::Software, Backend::Vigem]);
     assert_eq!(
         manifest.targets[0].process_name.as_deref(),
         Some("luanti.exe")

@@ -54,7 +54,7 @@ dpi_scale_min = 1.0
 dpi_scale_max = 2.0
 
 [input]
-backends = ["software", "hardware"]
+backends = ["software"]
 
 [permissions]
 license_spdx = "MIT OR Apache-2.0"

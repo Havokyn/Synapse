@@ -760,6 +760,19 @@ async fn wait_for_launch_window(
                 if let Some(context) =
                     select_launch_window(&contexts, pid, title_regex, excluded_hwnds)
                 {
+                    // Best-effort foreground so the launched window is
+                    // immediately actionable/observable. Without this, a newly
+                    // launched window can open behind the caller's foreground
+                    // (Windows foreground-stealing prevention), leaving observe
+                    // pointed at the previous window.
+                    if let Err(error) = synapse_a11y::focus_window(context.hwnd) {
+                        tracing::warn!(
+                            code = "M4_ACT_LAUNCH_FOCUS_FAILED",
+                            hwnd = context.hwnd,
+                            error = %error,
+                            "act_launch matched the launched window but could not foreground it"
+                        );
+                    }
                     return WindowWaitResult::matched(context.clone());
                 }
                 last_error = None;

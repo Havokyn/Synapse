@@ -2,7 +2,6 @@ use synapse_core::{Action, Backend, ProfileBackends};
 
 use crate::{ActionError, EmitState};
 
-pub mod hardware;
 #[cfg(any(windows, test))]
 pub(crate) mod mouse_coordinates;
 pub mod recording;
@@ -135,7 +134,7 @@ impl Default for BackendResolutionPolicy {
 ///
 /// # Errors
 ///
-/// Resolves `Backend::Hardware` to the M2 fail-closed hardware stub.
+/// Resolves `Backend::Hardware` to the retired fail-closed hardware slot.
 #[tracing::instrument(skip_all, fields(requested_backend = ?requested))]
 pub fn resolve_backend(
     requested: Backend,
@@ -148,8 +147,7 @@ pub fn resolve_backend(
 ///
 /// # Errors
 ///
-/// Resolves `Backend::Hardware` to the M2 fail-closed hardware stub when a
-/// real hardware backend is not configured.
+/// Resolves `Backend::Hardware` to the retired fail-closed hardware slot.
 #[tracing::instrument(skip_all, fields(requested_backend = ?requested))]
 pub fn resolve_backend_with_policy(
     requested: Backend,

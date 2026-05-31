@@ -18,14 +18,13 @@ members = [
     "crates/synapse-reflex",
     "crates/synapse-storage",
     "crates/synapse-profiles",
-    "crates/synapse-hid-host",
     "crates/synapse-models",
     "crates/synapse-telemetry",
     "crates/synapse-test-utils",
     "crates/synapse-overlay",
 ]
 default-members = ["crates/synapse-mcp", "crates/synapse-overlay"]
-exclude = ["firmware/pico-hid"]
+exclude = []
 
 [workspace.package]
 version = "0.1.0"
@@ -36,7 +35,7 @@ authors = ["Synapse contributors"]
 repository = "https://github.com/ChrisRoyse/Synapse"
 ```
 
-Firmware (`firmware/pico-hid`) is excluded because it targets `thumbv6m-none-eabi`. Separate Cargo project.
+The retired physical HID firmware project is no longer part of the repository or workspace.
 
 ---
 
@@ -175,7 +174,7 @@ unwrap_used = "deny"                  # forbid unwrap() outside tests
 expect_used = "deny"
 ```
 
-Per-crate `Cargo.toml` adds `unsafe_code = "allow"` only where needed (`synapse-capture`, `synapse-hid-host` for serial OS handles).
+Per-crate `Cargo.toml` adds `unsafe_code = "allow"` only where needed for Windows or driver FFI, such as `synapse-capture`, `synapse-a11y`, `synapse-action`, and `synapse-audio`.
 
 ---
 
@@ -228,10 +227,6 @@ cargo build --release -p synapse-mcp
 # Run tests
 cargo test --workspace
 
-# Build firmware (separate)
-cd firmware/pico-hid
-cargo build --release --target thumbv6m-none-eabi
-elf2uf2-rs target/thumbv6m-none-eabi/release/synapse-pico-hid synapse-pico-hid.uf2
 ```
 
 Local supporting checks follow the matrix in `13_testing_strategy.md` §14.
@@ -375,13 +370,11 @@ stt_model = "whisper-tiny-int8"
 default_keyboard_backend = "software"
 default_mouse_backend = "software"
 default_pad_backend = "vigem"
-hardware_hid_port = ""                # empty = auto-detect
 
 [safety]
 panic_hotkey = "ctrl+alt+shift+p"
 allow_launch = []                     # list of regexes
 allow_shell = []                      # list of regexes
-allow_hardware_hid = false
 no_redaction = false
 require_acknowledge_on_start = true
 
@@ -423,8 +416,6 @@ Commands:
   replay export <id> <out.zip>
   replay tail <id>
   metrics dump --since <duration> --output <path>
-  hid identify --port <com>
-  hid flash --port <com>
   token rotate
   overlay               Launch debug overlay (separate process)
   --version             Print version + build hash + signature
@@ -438,10 +429,8 @@ Top-level flags:
   --log-level <level>
   --reflex-disabled
   --vigem-disabled
-  --hardware-hid <port|auto>
   --allow-launch <regex>
   --allow-shell <regex>
-  --allow-hardware-hid
   --no-redaction
   --otlp-endpoint <url>
   --metrics-bind <addr>

@@ -12,14 +12,13 @@ members = [
     "crates/synapse-storage",
     "crates/synapse-profiles",
     "crates/synapse-everquest",
-    "crates/synapse-hid-host",
     "crates/synapse-models",
     "crates/synapse-telemetry",
     "crates/synapse-test-utils",
     "crates/synapse-overlay",
 ]
 default-members = ["crates/synapse-mcp", "crates/synapse-overlay"]
-exclude = ["firmware/pico-hid", "fuzz"]
+exclude = []
 
 [workspace.package]
 version = "0.1.0"
@@ -79,7 +78,6 @@ chromiumoxide = "0.9.1"
 wasapi = "0.23.0"
 enigo = { version = "0.6.1", default-features = false }
 vigem-client = "0.1.4"
-serialport = "4.9.0"
 ort = { version = "2.0.0-rc.12", default-features = false }
 rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "zstd", "multi-threaded-cf"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
@@ -91,7 +89,6 @@ ed25519-dalek = "2.2.0"
 sha2 = "0.11.0"
 subtle = "2.6.1"
 sysinfo = { version = "0.39.2", default-features = false, features = ["system"] }
-crc16 = "0.4.0"
 notify = "9.0.0-rc.4"
 fs2 = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

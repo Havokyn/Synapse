@@ -1,16 +1,10 @@
 pub mod defaults;
 pub mod error_codes;
 pub mod filter;
-pub mod firmware_version;
 pub mod retention;
 pub mod types;
-pub mod usb_identity;
 
 pub use defaults::{DEFAULT_AIM_TRACK_EMA_ALPHA, SCHEMA_VERSION};
-pub use firmware_version::{
-    EXPECTED_FW_MAJOR, SYNAPSE_PICO_HID_BUILD_HASH_LEN, SYNAPSE_PICO_HID_FW_MAJOR,
-    SYNAPSE_PICO_HID_FW_MINOR, SYNAPSE_PICO_HID_FW_PATCH,
-};
 pub use types::{
     AccessibleNode, AccessibleQuery, AccessibleQueryScope, AccessibleSubtree, Action, AimCurve,
     AimNaturalParams, AimStyle, AimTarget, AudioContext, AudioCue, AudioEvent, Backend,
@@ -35,8 +29,4 @@ pub use types::{
     SubscriptionId, SubsystemHealth, Trigger, UiaPattern, WindowEdge,
     default_hud_confidence_threshold, element_id, entity_id, new_reflex_id, new_session_id,
     new_subscription_id,
-};
-pub use usb_identity::{
-    SYNAPSE_PICO_HID_MANUFACTURER, SYNAPSE_PICO_HID_PRODUCT, SYNAPSE_PICO_HID_SERIAL_PREFIX,
-    SYNAPSE_PICO_HID_USB_PID, SYNAPSE_PICO_HID_USB_VID,
 };

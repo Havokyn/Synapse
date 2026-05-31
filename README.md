@@ -1,8 +1,8 @@
 # Synapse
 
-[![M4 Active + M5 Registry/Audit Moat](https://img.shields.io/badge/status-M4_active_%2B_M5_registry_audit_moat-blue)](https://github.com/ChrisRoyse/Synapse/issues/454)
+[![Software Input + M5 Registry/Audit Moat](https://img.shields.io/badge/status-software_input_%2B_M5_registry_audit_moat-blue)](https://github.com/ChrisRoyse/Synapse/issues/588)
 
-Synapse is a Rust MCP server that gives AI agents a local computer-use body: structured perception, action, and low-latency reflexes live in Synapse while the connected model remains the brain. M0-M3 are tagged, M4 hardware HID / first-game work is active, and the M5 profile-registry / audit-data moat is an active P1 workstream tracked from issue #454.
+Synapse is a Rust MCP server that gives AI agents a local computer-use body: structured perception, action, and low-latency reflexes live in Synapse while the connected model remains the brain. M0-M4 are tagged, the physical HID path is retired by the software-only input decision in issue #588, and the M5 profile-registry / audit-data moat is an active P1 workstream tracked from issue #454.
 
 ## Agent Doctrine
 
@@ -46,9 +46,9 @@ inspection, and UI inspection are agent-owned work when they are reversible on
 this host. A blocker exists only for the exact hard-to-reverse external action
 left after that local work is exhausted.
 
-## Status: M4 Active + M5 Registry/Audit Moat
+## Status: Software Input + M5 Registry/Audit Moat
 
-M0-M3 are tagged (`v0.1.0-m0` through `v0.1.0-m3`). M4 remains the active hardware HID + first-game phase, while the M5 profile-registry / audit-data learning loop is active now as P1 product architecture. The live strategic context is [issue #454](https://github.com/ChrisRoyse/Synapse/issues/454); child work is tracked in #455-#470.
+M0-M4 are tagged (`v0.1.0-m0` through `v0.1.0-m4`). Issue #588 retires the physical HID strategy: `software` (Win32 `SendInput`) is the default keyboard/mouse backend, `vigem` is the software-only virtual controller backend, and the legacy `hardware` token is retained only as a fail-closed compatibility value that returns `ACTION_BACKEND_UNAVAILABLE`. The M5 profile-registry / audit-data learning loop is active now as P1 product architecture. The live strategic context is [issue #454](https://github.com/ChrisRoyse/Synapse/issues/454); child work is tracked in #455-#470.
 
 The profile-registry / audit-data moat is the compounding loop: profile used -> runtime outcome audited -> quality/compatibility learned -> profile improved -> registry distributes better profile -> more evidence. Agents must treat this as a first-class product surface, not incidental telemetry.
 
@@ -97,60 +97,19 @@ target/release/synapse-mcp
 
 On Windows the binary name is `synapse-mcp.exe`.
 
-## Hardware HID Setup
+## Input Backends
 
-Hardware HID is optional unless you are exercising the M4 hardware backend. Use
-an RP2040 Raspberry Pi Pico board, preferably Pico H (`SC0917`) or Pico WH
-(`SC0919`), plus a data-capable micro-USB cable. Buying and source details live
-in [docs/hardware/procurement.md](docs/hardware/procurement.md); failure-mode
-readbacks live in
-[docs/hardware/troubleshooting.md](docs/hardware/troubleshooting.md).
+Synapse currently ships two live input backends:
 
-Install the firmware build prerequisites:
+| Backend | Purpose |
+|---|---|
+| `software` | Keyboard and mouse through Win32 `SendInput`; default for keyboard, mouse, click, type, aim, drag, scroll, combo, and release-all paths. |
+| `vigem` | Software-only virtual Xbox/DS4 controller reports through ViGEmBus; default for pad actions. |
 
-```powershell
-rustup target add thumbv6m-none-eabi
-cargo install elf2uf2-rs
-```
-
-Build the UF2 from the standalone firmware project:
-
-```powershell
-cd C:\code\Synapse\firmware\pico-hid
-cargo build --release
-elf2uf2-rs target\thumbv6m-none-eabi\release\pico-hid pico-hid.uf2
-Get-Item .\pico-hid.uf2
-```
-
-Hold `BOOTSEL`, plug in the Pico, verify the `RPI-RP2` volume, then copy the
-UF2 to that drive:
-
-```powershell
-Get-CimInstance Win32_LogicalDisk |
-  Where-Object VolumeName -eq 'RPI-RP2' |
-  Select-Object DeviceID,VolumeName
-
-Copy-Item .\pico-hid.uf2 E:\
-```
-
-Replace `E:` with the actual `DeviceID` from the readback. After the copy,
-Windows should dismount `RPI-RP2` and the firmware should re-enumerate. Read
-the physical source of truth before using hardware actions:
-
-```powershell
-Get-PnpDevice -PresentOnly |
-  Where-Object { $_.FriendlyName -match 'Pico|RP2040|Synapse|USB Serial|HID' } |
-  Select-Object Status,Class,FriendlyName,InstanceId
-
-Get-CimInstance Win32_SerialPort |
-  Select-Object DeviceID,Name,PNPDeviceID
-```
-
-Start Synapse with explicit hardware enablement, for example
-`synapse-mcp --mode stdio --hardware-hid auto --allow-hardware-hid`.
-First-run supported-use acknowledgment is recorded in
-`%APPDATA%\synapse\agreement.json`; if it is missing, complete the local
-prompt/setup flow and then read that file directly.
+The legacy `hardware` backend token still parses for profile/package
+compatibility, but it is not a live backend. Requests that resolve to
+`hardware` fail closed with `ACTION_BACKEND_UNAVAILABLE` and guidance to use
+`software` or `vigem`.
 
 ## Run
 

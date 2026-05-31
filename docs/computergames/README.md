@@ -77,7 +77,7 @@ Shared load-bearing primitives:
 | Structured semantic event stream | Yes (focus / mutation / file change) | Yes (entity appeared / HUD change / audio cue) |
 | Keyboard / mouse SendInput | Yes | Yes |
 | Virtual controller (ViGEm) | Rarely | Yes |
-| Hardware HID (RP2040 gateway) | Rarely | Yes for physical-input rigs |
+| Software-only virtual controller (ViGEm) | Rarely | Yes for controller-driven games |
 | Aim curves / smooth cursor motion | Optional | Critical for games |
 | Sub-frame reflex runtime | Helpful (auto-dismiss popups) | Critical (frame-perfect inputs) |
 | OCR fallback | Yes (when a11y is sparse) | Yes (HUD readouts) |
@@ -115,13 +115,13 @@ benchmarks, GitHub Actions, and CI are never FSV.
 | 00 | [`00_vision_and_scope.md`](00_vision_and_scope.md) | First. Mission, users, non-goals. |
 | 01 | [`01_architecture.md`](01_architecture.md) | Moving parts. Processes, threads, Rust workspace. |
 | 02 | [`02_perception.md`](02_perception.md) | Eyes/ears. Capture, detection, a11y, OCR, audio, events. |
-| 03 | [`03_action.md`](03_action.md) | Hands. Mouse/kbd/controller/HID. |
+| 03 | [`03_action.md`](03_action.md) | Hands. Mouse/kbd/controller. |
 | 04 | [`04_reflex_runtime.md`](04_reflex_runtime.md) | Sub-frame reactive controllers. Event bus. |
 | 05 | [`05_mcp_tool_surface.md`](05_mcp_tool_surface.md) | Public API. Every tool, parameter, return, error. |
 | 06 | [`06_data_schemas.md`](06_data_schemas.md) | Rust structs, JSON envelopes, event types, error codes. |
 | 07 | [`07_storage_and_profiles.md`](07_storage_and_profiles.md) | RocksDB schema, runtime files, profile system. |
 | 08 | [`08_supported_use_policy.md`](08_supported_use_policy.md) | What we will/won't ship, supported contexts, operator acknowledgments. |
-| 09 | [`09_hardware_hid_gateway.md`](09_hardware_hid_gateway.md) | Pi Pico HID firmware + serial protocol + host driver. |
+| 09 | [`09_hardware_hid_gateway.md`](09_hardware_hid_gateway.md) | Retired hardware-HID design note; software-only input is current. |
 | 10 | [`10_performance_budget.md`](10_performance_budget.md) | Latency targets, profiling, optimization rules. |
 | 11 | [`11_security_and_safety.md`](11_security_and_safety.md) | Threat model, permissions, redaction, kill switches. |
 | 12 | [`12_observability.md`](12_observability.md) | Logging, tracing, metrics, debug overlay, replay tool. |
@@ -180,8 +180,8 @@ A Rust MCP server that exposes structured desktop and game state as low-token JS
 │                   │                                                  │
 │                   ▼                                                  │
 │  ┌────────── Action ─────────────┐                                  │
-│  │  SendInput  │  ViGEm  │  HID  │  ──► OS / virtual controller /   │
-│  │  Interception driver  (opt)   │       USB serial → RP2040 board │
+│  │  SendInput  │  ViGEm          │  ──► OS / virtual controller     │
+│  │  Interception driver  (opt)   │                                  │
 │  └────────────────┬───────────────┘                                 │
 │                   │                                                  │
 │  ┌────────────────▼─────────────────────────────────────────────┐   │
@@ -207,7 +207,7 @@ Slow loop (model → MCP → response) runs at human-decision rate. Fast loop (r
 | Full `observe()` response from request to reply | ≤ 30 ms |
 | Event push from underlying frame/UIA event to subscriber | ≤ 50 ms |
 | `act_aim_at` start-of-motion latency | ≤ 5 ms |
-| `act_press` to electrical signal on USB | ≤ 2 ms (software) / ≤ 4 ms (hardware HID) |
+| `act_press` dispatch to OS input path | ≤ 2 ms (software) |
 | Reflex `on_event` action emission | ≤ 5 ms from event |
 | MCP idle-tick CPU usage | ≤ 1% on one core |
 | Steady-state VRAM when models loaded | ≤ 2 GB |
@@ -231,8 +231,6 @@ synapse-mcp --mode stdio
 # Streamable HTTP mode (for remote / multi-client agents)
 synapse-mcp --mode http --bind 127.0.0.1:7700
 
-# Optional: flash an RP2040 board for hardware HID
-cargo run -p synapse-hid-host -- flash --device COM7
 ```
 
 Win11 ViGEmBus note: the Nefarius 1.22.0 installer works by operator GUI
@@ -260,16 +258,13 @@ synapse/
 │   ├── synapse-a11y/                   # UIA tree walk + WinEvent hook + CDP client
 │   ├── synapse-perception/             # detection, OCR, HUD, event derivation
 │   ├── synapse-audio/                  # WASAPI loopback + STT + spatial direction
-│   ├── synapse-action/                 # input emit (kbd/mouse/pad/HID)
+│   ├── synapse-action/                 # input emit (kbd/mouse/pad)
 │   ├── synapse-reflex/                 # sub-frame reactive runtime
 │   ├── synapse-storage/                # RocksDB wrapper + CFs
 │   ├── synapse-profiles/               # per-app/per-game profile loader
-│   ├── synapse-hid-host/               # Rust serial driver for hardware HID gateway
 │   ├── synapse-models/                 # ONNX runtime wrappers, model loader
 │   ├── synapse-telemetry/              # tracing + metrics + replay log
 │   └── synapse-test-utils/             # shared test helpers
-├── firmware/
-│   └── pico-hid/                       # RP2040 HID gateway (Rust, embassy-rs, no_std)
 ├── models/                             # bundled ONNX models (small set, downloaded on demand)
 ├── profiles/                           # bundled app + game profiles (community-extendable)
 ├── scripts/                            # build, signing, install (PowerShell + Rust)
@@ -302,7 +297,7 @@ Crate boundaries and dep graph in `01_architecture.md`. Build details in `14_bui
 | M1 — perception MVP (a11y + capture) | In progress (active phase) |
 | M2 — action MVP (kbd/mouse/pad) | Not started |
 | M3 — reflex + MCP surface | Not started |
-| M4 — hardware HID + first game profile | Not started |
+| M4 — first game profile and compound actions | Retired hardware path; compound actions shipped |
 | M5 — production-ready, 5+ app/game profiles | Not started |
 
 See `15_roadmap_and_milestones.md`.
@@ -312,7 +307,7 @@ See `15_roadmap_and_milestones.md`.
 ## Authoring rules
 
 - Files ≤ 500 lines, functions ≤ 30 lines, cyclomatic ≤ 10.
-- `#![forbid(unsafe_code)]` everywhere except `synapse-capture` (DirectX FFI) and `synapse-hid-host` (serial / OS handle).
+- `#![forbid(unsafe_code)]` everywhere except crates that require Windows or driver FFI, such as `synapse-capture`, `synapse-a11y`, `synapse-action`, and `synapse-audio`.
 - All errors carry `SCREAMING_SNAKE_CASE` codes via `thiserror`. No `anyhow` in library crates.
 - Public APIs and CF names are `pub const` — no magic strings.
 - `tracing` for everything. `println!` is a code-review rejection.

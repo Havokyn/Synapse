@@ -18,7 +18,7 @@ between them is a local check failure and release blocker.
 pub enum Backend {
     Software,    // Win32 SendInput
     Vigem,       // Virtual Xbox/DS4 via ViGEm
-    Hardware,    // RP2040 HID gateway
+    Hardware,    // Retired compatibility token; fail-closed unavailable backend
     Auto,        // Resolve from active session policy + action class
 }
 ```
@@ -28,8 +28,9 @@ mouse, combo, and release-all choose `software`; pad actions choose `vigem`.
 When the active profile declares `[backends] default_backend = "hardware"`,
 `Auto` resolves to `hardware` for keyboard, mouse, pad, combo, and release-all
 unless a class-specific `keyboard_default`, `mouse_default`, or `pad_default`
-overrides that class. The active table is exposed at
-`health.subsystems.action.backend_resolution`.
+overrides that class. That retained token then fails closed with
+`ACTION_BACKEND_UNAVAILABLE`; it never silently downgrades. The active table is
+exposed at `health.subsystems.action.backend_resolution`.
 
 ### 1.2 Perception mode
 
@@ -1109,7 +1110,7 @@ Serialized `use_scope` values and policy behavior:
 | TOML/JSON value | Intended scope | Default action posture |
 |---|---|---|
 | `productivity` | Operator productivity apps such as editors, browsers, terminals, chat, and file managers. | Actions allowed according to normal session/tool permissions. |
-| `single_player` | Local single-player games such as Minecraft Java local worlds. | Game actions allowed; hardware HID still requires explicit enablement. |
+| `single_player` | Local single-player games such as Minecraft Java local worlds. | Game actions allowed through software/ViGEm; retired hardware tokens fail closed. |
 | `operator_owned_test` | Local QA fixtures, private test servers, simulators, and replay harnesses owned by the operator. | Actions allowed when the profile declares the test boundary. |
 | `sanctioned_research` | University, tournament, or research rigs where automation is explicitly authorized. | Actions allowed with explicit profile metadata and operator setup. |
 | `unknown` | Unreviewed apps/games or profiles without a supported-use declaration. | Observation allowed; write/action tools refuse with `SAFETY_PROFILE_ACTION_DENIED` unless the operator explicitly permits the reviewed override path. |
@@ -1278,7 +1279,6 @@ ACTION_RATE_LIMITED
 ACTION_BACKEND_UNAVAILABLE
 ACTION_TARGET_INVALID
 ACTION_HOLD_EXCEEDED_MAX
-ACTION_HID_PORT_DISCONNECTED
 ACTION_VIGEM_NOT_INSTALLED
 ACTION_VIGEM_PLUGIN_FAILED
 ACTION_ELEMENT_NOT_RESOLVED
@@ -1295,9 +1295,8 @@ M4 action-path codes:
 | Code | Trigger path |
 |---|---|
 | `ACTION_QUEUE_FULL` | Action queue or hardware emitter backpressure rejects a new action. |
-| `ACTION_BACKEND_UNAVAILABLE` | Requested backend is disabled, unavailable, or missing required host setup. |
-| `ACTION_TARGET_INVALID` | Launch/window target, action target, or hardware route target cannot be resolved. |
-| `ACTION_HID_PORT_DISCONNECTED` | `Backend::Hardware` is disconnected, reconnecting, or failed after serial loss. |
+| `ACTION_BACKEND_UNAVAILABLE` | Requested backend is disabled, unavailable, retired, or missing required host setup. |
+| `ACTION_TARGET_INVALID` | Launch/window target or action target cannot be resolved. |
 | `SAFETY_RELEASE_ALL_FIRED` | Release-all interlock cancels pending or held inputs. |
 | `SAFETY_OPERATOR_HOTKEY_FIRED` | Operator panic hotkey cancels pending or held inputs. |
 
@@ -1384,7 +1383,7 @@ M4 MCP/session-path codes:
 
 | Code | Trigger path |
 |---|---|
-| `TOOL_PARAMS_INVALID` | Invalid `act_combo`, `act_run_shell`, `act_launch`, `hid identify`, or `hid flash` parameters after schema/default resolution. |
+| `TOOL_PARAMS_INVALID` | Invalid `act_combo`, `act_run_shell`, or `act_launch` parameters after schema/default resolution. |
 
 ### 8.6 Storage
 
@@ -1410,27 +1409,11 @@ MODEL_LOAD_FAILED
 MODEL_BACKEND_UNAVAILABLE
 ```
 
-### 8.8 Hardware HID
+### 8.8 Retired hardware token
 
-```
-HID_PORT_NOT_FOUND
-HID_PORT_OPEN_FAILED
-HID_PROTOCOL_HANDSHAKE_FAILED
-HID_FIRMWARE_VERSION_MISMATCH
-HID_COMMAND_REJECTED
-HID_LINK_TIMEOUT
-```
-
-M4 hardware-HID path codes:
-
-| Code | Trigger path |
-|---|---|
-| `HID_PORT_NOT_FOUND` | Auto-discovery or configured serial path cannot find a candidate RP2040 CDC ACM port. |
-| `HID_PORT_OPEN_FAILED` | Candidate serial port exists but cannot be opened with the requested access/settings. |
-| `HID_PROTOCOL_HANDSHAKE_FAILED` | Host and firmware fail the initial protocol handshake. |
-| `HID_FIRMWARE_VERSION_MISMATCH` | Firmware reports an incompatible protocol or firmware version. |
-| `HID_COMMAND_REJECTED` | Firmware receives a syntactically valid command but rejects it by status code. |
-| `HID_LINK_TIMEOUT` | Host does not receive the expected firmware response before the command deadline. |
+The M4 hardware-HID error family was removed with the physical HID runtime.
+`Backend::Hardware` is retained as a parseable compatibility token, but all
+execution attempts fail closed with `ACTION_BACKEND_UNAVAILABLE`.
 
 ### 8.9 Safety
 
@@ -1469,5 +1452,5 @@ Pre-v1: bump major freely. Post-v1: schema changes require ADR + migration plan 
 
 - Storage layout, CF list, key encoding → `07_storage_and_profiles.md`
 - Profile TOML examples → `07_storage_and_profiles.md`
-- HID protocol record format → `09_hardware_hid_gateway.md`
+- Retired hardware HID design note → `09_hardware_hid_gateway.md`
 - Tool API surface that consumes these types → `05_mcp_tool_surface.md`

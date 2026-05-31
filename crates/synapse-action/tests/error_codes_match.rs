@@ -60,11 +60,6 @@ fn action_error_cases() -> Vec<(&'static str, ActionError, &'static str)> {
             ACTION_HOLD_EXCEEDED_MAX
         ),
         case!(
-            "hid_port_disconnected",
-            HidPortDisconnected,
-            ACTION_HID_PORT_DISCONNECTED
-        ),
-        case!(
             "vigem_not_installed",
             VigemNotInstalled,
             ACTION_VIGEM_NOT_INSTALLED

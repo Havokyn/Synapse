@@ -238,7 +238,7 @@ fn bundled_everquest_profile_targets_inventory_panel() -> Result<(), Box<dyn std
     );
     assert!(profile.metadata["capability.observe.hud"].contains("everquest.map_window_text"));
     assert!(profile.metadata["capability.observe.hud"].contains("everquest.next_level_percent"));
-    assert_eq!(profile.backends.mouse_default, Backend::Hardware);
+    assert_eq!(profile.backends.mouse_default, Backend::Software);
     Ok(())
 }
 

@@ -1867,8 +1867,9 @@ Returns:
 Required permissions:
 
 - `WRITE_REFLEX`
-- `INPUT_KEYBOARD`, `INPUT_MOUSE`, `INPUT_PAD`, and/or `INPUT_HARDWARE_HID`
-  according to the nested step actions and chosen backend.
+- `INPUT_KEYBOARD`, `INPUT_MOUSE`, and/or `INPUT_PAD` according to the nested
+  step actions. The retired `hardware` backend token is not a separate
+  permission gate; it fails closed at backend execution.
 
 Rules:
 
@@ -1882,8 +1883,7 @@ Rules:
 
 Errors: `TOOL_PARAMS_INVALID`, `SAFETY_PERMISSION_DENIED`,
 `SAFETY_PROFILE_ACTION_DENIED`, `ACTION_BACKEND_UNAVAILABLE`,
-`ACTION_HID_PORT_DISCONNECTED`, `ACTION_QUEUE_FULL`,
-`REFLEX_ACTION_PERMISSION_DENIED`.
+`ACTION_QUEUE_FULL`, `REFLEX_ACTION_PERMISSION_DENIED`.
 
 ### 3.19 `act_clipboard`
 
@@ -2691,7 +2691,7 @@ Returns:
     "storage": {"status": "ok", "db_path": "...", "schema_version": 7, "cf_sizes": {"CF_REFLEX_AUDIT": 4096}},
     "reflex": {"status": "ok", "active_count": 2, "last_tick_jitter_us": 180, "recursion_clamps_total": 0},
     "profiles": {"status": "ok", "active_profile_id": "notepad", "profile_count": 4, "last_reload_at": "1779723537765"},
-    "hid_host": {"status": "disabled", "detail": "hardware HID disabled; start with --hardware-hid <port|auto> or SYNAPSE_HARDWARE_HID"},
+    "action": {"status": "ok", "detail": "emitter_available=true recording_enabled=false operator_hotkey=registered allow_shell_patterns=any allow_launch_patterns=any"},
     "audio": {"status": "disabled", "ring_buffer_seconds": 5, "stt_model_loaded": false},
     "http": {"status": "ok", "bind_addr": "127.0.0.1:7700", "active_sessions": 1, "sse_subscribers": 0}
   },
@@ -2700,11 +2700,10 @@ Returns:
 }
 ```
 
-`hid_host` reports the configured hardware HID target separately from the
-generic action subsystem. It is `disabled` when no hardware backend was
-requested, `ok` when a configured hardware target initialized with a live action
-emitter, and `error` if the configured target exists but the action emitter is
-not available.
+There is no `hid_host` subsystem after #589. The action subsystem reports
+emitter availability, operator hotkey status, allowlist posture, and backend
+resolution. A request that resolves to the retired `hardware` token fails
+closed with `ACTION_BACKEND_UNAVAILABLE`.
 
 M3 subsystem status strings are `initializing`, `ok`, `degraded_latency`,
 `disk_pressure_l1`..`disk_pressure_l4`, `disabled`, or `error`.

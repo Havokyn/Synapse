@@ -85,7 +85,11 @@ fn never_schema() -> Value {
 }
 
 fn boolean_as_schema(b: bool) -> Value {
-    if b { permissive_schema() } else { never_schema() }
+    if b {
+        permissive_schema()
+    } else {
+        never_schema()
+    }
 }
 
 fn rewrite_value(value: &mut Value) {
@@ -198,7 +202,11 @@ mod tests {
         let mut offenders = Vec::new();
         for tool in &tools {
             let input = Value::Object((*tool.input_schema).clone());
-            bare_boolean_schema_paths(&input, &format!("{}.inputSchema", tool.name), &mut offenders);
+            bare_boolean_schema_paths(
+                &input,
+                &format!("{}.inputSchema", tool.name),
+                &mut offenders,
+            );
             if let Some(output) = &tool.output_schema {
                 let output = Value::Object((**output).clone());
                 bare_boolean_schema_paths(

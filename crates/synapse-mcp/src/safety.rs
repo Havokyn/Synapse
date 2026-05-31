@@ -8,9 +8,6 @@ use synapse_core::error_codes;
 
 use crate::m3::SharedM3State;
 
-pub mod agreement;
-pub mod hardware_consent;
-
 pub const DISABLE_OPERATOR_HOTKEY_ENV: &str = "SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY";
 /// When set truthy, a failure to register the operator panic hotkey aborts
 /// startup instead of degrading. Off by default so a leaked/duplicate instance

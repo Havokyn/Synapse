@@ -299,8 +299,14 @@ pub fn current_input(state: &M1State, depth: u32) -> Result<ObservationInput, Er
     platform_input(depth, state.perception_mode)
 }
 
+/// Depth `find` walks the foreground tree. `observe`'s default is shallow (2),
+/// but `find` must reach deeply-nested controls (e.g. a UWP app's display text
+/// at depth ~5, or toolbar tool buttons), so it requests a deep snapshot. The
+/// snapshot's node-budget/deadline bounds the cost.
+const FIND_SNAPSHOT_DEPTH: u32 = 16;
+
 pub fn find_in_state(state: &M1State, params: &FindParams) -> Result<FindResponse, ErrorData> {
-    let input = current_input(state, 2)?;
+    let input = current_input(state, FIND_SNAPSHOT_DEPTH)?;
     let limit = params.limit.unwrap_or(5).clamp(1, 20);
     let mut results = Vec::new();
     if matches!(

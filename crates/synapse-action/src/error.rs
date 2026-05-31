@@ -14,8 +14,6 @@ pub enum ActionError {
     TargetInvalid { detail: String },
     #[error("action hold exceeds max: {detail}")]
     HoldExceededMax { detail: String },
-    #[error("action HID port disconnected: {detail}")]
-    HidPortDisconnected { detail: String },
     #[error("ViGEm is not installed: {detail}")]
     VigemNotInstalled { detail: String },
     #[error("ViGEm plug-in failed: {detail}")]
@@ -45,7 +43,6 @@ impl ActionError {
             Self::BackendUnavailable { .. } => error_codes::ACTION_BACKEND_UNAVAILABLE,
             Self::TargetInvalid { .. } => error_codes::ACTION_TARGET_INVALID,
             Self::HoldExceededMax { .. } => error_codes::ACTION_HOLD_EXCEEDED_MAX,
-            Self::HidPortDisconnected { .. } => error_codes::ACTION_HID_PORT_DISCONNECTED,
             Self::VigemNotInstalled { .. } => error_codes::ACTION_VIGEM_NOT_INSTALLED,
             Self::VigemPluginFailed { .. } => error_codes::ACTION_VIGEM_PLUGIN_FAILED,
             Self::ElementNotResolved { .. } => error_codes::ACTION_ELEMENT_NOT_RESOLVED,
@@ -68,7 +65,6 @@ impl ActionError {
             | Self::BackendUnavailable { detail }
             | Self::TargetInvalid { detail }
             | Self::HoldExceededMax { detail }
-            | Self::HidPortDisconnected { detail }
             | Self::VigemNotInstalled { detail }
             | Self::VigemPluginFailed { detail }
             | Self::ElementNotResolved { detail }
@@ -89,7 +85,6 @@ impl ActionError {
             | Self::BackendUnavailable { .. }
             | Self::TargetInvalid { .. }
             | Self::HoldExceededMax { .. }
-            | Self::HidPortDisconnected { .. }
             | Self::VigemNotInstalled { .. }
             | Self::VigemPluginFailed { .. }
             | Self::ElementNotResolved { .. }

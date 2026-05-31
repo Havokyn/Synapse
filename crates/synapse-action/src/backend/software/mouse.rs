@@ -6,8 +6,8 @@ use windows::Win32::{
     Foundation::{E_ACCESSDENIED, POINT as WinPoint},
     UI::{
         HiDpi::{
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
-            SetProcessDpiAwarenessContext, SetThreadDpiAwarenessContext,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+            SetThreadDpiAwarenessContext,
         },
         Input::KeyboardAndMouse::{
             INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
@@ -43,10 +43,14 @@ pub(super) fn cursor_position() -> Result<Point, ActionError> {
             detail: format!("GetPhysicalCursorPos failed: {err}"),
         }
     })?;
-    Ok(mcp_point_from_cursor_api(Point {
+    // PER_MONITOR_AWARE_V2: the physical cursor APIs and `observe`/a11y bboxes
+    // share one physical-pixel coordinate space, so the readback passes through
+    // unchanged. (Previously this divided by GetDpiForSystem/96, which
+    // double-counted DPI on scaled displays and disagreed with observe.)
+    Ok(Point {
         x: point.x,
         y: point.y,
-    }))
+    })
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_mouse_move"))]
@@ -198,8 +202,12 @@ fn mouse_move_curve(
 fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), ActionError> {
     activate_thread_dpi_awareness();
     // Physical cursor APIs avoid DPI virtualization drift between the MCP
-    // process and the operator-visible screen coordinate space.
-    let point = cursor_api_point_from_mcp(point);
+    // process and the operator-visible screen coordinate space. The point is
+    // already in that physical space (PER_MONITOR_AWARE_V2, matching `observe`
+    // and the drag curve in `mouse_move_curve`), so it is used as-is — no DPI
+    // multiply. Scaling here previously placed the drag/click origin at
+    // `point * (GetDpiForSystem/96)`, leaving spurious strokes from the
+    // over-scaled origin on scaled displays.
     unsafe { SetPhysicalCursorPos(point.x, point.y) }.map_err(|error| {
         ActionError::BackendUnavailable {
             detail: format!("SetPhysicalCursorPos failed for {detail}: {error}"),
@@ -267,37 +275,6 @@ const fn relative_mouse_target(current: Point, rounded: (i32, i32)) -> Point {
     }
 }
 
-fn mcp_point_from_cursor_api(point: Point) -> Point {
-    let scale = cursor_dpi_scale();
-    Point {
-        x: round_scaled(f64::from(point.x) / scale),
-        y: round_scaled(f64::from(point.y) / scale),
-    }
-}
-
-fn cursor_api_point_from_mcp(point: Point) -> Point {
-    let scale = cursor_dpi_scale();
-    Point {
-        x: round_scaled(f64::from(point.x) * scale),
-        y: round_scaled(f64::from(point.y) * scale),
-    }
-}
-
-fn cursor_dpi_scale() -> f64 {
-    let dpi = unsafe { GetDpiForSystem() };
-    if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 }
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn round_scaled(value: f64) -> i32 {
-    if !value.is_finite() {
-        return 0;
-    }
-    value
-        .round()
-        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
-}
-
 fn virtual_desktop() -> Result<VirtualDesktop, ActionError> {
     activate_thread_dpi_awareness();
     // SAFETY: GetSystemMetrics is read-only for these virtual-screen metrics.
@@ -350,11 +327,35 @@ mod tests {
     }
 
     #[test]
-    fn cursor_api_conversion_round_trips_system_dpi_coordinates() {
-        let point = Point { x: 421, y: 426 };
-        let api_point = cursor_api_point_from_mcp(point);
-        let restored = mcp_point_from_cursor_api(api_point);
+    #[allow(
+        clippy::expect_used,
+        reason = "unit test asserts on a known-valid desktop"
+    )]
+    fn drag_origin_and_curve_share_one_absolute_coordinate() {
+        // Regression for the DPI double-scaling bug (#591): the drag/click
+        // origin (`send_absolute_mouse_move`) and the drag curve waypoints
+        // (`mouse_move_curve`) must map an identical physical point to an
+        // identical absolute SendInput coordinate. Both now feed the raw point
+        // straight into `absolute_mouse_input_for_desktop` with no DPI scaling,
+        // so the same point yields the same normalized coordinate.
+        let desktop =
+            VirtualDesktop::new(0, 0, 5120, 2160).expect("non-degenerate virtual desktop");
+        let point = Point { x: 1600, y: 1000 };
 
-        assert_eq!(restored, point);
+        let normalized = normalize_absolute_mouse_point(point, desktop);
+        let origin = unsafe {
+            absolute_mouse_input_for_desktop(point, desktop)
+                .Anonymous
+                .mi
+        };
+        let curve = unsafe {
+            absolute_mouse_input_for_desktop(point, desktop)
+                .Anonymous
+                .mi
+        };
+
+        assert_eq!(origin.dx, normalized.dx);
+        assert_eq!(origin.dy, normalized.dy);
+        assert_eq!((origin.dx, origin.dy), (curve.dx, curve.dy));
     }
 }

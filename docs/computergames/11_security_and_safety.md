@@ -70,7 +70,6 @@ pub enum Permission {
     InputKeyboard,
     InputMouse,
     InputPad,
-    InputHardwareHid,        // requires --allow-hardware
     ClipboardRead,
     ClipboardWrite,
     Launch { exe_pattern: String },
@@ -91,7 +90,6 @@ Per session on connect:
 | Permission | Default | Override |
 |---|---|---|
 | `InputKeyboard`, `InputMouse`, `InputPad` | granted | — |
-| `InputHardwareHid` | denied | `--allow-hardware-hid` AND interactive consent |
 | `ClipboardRead` | granted | — |
 | `ClipboardWrite` | granted | — |
 | `Launch { ... }` | denied | `--allow-launch <pattern>` (e.g., `notepad.exe`) |
@@ -114,9 +112,11 @@ MCP checks against the session's grant set; missing permission returns `SAFETY_P
 
 M3 implements this with a per-session grant set. If `SYNAPSE_MCP_ALLOWED_PERMISSIONS`
 is set, only the named permissions are granted. If unset, the local stdio/loopback
-default grant set covers current read/config/reflex/replay permissions, keyboard,
-mouse, and pad; `READ_AUDIO` is still granted only when audio is explicitly
-enabled. Unknown permission names fail startup rather than being ignored.
+default grant set covers current read/config/reflex/replay permissions,
+keyboard, mouse, and pad; `READ_AUDIO` is still granted only when audio is
+explicitly enabled. Unknown permission names fail startup rather than being
+ignored. The retired `hardware` backend token is not a separate permission
+class; it fails closed at backend execution with `ACTION_BACKEND_UNAVAILABLE`.
 
 ### 4.4 Allow-list patterns
 
@@ -301,13 +301,14 @@ Interactive confirmation for first-use of dangerous capabilities (prompts are mi
 
 | Action | Prompt |
 |---|---|
-| First use of hardware HID | Console prompt requiring the exact phrase `I AUTHORIZE HARDWARE INPUT`; `--reset-hardware-consent` forces re-authorization |
 | First use of `act_run_shell` after install | Console prompt |
 | Binding to non-loopback | Console prompt |
 | First use of `--no-redaction` | Console prompt |
 | `db wipe` | Console prompt unless `--yes` passed |
 
-Agent never sees the prompt; it's a startup-time operator confirmation. The hardware HID prompt names the configured port, warns that Synapse will physically inject keyboard/mouse/gamepad events into the OS, and requires the exact phrase `I AUTHORIZE HARDWARE INPUT`. Any other response exits with `SAFETY_PROFILE_ACTION_DENIED reason=hardware_consent_refused` before the hardware backend starts. After confirming, daemon records consent and doesn't re-ask until version bump or `--reset-hardware-consent`. Hardware HID consent is persisted at `%APPDATA%\synapse\agreement.json` as schema version 1 with `acknowledged_at`, the configured `hardware_hid.port`, `hardware_hid.ack_phrase_sha256`, and `supported_use_scopes=["productivity","single_player"]`. On Windows the file DACL is protected: `NT AUTHORITY\SYSTEM` has full control, the current user has read access, and non-listed principals such as Everyone are denied by the DACL's absence of an allow ACE. An explicit Everyone deny ACE is not used because it also applies to the current user's token and would defeat the required read access.
+The agent never sees startup-time operator confirmations. The retired hardware
+HID path no longer has a separate consent prompt, agreement schema, or reset
+flag; `backend=hardware` fails closed before any physical input path exists.
 
 ---
 

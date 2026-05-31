@@ -25,7 +25,6 @@ pub enum Permission {
     InputKeyboard,
     InputMouse,
     InputPad,
-    InputHardwareHid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,7 +77,6 @@ impl Permission {
             Self::InputKeyboard => "INPUT_KEYBOARD",
             Self::InputMouse => "INPUT_MOUSE",
             Self::InputPad => "INPUT_PAD",
-            Self::InputHardwareHid => "INPUT_HARDWARE_HID",
         }
     }
 
@@ -97,7 +95,6 @@ impl Permission {
             "INPUT_KEYBOARD" | "KEYBOARD" => Ok(Self::InputKeyboard),
             "INPUT_MOUSE" | "MOUSE" => Ok(Self::InputMouse),
             "INPUT_PAD" | "PAD" => Ok(Self::InputPad),
-            "INPUT_HARDWARE_HID" | "HARDWARE_HID" => Ok(Self::InputHardwareHid),
             other => bail!("unknown M3 permission {other:?}"),
         }
     }
@@ -165,8 +162,8 @@ pub fn add_action_permissions(action: &Action, required: &mut RequiredPermission
         | Action::KeyUp { backend, .. }
         | Action::KeyChord { backend, .. }
         | Action::TypeText { backend, .. } => {
+            let _ = backend;
             required.insert(Permission::InputKeyboard);
-            add_backend_permission(*backend, required);
         }
         Action::MouseMove { backend, .. }
         | Action::MouseMoveRelative { backend, .. }
@@ -174,8 +171,8 @@ pub fn add_action_permissions(action: &Action, required: &mut RequiredPermission
         | Action::MouseDrag { backend, .. }
         | Action::MouseScroll { backend, .. }
         | Action::AimAt { backend, .. } => {
+            let _ = backend;
             required.insert(Permission::InputMouse);
-            add_backend_permission(*backend, required);
         }
         Action::PadButton { .. }
         | Action::PadStick { .. }
@@ -184,7 +181,7 @@ pub fn add_action_permissions(action: &Action, required: &mut RequiredPermission
             required.insert(Permission::InputPad);
         }
         Action::Combo { steps, backend } => {
-            add_backend_permission(*backend, required);
+            let _ = backend;
             add_combo_step_permissions(steps, *backend, required);
         }
         Action::ReleaseAll => {
@@ -254,8 +251,7 @@ fn default_grants(audio_enabled: bool) -> RequiredPermissions {
     // Permissive by default: every non-audio permission is granted so a stock
     // daemon can fully drive the Windows desktop. READ_AUDIO is a real
     // capability dependency (requires --enable-audio / SYNAPSE_ENABLE_AUDIO),
-    // not a guardrail, so it stays conditional. INPUT_HARDWARE_HID is granted
-    // here but still requires an attached Pico HID device to actually emit.
+    // not a guardrail, so it stays conditional.
     let mut granted = required([
         Permission::ReadEvents,
         Permission::WriteReflex,
@@ -268,7 +264,6 @@ fn default_grants(audio_enabled: bool) -> RequiredPermissions {
         Permission::InputKeyboard,
         Permission::InputMouse,
         Permission::InputPad,
-        Permission::InputHardwareHid,
     ]);
     if audio_enabled {
         granted.insert(Permission::ReadAudio);
@@ -276,26 +271,18 @@ fn default_grants(audio_enabled: bool) -> RequiredPermissions {
     granted
 }
 
-fn add_backend_permission(backend: Backend, required: &mut RequiredPermissions) {
-    if backend == Backend::Hardware {
-        required.insert(Permission::InputHardwareHid);
-    }
-}
-
 fn add_combo_step_permissions(
     steps: &[ComboStep],
-    backend: Backend,
+    _backend: Backend,
     required: &mut RequiredPermissions,
 ) {
     for step in steps {
         match step.input {
             ComboInput::KeyDown { .. } | ComboInput::KeyUp { .. } | ComboInput::KeyPress { .. } => {
                 required.insert(Permission::InputKeyboard);
-                add_backend_permission(backend, required);
             }
             ComboInput::MouseButton { .. } | ComboInput::MouseMoveRel { .. } => {
                 required.insert(Permission::InputMouse);
-                add_backend_permission(backend, required);
             }
             ComboInput::PadButton { .. } | ComboInput::PadStick { .. } => {
                 required.insert(Permission::InputPad);

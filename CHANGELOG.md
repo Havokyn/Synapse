@@ -5,6 +5,10 @@
 - Added the repository agent doctrine: manual FSV must be performed by the
   agent with direct source-of-truth readback; automated tests, scripts,
   benchmarks, GitHub Actions, and CI are supporting evidence only.
+- Retired the physical hardware-HID path after the software-only input decision
+  in #588. The live action backends are now `software` and `vigem`; the legacy
+  `hardware` token remains only as a fail-closed compatibility value that
+  returns `ACTION_BACKEND_UNAVAILABLE`.
 
 ## v0.1.0-m4 - 2026-05-28
 

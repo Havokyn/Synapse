@@ -16,7 +16,6 @@ pub mod validation;
 
 pub use backend::{
     ActionBackend, BackendResolutionPolicy, ResolvedBackend,
-    hardware::{HardwareBackend, HardwareGateway},
     recording::{RecordedInput, RecordingBackend},
     resolve_backend, resolve_backend_with_policy,
     unavailable::HardwareUnavailableBackend,
@@ -34,7 +33,7 @@ pub use curve::sample_curve;
 pub use dynamics::{BIGRAMS, KeystrokeEvent, ModifierMask, sample_typing_schedule};
 pub use emitter::{
     ActionEmitter, ActionEmitterSnapshotHandle, ActionSnapshotMessage, ActionStateSnapshot,
-    Backends, EmitState, HELD_KEY_MAX_DURATION_MS, HardwareHidConfig,
+    Backends, EmitState, HELD_KEY_MAX_DURATION_MS,
 };
 pub use error::{ActionError, ActionResult};
 pub use handle::{

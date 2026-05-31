@@ -25,7 +25,7 @@
   "use_scope": "operator_owned_test",
   "compatibility_status": "declared",
   "safe_default_backend_policy": "auto; local benchmark world only; no remote server; audit export requires explicit consent",
-  "input_backends": ["software", "hardware", "vigem"],
+  "input_backends": ["software", "vigem"],
   "minimum_manual_fsv": [
     "profile_list",
     "profile_registry_install",

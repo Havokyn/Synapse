@@ -194,7 +194,7 @@ impl ActPadButton {
 fn validate_params(params: &ActPadParams) -> Result<(), ErrorData> {
     if params.backend == PadBackend::Hardware {
         return Err(action_error_to_mcp(&ActionError::BackendUnavailable {
-            detail: "act_pad hardware backend is not available in M2".to_owned(),
+            detail: "act_pad hardware backend removed; use backend=vigem".to_owned(),
         }));
     }
     if let Some(hold_ms) = params.hold_ms {

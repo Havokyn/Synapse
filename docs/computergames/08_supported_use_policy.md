@@ -12,7 +12,7 @@ This policy is binding on contributors. PRs that violate it are rejected. Defaul
 
 > **Synapse is local computer-control infrastructure. It should help an operator or an explicitly authorized agent see, hear, act on, and react inside software the operator is allowed to automate. It should not add features whose primary purpose is raw manipulation of third-party processes, unsupported device-identity changes, unregistered persistence, or scaled unattended account operation.**
 
-Hardware HID, natural cursor curves, virtual controllers, fast capture, and reflexes are ordinary local-control primitives. They exist for accessibility, QA, game-AI research, local demos, simulation rigs, and single-player play.
+Natural cursor curves, virtual controllers, fast capture, and reflexes are ordinary local-control primitives. They exist for accessibility, QA, game-AI research, local demos, simulation rigs, and single-player play. The physical hardware-HID path is retired by #588/#589; the supported input strategy is software `SendInput` plus software-only ViGEm controller reports.
 
 ---
 
@@ -34,8 +34,7 @@ To support that, a **stock daemon is permissive by default**:
   to `0` to restore the per-target allowlist. Every command/target is recorded
   in `CF_ACTION_LOG` regardless.
 - **All non-audio M3 permissions are granted by default** (`READ_AUDIO` still
-  requires `--enable-audio`; `INPUT_HARDWARE_HID` still requires an attached
-  device).
+  requires `--enable-audio`).
 - The legacy game world/server `supported_use.*` gate is **off by default** and
   re-armed only with `SYNAPSE_ENFORCE_SUPPORTED_USE=1`.
 
@@ -58,7 +57,7 @@ Profiles declare a `use_scope`. The field is descriptive metadata for permission
 | Scope | Examples | Default posture |
 |---|---|---|
 | `productivity` | Notepad, VS Code, Chrome, Slack, Discord, terminals, File Explorer | Actions allowed according to normal tool permissions |
-| `single_player` | Minecraft Java local worlds, Factorio, Stardew Valley, Skyrim, KSP, OpenTTD | Game actions allowed; hardware HID remains opt-in |
+| `single_player` | Minecraft Java local worlds, Factorio, Stardew Valley, Skyrim, KSP, OpenTTD | Game actions allowed through software/ViGEm; retired hardware tokens fail closed |
 | `operator_owned_test` | QA fixtures, private test servers, local simulators, replay harnesses | Actions allowed when the profile declares the test boundary |
 | `sanctioned_research` | University game-AI rigs, AI tournaments, benchmark environments | Actions allowed with explicit profile metadata and operator setup |
 | `unknown` | New apps without a reviewed profile | Observation and actions allowed by default (see §2a); pass `--restrict-unknown-profile` to fail closed until a profile is reviewed |
@@ -91,7 +90,7 @@ These capabilities stay disabled unless an ADR explicitly changes the project sc
 These capabilities ship because they are useful for legitimate local automation. They remain explicit and auditable:
 
 1. **Natural cursor curves and keystroke pacing.** Useful for accessibility, demos, QA, and smoother game control.
-2. **Hardware HID gateway.** Useful for accessibility adapters, simulation rigs, dedicated game-AI research machines, and hardware testing.
+2. **Virtual controller reports.** ViGEm is useful for accessibility adapters, simulation rigs, dedicated game-AI research machines, and software-only gamepad testing.
 3. **Graphics Capture API and DXGI Output Duplication.** Standard Windows capture paths.
 4. **WASAPI loopback audio capture.** Standard Windows audio loopback.
 5. **WinEvent / UIA event subscribers.** Standard Windows accessibility APIs.
@@ -126,15 +125,9 @@ Type 'i agree' to continue. (Decline by closing this prompt.)
 
 Acknowledgment is recorded in `%APPDATA%\synapse\agreement.json` with a hash of the prompt text and a timestamp. A new major version may invalidate the previous acknowledgment.
 
-Hardware HID has a separate first-use confirmation because it physically injects
-keyboard, mouse, and gamepad input into the OS. Starting with
-`--hardware-hid <port|auto>` on a configured host prompts for the exact phrase
-`I AUTHORIZE HARDWARE INPUT` before `%APPDATA%\synapse\agreement.json` is
-written. Any other response exits with
-`SAFETY_PROFILE_ACTION_DENIED reason=hardware_consent_refused` and leaves the
-agreement file absent. Subsequent runs skip the prompt after the agreement file
-validates; `--reset-hardware-consent` deletes the existing agreement and
-requires the phrase again.
+There is no separate hardware-HID first-use confirmation after #589 because
+there is no physical HID runtime path. The legacy `hardware` backend token
+fails closed with `ACTION_BACKEND_UNAVAILABLE`.
 
 ---
 
@@ -145,7 +138,7 @@ When an action is about to fire, the MCP layer checks session permissions, profi
 | Situation | Default behavior | Operator override |
 |---|---|---|
 | `use_scope = "unknown"` / no profile and a write/action tool is requested | Allowed by default (§2a), log event | Pass `--restrict-unknown-profile` / `SYNAPSE_RESTRICT_UNKNOWN_PROFILE=1` to refuse with `SAFETY_PROFILE_ACTION_DENIED` |
-| Hardware HID requested without hardware enabled | Refuse with `ACTION_BACKEND_UNAVAILABLE` | Start with `--hardware-hid <port|auto>` |
+| Retired `hardware` backend requested | Refuse with `ACTION_BACKEND_UNAVAILABLE` | Use `software` or `vigem` |
 | Audio tool requested without audio enabled | Refuse with `SAFETY_PERMISSION_DENIED` | Start with `--enable-audio` or set `SYNAPSE_ENABLE_AUDIO=true` |
 | Launch process / shell command requested | Allowed by default (§2a), recorded in `CF_ACTION_LOG` | Set `SYNAPSE_ALLOW_LAUNCH_ANY=0` / `SYNAPSE_ALLOW_SHELL_ANY=0` to restore the `--allow-launch` / `--allow-shell` allowlist (refuse with `SAFETY_LAUNCH_DENIED_BY_POLICY` / `SAFETY_SHELL_DENIED_BY_POLICY`) |
 | Legacy game world/server `supported_use.*` gate | Off by default | Set `SYNAPSE_ENFORCE_SUPPORTED_USE=1` to re-arm |
@@ -243,7 +236,7 @@ Synapse does not auto-update profiles without operator consent.
 
 ## 9. What this doc does NOT cover
 
-- Hardware HID firmware design → `09_hardware_hid_gateway.md`
+- Retired hardware HID design note → `09_hardware_hid_gateway.md`
 - Action back-end mechanics → `03_action.md`
 - Per-tool permission requirements → `05_mcp_tool_surface.md`
 - Redaction, network binding, and local trust boundaries → `11_security_and_safety.md`

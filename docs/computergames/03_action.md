@@ -2,7 +2,7 @@
 
 ## 1. The hands
 
-`synapse-action` is the only crate that emits input to the OS or to a virtual / hardware device. Contract:
+`synapse-action` is the only crate that emits input to the OS or to a virtual controller device. Contract:
 
 > **Anything the agent or the reflex runtime decides to do flows through one mpsc actor that serializes by device and emits at the requested back-end. Nothing else touches the input APIs.**
 
@@ -12,41 +12,42 @@ Serialization is non-negotiable. Prevents stuck modifiers, double-clicks merging
 
 ## 2. Back-ends
 
-Three back-ends ship at v1. Per call, the caller (or active profile) picks one.
+Two live backends ship. Per call, the caller or active profile picks one.
 
 | Back-end | Path | Use |
 |---|---|---|
 | `software` | Win32 `SendInput` via `enigo` crate (or direct `windows-rs` if `enigo` is limiting) | Default. Cheapest. Works for most apps and many single-player games. |
 | `vigem` | Virtual Xbox 360 / DualShock 4 controller via `vigem-client` crate | Games that require a gamepad (analog movement, controller-only menus). Many games accept ViGEm even when they reject software input. |
-| `hardware` | Serial to RP2040 HID gateway over USB-CDC | Games where ViGEm is detected. Single-player only. See `09_hardware_hid_gateway.md`. |
+| `hardware` | Retired compatibility token | Still parses in profiles/packages, but resolves to a fail-closed unavailable backend with `ACTION_BACKEND_UNAVAILABLE`. |
 
 Selection rules:
 
-1. If caller explicitly names a back-end, use it.
-2. If caller passes `Backend::Auto`, resolve from the active session policy:
+1. If caller explicitly names a live backend, use it.
+2. If caller explicitly names `hardware`, return `ACTION_BACKEND_UNAVAILABLE`
+   with guidance to use `software` or `vigem`.
+3. If caller passes `Backend::Auto`, resolve from the active session policy:
 
-| Action class | No profile override | Profile `[backends] default_backend = "hardware"` |
+| Action class | No profile override | Profile `[backends] default_backend = "vigem"` |
 |---|---|---|
-| Keyboard (`Key*`, `TypeText`, `Combo`) | `software` | `hardware` |
-| Mouse (`Mouse*`, `AimAt`) | `software` | `hardware` |
-| Pad (`Pad*`) | `vigem` | `hardware` |
-| `ReleaseAll` primary backend | `software` | `hardware` |
+| Keyboard (`Key*`, `TypeText`, `Combo`) | `software` | `vigem` |
+| Mouse (`Mouse*`, `AimAt`) | `software` | `vigem` |
+| Pad (`Pad*`) | `vigem` | `vigem` |
+| `ReleaseAll` primary backend | `software` | `vigem` |
 
-Profile class-specific fields (`keyboard_default`, `mouse_default`, `pad_default`) override
-the profile default for that class when set to `software`, `vigem`, or `hardware`.
-The literal per-call backend still wins over every profile setting. Hardware remains
-opt-in: if Auto resolves to `hardware` but no real HID backend was configured, the
-request fails closed with `ACTION_BACKEND_UNAVAILABLE`.
+Profile class-specific fields (`keyboard_default`, `mouse_default`,
+`pad_default`) override the profile default for that class when set to
+`software`, `vigem`, or the retained `hardware` token. The literal per-call
+backend still wins over every profile setting. If Auto resolves to `hardware`,
+the request fails closed with `ACTION_BACKEND_UNAVAILABLE`; it never silently
+downgrades to software or ViGEm.
 
 The active table is visible at
 `health.subsystems.action.backend_resolution` with `source`, configured defaults,
 and the resolved `keyboard_auto` / `mouse_auto` / `pad_auto` / `release_all_auto`
 values.
-Hardware HID target state is visible separately at `health.subsystems.hid_host`
-so the action routing table and the physical HID host readiness do not collapse
-into one signal.
-
-ViGEm requires ViGEmBus driver installed (one-time, signed). Hardware requires a flashed RP2040 board and `--hardware-hid <port|auto>` argument or `SYNAPSE_HARDWARE_HID` env.
+There is no separate hardware host health subsystem. `health.subsystems.action`
+reports the backend resolution table and emitter availability. ViGEm requires
+the signed ViGEmBus driver installed on the host.
 
 ---
 
@@ -96,7 +97,6 @@ pub struct ActionEmitter {
     rx: mpsc::Receiver<(Action, Sender<Result<()>>)>,
     software: SoftwareBackend,
     vigem: Option<VigemBackend>,
-    hardware: Option<HidGateway>,
     held_keys: BitSet,            // union for ReleaseAll safety
     held_key_backends: HashMap<usize, BTreeSet<ResolvedBackend>>,
     held_buttons: BitSet,
@@ -144,7 +144,7 @@ Wraps `enigo` 0.6+ with overrides:
 
 - **Absolute mouse moves are sent as relative deltas in steps,** following an `AimCurve`. Single absolute jump reserved for `MouseMove { curve: Instant, .. }`.
 - **`SendInput` is called in batches** when emitting curve steps (e.g., 50 deltas in one `SendInput([..50])` call). Per-call overhead amortizes ~2 µs to ~0.04 µs per delta.
-- **Modifier state tracked locally per backend.** The global `held_keys` union keeps `ReleaseAll` recoverable, while `held_key_backends` lets software, ViGEm, and hardware release only the inputs each backend owns.
+- **Modifier state tracked locally per backend.** The global `held_keys` union keeps `ReleaseAll` recoverable, while `held_key_backends` lets software and ViGEm release only the inputs each backend owns.
 - **Unicode text** uses `KEYEVENTF_UNICODE`. Falls back to per-char scan-code when an active game ignores Unicode input (game profile flag).
 - **Raw scan codes** can be requested for games reading keyboard via raw input (most FPS games). Profile flag `keyboard.use_scancodes = true`.
 
@@ -306,46 +306,17 @@ Smoothing: by default, stick deltas >0.5 in 16ms snap immediately (game-driven s
 
 ---
 
-## 9. Hardware HID back-end
+## 9. Retired `hardware` compatibility token
 
-When `--hardware-hid <port|auto>` is set and `synapse-hid-host` connects and completes `IDENTIFY`, the hardware back-end routes to `HardwareBackend`. Without explicit hardware HID enablement, `Backend::Hardware` fails closed through `HardwareUnavailableBackend` with `ACTION_BACKEND_UNAVAILABLE`; it never silently downgrades to software or ViGEm.
+The physical HID backend was retired by #588/#589. `Backend::Hardware` remains
+in the public enum so older profiles and package manifests fail closed instead
+of failing to parse. It always routes to `HardwareUnavailableBackend`, which
+validates the action shape and returns `ACTION_BACKEND_UNAVAILABLE` with the
+detail `hardware backend removed; use backend=software or backend=vigem`.
 
-The live hardware route talks to an RP2040 board running our firmware (`firmware/pico-hid/`) through the serial-protocol driver in `synapse-hid-host`. Keyboard actions map Synapse `KeyCode::Named`, US-layout `KeyCode::Symbol`, and defined `KeyCode::HidCode` values to USB HID Keyboard/Keypad usage IDs. Hardware keyboard output uses the HID boot report modifier byte for Ctrl/Shift/Alt/GUI, enforces the 6KRO non-modifier slot limit, and applies left shift for US-layout uppercase and shifted printable text. Non-US-layout text fails closed with `ACTION_UNSUPPORTED_KEY`.
-
-The board enumerates as generic HID composite device (mouse + keyboard + gamepad). PC sees a real USB peripheral. No `SendInput`, no virtual driver, no signal interception possible.
-
-Boot mouse HID reports only relative deltas, so the hardware backend converts
-absolute `MouseMove` and one-shot `AimAt` screen targets into a relative
-`MOUSE_MOVE_REL` stream. It reads the current cursor position, resolves
-`MouseTarget::Element` / `AimTarget::Element` to a UIA bounding-rectangle center
-when possible, samples the requested curve, chunks every relative step to the
-firmware `-127..=127` delta range, coalesces adjacent same-direction hardware
-curve deltas whose implied span is `<= 2 ms` and whose merged payload still fits
-that firmware range, and sends the command stream through the HID pipeline.
-Software output and standalone direct `MouseMoveRelative` actions are not
-coalesced by this M4 policy (ADR-0012). Unresolved element targets and `Track`
-targets fail closed; hardware requests never silently downgrade to software.
-
-Routing:
-
-```rust
-match action {
-    Action::MouseMoveRelative { dx, dy, backend: Backend::Hardware } => {
-        hid_gateway.send_mouse_delta(dx, dy)?;
-    }
-    Action::MouseMove { to, curve, duration, backend: Backend::Hardware } => {
-        let start = GetPhysicalCursorPos()?;
-        let target = resolve_screen_point(to)?;
-        hid_gateway.send_mouse_delta_batch(sample_relative_curve(start, target, curve, duration))?;
-    }
-    Action::KeyPress { key, hold, backend: Backend::Hardware } => {
-        hid_gateway.send_key(hid_code_for(key), hold)?;
-    }
-    /* ... */
-}
-```
-
-Protocol, latency, and firmware design: `09_hardware_hid_gateway.md`. Host driver: `synapse-hid-host`.
+There is no `--hardware-hid` flag, `SYNAPSE_HARDWARE_HID` env var,
+`synapse-hid-host` crate, firmware project, hardware consent prompt, `hid
+identify`, or `hid flash` runtime path.
 
 ---
 
@@ -383,7 +354,7 @@ Action::Combo {
         ComboStep { input: Down(→), at_ms: 16 },
         ComboStep { input: Press(A), at_ms: 33 },
     ],
-    backend: hardware,
+    backend: software,
 }
 ↓
 schedules each step on the reflex runtime's tick wheel at the exact ms offset
@@ -397,7 +368,7 @@ Combo execution runs on reflex runtime thread for frame-accurate timing.
 
 Three layers ensure no stuck inputs:
 
-1. **Per-action timeout.** `KeyDown` without paired `KeyUp` within `held_key_max_duration_ms` (default 30s) emits an automatic `KeyUp` on the backend that owns the held key and logs `STUCK_KEY_AUTO_RELEASED backend=<software|vigem|hardware>`.
+1. **Per-action timeout.** `KeyDown` without paired `KeyUp` within `held_key_max_duration_ms` (default 30s) emits an automatic `KeyUp` on the backend that owns the held key and logs `STUCK_KEY_AUTO_RELEASED backend=<software|vigem>`.
 2. **Shutdown handler.** `ReleaseAll` sent on SIGINT / SIGTERM and on tokio cancellation token's cancellation.
 3. **Panic hook.** Process-wide panic hook (`std::panic::set_hook`) calls static `RELEASE_ALL_HANDLE: OnceCell<ActionHandle>` to fire `ReleaseAll` even on unhandled panic before the process dies.
 
@@ -406,7 +377,6 @@ Three layers ensure no stuck inputs:
 - All tracked held keys → `KeyUp` via active back-end
 - All tracked held mouse buttons → up
 - All ViGEm pads → neutral report (no buttons, sticks centered, triggers 0)
-- All hardware HID inputs → a single firmware `RELEASE_ALL (0x40)` command when hardware HID is configured; the host mirror is cleared and the daemon log records `SAFETY_RELEASE_ALL_FIRED backend="hardware"`
 
 Runs in ≤ 10 ms.
 
@@ -419,7 +389,6 @@ Not every action is allowed by default. MCP handler applies:
 | Action class | Default | Override |
 |---|---|---|
 | Mouse / keyboard / pad | allowed | — |
-| Hardware HID | requires `--hardware-hid <port|auto>` flag/env and successful HID connection | per-call `backend: hardware` |
 | Launch process | gated behind `--allow-launch <exe>` allowlist | profile may extend |
 | Run shell | gated behind `--allow-shell <pattern>` allowlist | profile may extend |
 | Clipboard write of sensitive content | per-call `confirm_sensitive: true` | env var disables prompt |
@@ -486,7 +455,6 @@ Per back-end caps prevent OS or virtual device overwhelm:
 |---|---|
 | Software | 5000 events/s |
 | ViGEm | 1000 reports/s (Xbox 360 USB poll rate ~1ms anyway) |
-| Hardware HID | depends on USB poll rate; default 1000 events/s |
 
 Saturation returns `ACTION_RATE_LIMITED` and re-queues with a small backoff.
 
@@ -514,7 +482,6 @@ pub const ACTION_RATE_LIMITED: &str = "ACTION_RATE_LIMITED";
 pub const ACTION_BACKEND_UNAVAILABLE: &str = "ACTION_BACKEND_UNAVAILABLE";
 pub const ACTION_TARGET_INVALID: &str = "ACTION_TARGET_INVALID";
 pub const ACTION_HOLD_EXCEEDED_MAX: &str = "ACTION_HOLD_EXCEEDED_MAX";
-pub const ACTION_HID_PORT_DISCONNECTED: &str = "ACTION_HID_PORT_DISCONNECTED";
 pub const ACTION_VIGEM_NOT_INSTALLED: &str = "ACTION_VIGEM_NOT_INSTALLED";
 pub const ACTION_ELEMENT_NOT_RESOLVED: &str = "ACTION_ELEMENT_NOT_RESOLVED";
 pub const STUCK_KEY_AUTO_RELEASED: &str = "STUCK_KEY_AUTO_RELEASED";
@@ -527,5 +494,5 @@ pub const SAFETY_RELEASE_ALL_FIRED: &str = "SAFETY_RELEASE_ALL_FIRED";
 
 - Reflex bindings (aim_track, on_event) → `04_reflex_runtime.md`
 - MCP tool surface wrapping these actions → `05_mcp_tool_surface.md`
-- Hardware HID firmware design → `09_hardware_hid_gateway.md`
+- Retired hardware HID design note → `09_hardware_hid_gateway.md`
 - Supported-use policy and permission gates → `08`

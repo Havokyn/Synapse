@@ -6,6 +6,11 @@ mode = "hybrid"
 mouse_curve_default = "natural"
 keyboard_dynamics_default = "natural"
 
+# Modern WinUI Photos runs as Photos.exe (package Microsoft.Windows.Photos),
+# not the legacy Microsoft.Photos.exe and not hosted by ApplicationFrameHost.
+[[matches]]
+exe = "Photos.exe"
+
 [[matches]]
 exe = "Microsoft.Photos.exe"
 

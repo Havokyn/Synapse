@@ -363,16 +363,20 @@ impl SynapseService {
             state.iterations.push(iteration);
             if outcome == EngagementOutcome::OperatorPanic.as_str() {
                 stop = StopReason::OperatorPanic;
-                self.handle_stop_recovery(StopReason::OperatorPanic, profile).await;
+                self.handle_stop_recovery(StopReason::OperatorPanic, profile)
+                    .await;
                 break;
             }
             if outcome == EngagementOutcome::HpFloor.as_str() {
                 stop = StopReason::HpFloor;
-                self.handle_stop_recovery(StopReason::HpFloor, profile).await;
+                self.handle_stop_recovery(StopReason::HpFloor, profile)
+                    .await;
                 break;
             }
             if outcome == EngagementOutcome::Slain.as_str()
-                && self.read_level().is_some_and(|lvl| lvl >= policy.stop_at_level)
+                && self
+                    .read_level()
+                    .is_some_and(|lvl| lvl >= policy.stop_at_level)
             {
                 stop = StopReason::ReachedTargetLevel;
                 break;
@@ -494,7 +498,9 @@ impl SynapseService {
             panic_epoch,
             run_started,
         };
-        let (outcome, tally) = self.fight_target(&ctx, policy, profile, &mut iteration).await?;
+        let (outcome, tally) = self
+            .fight_target(&ctx, policy, profile, &mut iteration)
+            .await?;
         outcome.as_str().clone_into(&mut iteration.outcome);
         state.resisted += tally.resisted;
         state.fizzled += tally.fizzled;
@@ -524,7 +530,12 @@ impl SynapseService {
         profile: &Profile,
         iteration: &mut ActAutocombatIteration,
     ) -> Result<(EngagementOutcome, CastTally), ErrorData> {
-        let FightContext { log_path, engage_offset, panic_epoch, run_started } = *ctx;
+        let FightContext {
+            log_path,
+            engage_offset,
+            panic_epoch,
+            run_started,
+        } = *ctx;
         let engage_started = Instant::now();
         // `read_fight_window` always reads from `engage_offset`, so the latest
         // window returned holds the full set of engagement events; tally
@@ -591,7 +602,11 @@ impl SynapseService {
         let mut latest: Vec<String> = Vec::new();
         while started.elapsed() < FIGHT_TICK {
             if let Ok(batch) = tail_log(log_path, offset, MAX_LOG_BYTES, MAX_LOG_EVENTS) {
-                latest = batch.events.iter().map(|event| event.summary.clone()).collect();
+                latest = batch
+                    .events
+                    .iter()
+                    .map(|event| event.summary.clone())
+                    .collect();
                 let refs: Vec<&str> = latest.iter().map(String::as_str).collect();
                 if matches!(
                     classify_fight_signal(&refs),
@@ -705,7 +720,9 @@ impl SynapseService {
             final_xp_percent: None,
             stop_reason: stop.as_str().to_owned(),
             run_row_key: format!("{RUN_ROW_PREFIX}/{}", policy.run_id),
-            looting_note: "Looting is out of scope for the L1->L2 MVP; XP comes from kills + sit-recover.".to_owned(),
+            looting_note:
+                "Looting is out of scope for the L1->L2 MVP; XP comes from kills + sit-recover."
+                    .to_owned(),
             per_iteration: state.iterations,
         }
     }
@@ -772,13 +789,15 @@ fn normalize_policy(params: ActAutocombatParams) -> Policy {
         target_level_max: params.target_level_max,
         stop_at_level: params.stop_at_level.max(1),
         cast_mana_cost: params.cast_mana_cost_percent.min(100),
-        engagement_timeout: Duration::from_secs(u64::from(params.engagement_timeout_s.clamp(1, 300))),
+        engagement_timeout: Duration::from_secs(u64::from(
+            params.engagement_timeout_s.clamp(1, 300),
+        )),
         hotbar_alias: normalize_alias(&params.hotbar_alias),
         max_roam_steps: params.max_roam_steps.min(50),
         max_chase: Duration::from_secs(u64::from(params.max_chase_s.clamp(1, 120))),
-        run_id: params.idempotency_key.map_or_else(default_run_id, |value| {
-            sanitize_run_id(&value)
-        }),
+        run_id: params
+            .idempotency_key
+            .map_or_else(default_run_id, |value| sanitize_run_id(&value)),
     }
 }
 
@@ -848,10 +867,20 @@ fn consider_summary(batch: &synapse_everquest::EverQuestLogTailBatch) -> Option<
 fn parse_target_level(summary: Option<&str>) -> Option<u32> {
     let text = summary?.to_ascii_lowercase();
     if let Some(rest) = text.split("lvl:").nth(1) {
-        return rest.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok();
+        return rest
+            .trim()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok();
     }
     if let Some(rest) = text.split("level ").nth(1) {
-        return rest.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok();
+        return rest
+            .trim()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok();
     }
     None
 }
@@ -1060,7 +1089,8 @@ mod tests {
     fn classifies_gamble_level_two_within_cap_as_safe() {
         // Yellow ("gamble") con on a neutral-faction Lvl-2 NPC, cap 2: huntable
         // for a ranged nuker — the absolute level cap is the gate, not the phrase.
-        let line = "A garter snake regards you indifferently -- looks like quite a gamble. (Lvl: 2)";
+        let line =
+            "A garter snake regards you indifferently -- looks like quite a gamble. (Lvl: 2)";
         assert_eq!(classify_con(Some(line), 2), ConDecision::Safe);
     }
 
@@ -1086,7 +1116,10 @@ mod tests {
     #[test]
     fn classifies_merchant_and_player_as_non_npc() {
         assert_eq!(
-            classify_con(Some("Merchant Kinliat regards you indifferently. (Lvl: 1)"), 2),
+            classify_con(
+                Some("Merchant Kinliat regards you indifferently. (Lvl: 1)"),
+                2
+            ),
             ConDecision::NonNpc
         );
         assert_eq!(
@@ -1102,14 +1135,23 @@ mod tests {
 
     #[test]
     fn parses_consider_levels() {
-        assert_eq!(parse_target_level(Some("looks like a gamble. (Lvl: 3)")), Some(3));
-        assert_eq!(parse_target_level(Some("consider a skeleton level 5")), Some(5));
+        assert_eq!(
+            parse_target_level(Some("looks like a gamble. (Lvl: 3)")),
+            Some(3)
+        );
+        assert_eq!(
+            parse_target_level(Some("consider a skeleton level 5")),
+            Some(5)
+        );
         assert_eq!(parse_target_level(Some("no level here")), None);
     }
 
     #[test]
     fn parses_hud_level() {
-        assert_eq!(parse_level(Some("Inventory Thenumberone 1 Wizard")), Some(1));
+        assert_eq!(
+            parse_level(Some("Inventory Thenumberone 1 Wizard")),
+            Some(1)
+        );
         assert_eq!(parse_level(Some("Thenumberone 2 Wizard")), Some(2));
         assert_eq!(parse_level(None), None);
     }

@@ -100,7 +100,7 @@ hotbar10 = "0"
 [backends]
 default = "auto"
 keyboard_default = "auto"
-mouse_default = "hardware"
+mouse_default = "software"
 pad_default = "auto"
 
 [metadata]

@@ -47,7 +47,6 @@ pub struct M2State {
     pub snapshot_handle: ActionEmitterSnapshotHandle,
     pub recording: Option<Arc<RecordingBackend>>,
     pub connection_closed_cancel: Option<CancellationToken>,
-    hardware_hid: Option<String>,
     backend_resolution: Arc<RwLock<BackendResolutionPolicy>>,
     backend_resolution_source: String,
     retained_emitter: Option<ActionEmitter>,
@@ -82,23 +81,13 @@ impl M2State {
         shutdown_reason: &'static str,
         connection_closed_cancel: Option<CancellationToken>,
     ) -> anyhow::Result<Self> {
-        let recording_enabled = recording_backend_enabled(config.recording_backend.as_deref());
-        let action_backends = if recording_enabled {
-            None
-        } else {
-            config.action_backends()?
-        };
-        let hardware_hid = (!recording_enabled)
-            .then(|| config.hardware_hid_readback())
-            .flatten();
         Ok(Self::from_recording_backend_env_with_configured_backends(
             config.recording_backend.as_deref(),
             shutdown_cancel,
             shutdown_reason,
             connection_closed_cancel,
             None,
-            action_backends,
-            hardware_hid,
+            None,
         ))
     }
 
@@ -156,7 +145,6 @@ impl M2State {
             connection_closed_cancel,
             actor_backend,
             None,
-            None,
         )
     }
 
@@ -168,7 +156,6 @@ impl M2State {
         connection_closed_cancel: Option<CancellationToken>,
         actor_backend: Option<Arc<dyn ActionBackend>>,
         action_backends: Option<synapse_action::Backends>,
-        hardware_hid: Option<String>,
     ) -> Self {
         let double_click_timing = initialize_double_click_timing_cache();
         tracing::info!(
@@ -230,7 +217,6 @@ impl M2State {
                 snapshot_handle,
                 recording,
                 connection_closed_cancel: tool_connection_closed_cancel,
-                hardware_hid,
                 backend_resolution,
                 backend_resolution_source: "global_default".to_owned(),
                 retained_emitter: None,
@@ -245,7 +231,6 @@ impl M2State {
             snapshot_handle,
             recording,
             connection_closed_cancel: tool_connection_closed_cancel,
-            hardware_hid,
             backend_resolution,
             backend_resolution_source: "global_default".to_owned(),
             retained_emitter: Some(emitter),
@@ -280,11 +265,6 @@ impl M2State {
     #[must_use]
     pub fn emitter_done_receiver(&self) -> Option<watch::Receiver<Option<ActionStateSnapshot>>> {
         self.emitter_done.clone()
-    }
-
-    #[must_use]
-    pub fn hardware_hid(&self) -> Option<&str> {
-        self.hardware_hid.as_deref()
     }
 
     #[must_use]
@@ -333,7 +313,6 @@ impl fmt::Debug for M2State {
                 "connection_closed_cancel",
                 &self.connection_closed_cancel.is_some(),
             )
-            .field("hardware_hid", &self.hardware_hid())
             .field("backend_resolution", &backend_resolution)
             .field(
                 "backend_resolution_source",

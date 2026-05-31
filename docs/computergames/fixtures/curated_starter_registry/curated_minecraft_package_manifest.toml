@@ -38,7 +38,7 @@ dpi_scale_min = 1.0
 dpi_scale_max = 2.0
 
 [input]
-backends = ["software", "hardware", "vigem"]
+backends = ["software", "vigem"]
 
 [[input.models]]
 id = "rtdetr_v2_s_coco_onnx"

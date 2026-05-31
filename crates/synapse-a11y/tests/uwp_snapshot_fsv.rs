@@ -55,7 +55,9 @@ fn hwnd_for_window(name: &str) -> Result<Option<i64>, Box<dyn Error>> {
 fn calculator_uwp_display_is_reachable_via_snapshot() -> Result<(), Box<dyn Error>> {
     // Launch Calculator if it is not already present.
     if hwnd_for_window("Calculator")?.is_none() {
-        Command::new("cmd").args(["/C", "start", "", "calc.exe"]).spawn()?;
+        Command::new("cmd")
+            .args(["/C", "start", "", "calc.exe"])
+            .spawn()?;
     }
 
     // Wait for the window to register in the UIA tree (bounded).

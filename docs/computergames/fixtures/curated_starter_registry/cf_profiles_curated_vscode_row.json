@@ -25,7 +25,7 @@
   "use_scope": "productivity",
   "compatibility_status": "declared",
   "safe_default_backend_policy": "auto; local productivity only; no remote execution; audit export requires explicit consent",
-  "input_backends": ["software", "hardware"],
+  "input_backends": ["software"],
   "minimum_manual_fsv": [
     "profile_list",
     "profile_registry_install",

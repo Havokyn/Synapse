@@ -19,7 +19,7 @@ impl ActionBackend for HardwareUnavailableBackend {
         crate::validate_action(action)?;
         Err(ActionError::BackendUnavailable {
             detail: format!(
-                "backend=hardware reason=hardware HID not enabled; start synapse-mcp with --hardware-hid <port|auto> action_kind={}",
+                "backend=hardware reason=hardware backend removed; use backend=software or backend=vigem action_kind={}",
                 action_kind(action)
             ),
         })

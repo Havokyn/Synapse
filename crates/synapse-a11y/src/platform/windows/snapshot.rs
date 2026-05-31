@@ -13,7 +13,8 @@ use crate::{A11yError, A11yResult, ElementSearchScope, ids::runtime_id_hex};
 
 use super::common::{
     TreeView, cached_hwnd, cached_patterns, cached_rect, cached_role, cached_runtime_id,
-    cached_value, create_cache_request, map_uia_error, non_empty, pattern_property, with_automation,
+    cached_value, create_cache_request, map_uia_error, non_empty, pattern_property,
+    with_automation,
 };
 
 static SNAPSHOT_CACHE: Mutex<Option<SnapshotCache>> = Mutex::new(None);
@@ -141,7 +142,15 @@ fn snapshot_at_depth(
         node_budget: SNAPSHOT_NODE_BUDGET,
         deadline: Instant::now() + SNAPSHOT_DEADLINE,
     };
-    collect_nodes(&walk, &cached_root, None, 0, depth, &mut nodes, &mut truncated)?;
+    collect_nodes(
+        &walk,
+        &cached_root,
+        None,
+        0,
+        depth,
+        &mut nodes,
+        &mut truncated,
+    )?;
     let root = nodes
         .first()
         .map(|node| node.element_id.clone())

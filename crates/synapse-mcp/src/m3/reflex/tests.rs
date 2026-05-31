@@ -223,7 +223,7 @@ fn combo_timed_act_press_steps_map_to_one_shot_combo_driver() {
 }
 
 #[test]
-fn register_permissions_bubble_then_step_backend_requirements() {
+fn register_permissions_do_not_add_removed_hardware_backend_gate() {
     let params: ReflexRegisterParams = serde_json::from_value(json!({
         "kind": "on_event",
         "when": { "op": "kind", "kind": "support-permissions" },
@@ -243,7 +243,6 @@ fn register_permissions_bubble_then_step_backend_requirements() {
         required_permissions_register(&params).expect("permission calculation should pass");
     assert!(permissions.contains(&Permission::WriteReflex));
     assert!(permissions.contains(&Permission::InputKeyboard));
-    assert!(permissions.contains(&Permission::InputHardwareHid));
     assert!(!permissions.contains(&Permission::InputMouse));
     assert!(!permissions.contains(&Permission::InputPad));
 }
