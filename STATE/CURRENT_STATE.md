@@ -6,18 +6,14 @@
   - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`
   - `AGENTS.md`
   - #351 manual-FSV/no-CI decision
-- GitHub issue queue read: open issues are #590, #589, #588, and #585.
+- GitHub issue queue read after closing #589: open issues are #590, #588, and #585.
 - `main` and `origin/main` are both at `d9edad8 docs(state): update session state after docs alignment commit [skip ci]`.
-- Current dirty worktree:
-  - `crates/synapse-profiles/tests/package_manifest.rs`
-  - `STATE/CURRENT_STATE.md`
-  - `STATE/DECISION_LOG.md`
-  - `STATE/HEARTBEAT.md`
-  - `STATE/RECOVERY_NOTES.md`
+- Worktree is clean after pushing `828eec2`.
 - #589 implementation commits already on `main`:
   - `e0e9993 refactor: retire physical hardware-HID path for software-only input (#588)`
   - `a44d845 docs: align documentation with software-only input refactor [skip ci]`
   - `d9edad8 docs(state): update session state after docs alignment commit [skip ci]`
+  - `828eec2 test(profiles): update signed manifest digest after HID removal [skip ci]`
 - #589 removed the dead RP2040/Pico and serial hardware-HID path while retaining hardware enum/profile tokens as fail-closed compatibility tags through `HardwareUnavailableBackend`.
 - Uncommitted fix: signed package manifest expected digest updated to `sha256:4013ce772c32c5ba641d78848ba1b04add3224fe7fab12822572e6343b5b38c7` after hardware metadata removal changed the deterministic signature payload.
 
@@ -75,7 +71,7 @@
 - `git diff --check` passes with line-ending warnings only.
 
 ## Open Queue Snapshot
-- #589: ready for commit/push, RESOLVED comment, and close.
-- #590: add software-backend input fidelity benchmarks for SendInput and ViGEm timing.
+- #589: RESOLVED comment posted and issue closed.
+- #590: active next issue; add software-backend input fidelity benchmarks for SendInput and ViGEm timing.
 - #585: hardening, move UIA calls to a dedicated MTA worker thread.
 - #588: context issue, close after #589 and #590 are resolved.
