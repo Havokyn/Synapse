@@ -1,0 +1,53 @@
+id = "outlook"
+label = "Microsoft Outlook"
+schema_version = 2
+use_scope = "productivity"
+mode = "hybrid"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "OUTLOOK.EXE"
+title_regex = ".* - Outlook$"
+
+[[matches]]
+exe = "OUTLOOK.EXE"
+
+[[matches]]
+exe = "olk.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+copy = "ctrl+c"
+find = "ctrl+e"
+new_email = "ctrl+n"
+paste = "ctrl+v"
+reply = "ctrl+r"
+reply_all = "ctrl+shift+r"
+save = "ctrl+s"
+send = "ctrl+enter"
+send_receive = "f9"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"
+
+[metadata]
+"registry.family" = "profile-registry/audit-data"
+"registry.curated_seed" = "starter.v1"
+"registry.curated_status" = "shipped_curated_package"
+"registry.curated_tier" = "productivity.seed"
+"registry.curated_priority" = "p1"
+"registry.quality_signal" = "profile_quality.outlook"
+"registry.minimum_manual_fsv" = "profile_list,profile_registry_install,observe,act_type,act_press,act_click,storage_inspect,profile_quality_refresh,outlook_message_subject_readback"
+"registry.compatibility_target" = "outlook.windows"
+"registry.safe_default_backend_policy" = "auto; local productivity only; compose/read only by default; SENDING email is an outward-facing action that must be operator-confirmed; no account/credential changes; audit export requires explicit consent"
+"action.new_email_key" = "ctrl+n"
+"action.send_key" = "ctrl+enter"
+"action.outward_facing_actions" = "send,reply,reply_all,forward; require explicit operator confirmation before dispatch"

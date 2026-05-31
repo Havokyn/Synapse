@@ -119,10 +119,13 @@ impl M3ServiceConfig {
             profile_dir: std::env::var_os(PROFILE_DIR_ENV).map(PathBuf::from),
             reflex_disabled: parse_bool_env(REFLEX_DISABLED_ENV, reflex_disabled_raw.as_deref())?,
             enable_audio: parse_bool_env(ENABLE_AUDIO_ENV, enable_audio_raw.as_deref())?,
-            allow_unknown_profile: parse_bool_env(
-                ALLOW_UNKNOWN_PROFILE_ENV,
-                allow_unknown_profile_raw.as_deref(),
-            )?,
+            // Permissive by default: unset means unknown/unprofiled foreground
+            // apps are actionable. Explicit `0`/`false` restores fail-closed.
+            allow_unknown_profile: allow_unknown_profile_raw
+                .as_deref()
+                .map_or(Ok(true), |raw| {
+                    parse_bool_env(ALLOW_UNKNOWN_PROFILE_ENV, Some(raw))
+                })?,
             reflex_force_degraded: parse_bool_env(
                 REFLEX_FORCE_DEGRADED_ENV,
                 reflex_force_degraded_raw.as_deref(),

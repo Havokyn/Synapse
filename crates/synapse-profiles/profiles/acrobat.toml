@@ -1,0 +1,47 @@
+id = "acrobat"
+label = "Adobe Acrobat / Reader (PDF)"
+schema_version = 2
+use_scope = "productivity"
+mode = "hybrid"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "Acrobat.exe"
+
+[[matches]]
+exe = "AcroRd32.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+copy = "ctrl+c"
+find = "ctrl+f"
+fit_page = "ctrl+0"
+open = "ctrl+o"
+print = "ctrl+p"
+save = "ctrl+s"
+select_all = "ctrl+a"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"
+
+[metadata]
+"registry.family" = "profile-registry/audit-data"
+"registry.curated_seed" = "starter.v1"
+"registry.curated_status" = "shipped_curated_package"
+"registry.curated_tier" = "productivity.seed"
+"registry.curated_priority" = "p2"
+"registry.quality_signal" = "profile_quality.acrobat"
+"registry.minimum_manual_fsv" = "profile_list,profile_registry_install,observe,act_press,act_click,storage_inspect,profile_quality_refresh,acrobat_document_title_readback"
+"registry.compatibility_target" = "acrobat.windows"
+"registry.compatibility_targets" = "acrobat.windows,reader.windows"
+"registry.safe_default_backend_policy" = "auto; local document viewing/markup only; no account/license changes; no remote execution; audit export requires explicit consent"
+"action.find_key" = "ctrl+f"
+"action.print_key" = "ctrl+p"

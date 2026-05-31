@@ -47,6 +47,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const INTER_KEY_DELAY: Duration = Duration::from_millis(250);
 const MAX_TARGET_CYCLES: u32 = 3;
 const DEFAULT_HOTBAR_ALIAS: &str = "hotbar4";
+/// One roam move: hold `forward` for this long after a small turn, then re-scan.
+const ROAM_FORWARD_HOLD_MS: u32 = 1200;
+/// One roam turn: hold a turn alias for this long to face a fresh direction.
+const ROAM_TURN_HOLD_MS: u32 = 350;
+/// One chase burst: hold `forward` for this long, then re-poll the fight window.
+const CHASE_FORWARD_HOLD_MS: u32 = 800;
+/// A chase ends if no combat lines are seen for this many consecutive bursts.
+const CHASE_IDLE_BURSTS: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +77,10 @@ pub struct ActAutocombatParams {
     pub engagement_timeout_s: u32,
     #[serde(default = "default_hotbar_alias")]
     pub hotbar_alias: String,
+    #[serde(default = "default_max_roam_steps")]
+    pub max_roam_steps: u32,
+    #[serde(default = "default_max_chase_s")]
+    pub max_chase_s: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }
@@ -100,6 +112,12 @@ const fn default_engagement_timeout_s() -> u32 {
 fn default_hotbar_alias() -> String {
     DEFAULT_HOTBAR_ALIAS.to_owned()
 }
+const fn default_max_roam_steps() -> u32 {
+    6
+}
+const fn default_max_chase_s() -> u32 {
+    12
+}
 
 /// Validated, clamped loop policy derived from `ActAutocombatParams`.
 #[derive(Clone, Debug)]
@@ -113,6 +131,8 @@ struct Policy {
     cast_mana_cost: u32,
     engagement_timeout: Duration,
     hotbar_alias: String,
+    max_roam_steps: u32,
+    max_chase: Duration,
     run_id: String,
 }
 
@@ -128,6 +148,10 @@ pub struct ActAutocombatIteration {
     pub casts: u32,
     /// Whether at least one nuke cast was emitted (kept for back-compat).
     pub cast: bool,
+    /// Number of roam moves taken during the find phase for this iteration.
+    pub roam_steps: u32,
+    /// Whether the wizard chased a fleeing target during this engagement.
+    pub chased: bool,
     pub outcome: String,
 }
 
@@ -217,7 +241,10 @@ impl ConDecision {
 enum FightSignal {
     /// `<mob> has been slain by ...` — engagement won.
     Slain,
-    /// Target lost / fled / no target (auto-attack can no longer reach it).
+    /// The mob is fleeing at low HP (`flees`, `tries to flee`, `runs away`) and
+    /// is still alive — chase it to stay in melee range and finish it.
+    Fleeing,
+    /// Target lost / no target (auto-attack can no longer reach it).
     TargetLost,
     /// Combat ongoing (hits exchanged, resist, fizzle, miss) — keep fighting.
     Continue,
@@ -729,6 +756,8 @@ fn normalize_policy(params: ActAutocombatParams) -> Policy {
         cast_mana_cost: params.cast_mana_cost_percent.min(100),
         engagement_timeout: Duration::from_secs(u64::from(params.engagement_timeout_s.clamp(1, 300))),
         hotbar_alias: normalize_alias(&params.hotbar_alias),
+        max_roam_steps: params.max_roam_steps.min(50),
+        max_chase: Duration::from_secs(u64::from(params.max_chase_s.clamp(1, 120))),
         run_id: params.idempotency_key.map_or_else(default_run_id, |value| {
             sanitize_run_id(&value)
         }),
@@ -772,6 +801,8 @@ fn policy_details(policy: &Policy) -> serde_json::Value {
         "cast_mana_cost_percent": policy.cast_mana_cost,
         "engagement_timeout_s": policy.engagement_timeout.as_secs(),
         "hotbar_alias": policy.hotbar_alias,
+        "max_roam_steps": policy.max_roam_steps,
+        "max_chase_s": policy.max_chase.as_secs(),
     })
 }
 

@@ -78,8 +78,11 @@ struct Cli {
     reflex_disabled: bool,
     #[arg(long, env = "SYNAPSE_ENABLE_AUDIO")]
     enable_audio: bool,
-    #[arg(long, env = "SYNAPSE_ALLOW_UNKNOWN_PROFILE")]
-    allow_unknown_profile: bool,
+    /// Restrict action dispatch to reviewed profiles. Off by default: Synapse
+    /// is general Windows computer-control, so unknown/unprofiled foreground
+    /// apps are actionable out of the box. Set to fail closed on unknown scope.
+    #[arg(long, env = "SYNAPSE_RESTRICT_UNKNOWN_PROFILE")]
+    restrict_unknown_profile: bool,
     #[arg(long, env = "SYNAPSE_MCP_ALLOWED_PERMISSIONS", value_name = "LIST")]
     allowed_permissions: Option<String>,
     #[arg(long, env = "SYNAPSE_REFLEX_FORCE_DEGRADED")]
@@ -143,7 +146,7 @@ impl Cli {
             self.bind.clone(),
             self.max_subscriptions,
             self.enable_audio,
-            self.allow_unknown_profile,
+            !self.restrict_unknown_profile,
             self.allowed_permissions.clone(),
             self.reflex_force_degraded,
             self.storage_pressure_free_bytes_sample,

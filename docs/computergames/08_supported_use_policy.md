@@ -16,6 +16,41 @@ Hardware HID, natural cursor curves, virtual controllers, fast capture, and refl
 
 ---
 
+## 2a. Runtime posture (default-permissive)
+
+The active target of Synapse is **full-state verification of general Windows
+computer use** — the everyday business and personal apps an operator runs
+(Office, Outlook, browsers, Teams/Slack/Zoom, File Explorer, PDF readers,
+shells, system apps, and the long tail of unprofiled apps). Games are no longer
+the active target; the bundled game profiles remain only as legacy fixtures.
+
+To support that, a **stock daemon is permissive by default**:
+
+- **Any foreground app is actionable**, including apps with no bundled profile
+  (`allow_unknown_profile` defaults on). Restore fail-closed scope gating with
+  `--restrict-unknown-profile` / `SYNAPSE_RESTRICT_UNKNOWN_PROFILE=1`.
+- **`act_run_shell` / `act_launch` permit any command/target by default**
+  (`SYNAPSE_ALLOW_SHELL_ANY` / `SYNAPSE_ALLOW_LAUNCH_ANY` default on). Set either
+  to `0` to restore the per-target allowlist. Every command/target is recorded
+  in `CF_ACTION_LOG` regardless.
+- **All non-audio M3 permissions are granted by default** (`READ_AUDIO` still
+  requires `--enable-audio`; `INPUT_HARDWARE_HID` still requires an attached
+  device).
+- The legacy game world/server `supported_use.*` gate is **off by default** and
+  re-armed only with `SYNAPSE_ENFORCE_SUPPORTED_USE=1`.
+
+**Functional safety is independent of this posture and always active:** the
+operator panic hotkey `Ctrl+Alt+Shift+P` (release-all + disable reflexes), the
+panic-hook `release_all`, input rate limits, and foreground/focus
+stabilization. The §4.1 frozen capabilities below also remain frozen. Profiles
+flag outward-facing or irreversible actions (sending mail/messages, deleting
+files, ending processes, connecting to remote hosts, changing system settings)
+via `action.outward_facing_actions` / `action.irreversible_actions` /
+`action.high_impact_actions` metadata so the operator/agent confirms them
+before dispatch.
+
+---
+
 ## 3. Supported contexts
 
 Profiles declare a `use_scope`. The field is descriptive metadata for permission checks and user-facing warnings.
@@ -26,7 +61,7 @@ Profiles declare a `use_scope`. The field is descriptive metadata for permission
 | `single_player` | Minecraft Java local worlds, Factorio, Stardew Valley, Skyrim, KSP, OpenTTD | Game actions allowed; hardware HID remains opt-in |
 | `operator_owned_test` | QA fixtures, private test servers, local simulators, replay harnesses | Actions allowed when the profile declares the test boundary |
 | `sanctioned_research` | University game-AI rigs, AI tournaments, benchmark environments | Actions allowed with explicit profile metadata and operator setup |
-| `unknown` | New games/apps without a reviewed profile | Observation allowed; action defaults should be minimal until the profile is reviewed |
+| `unknown` | New apps without a reviewed profile | Observation and actions allowed by default (see §2a); pass `--restrict-unknown-profile` to fail closed until a profile is reviewed |
 
 The profile loader rejects unknown `use_scope` values. Bundled profiles must include `use_scope` and a short comment describing the intended environment.
 Bundled benchmark profiles must also expose metadata gates such as
@@ -109,11 +144,11 @@ When an action is about to fire, the MCP layer checks session permissions, profi
 
 | Situation | Default behavior | Operator override |
 |---|---|---|
-| `use_scope = "unknown"` and a write/action tool is requested | Refuse with `SAFETY_PROFILE_ACTION_DENIED`, log event | Activate a reviewed profile or pass an explicit profile override |
+| `use_scope = "unknown"` / no profile and a write/action tool is requested | Allowed by default (§2a), log event | Pass `--restrict-unknown-profile` / `SYNAPSE_RESTRICT_UNKNOWN_PROFILE=1` to refuse with `SAFETY_PROFILE_ACTION_DENIED` |
 | Hardware HID requested without hardware enabled | Refuse with `ACTION_BACKEND_UNAVAILABLE` | Start with `--hardware-hid <port|auto>` |
 | Audio tool requested without audio enabled | Refuse with `SAFETY_PERMISSION_DENIED` | Start with `--enable-audio` or set `SYNAPSE_ENABLE_AUDIO=true` |
-| Launch process requested outside allowlist | Refuse with `SAFETY_LAUNCH_DENIED_BY_POLICY` | Add `--allow-launch <regex>` or config entry |
-| Shell command requested outside allowlist | Refuse with `SAFETY_SHELL_DENIED_BY_POLICY` | Add `--allow-shell <regex>` or config entry |
+| Launch process / shell command requested | Allowed by default (§2a), recorded in `CF_ACTION_LOG` | Set `SYNAPSE_ALLOW_LAUNCH_ANY=0` / `SYNAPSE_ALLOW_SHELL_ANY=0` to restore the `--allow-launch` / `--allow-shell` allowlist (refuse with `SAFETY_LAUNCH_DENIED_BY_POLICY` / `SAFETY_SHELL_DENIED_BY_POLICY`) |
+| Legacy game world/server `supported_use.*` gate | Off by default | Set `SYNAPSE_ENFORCE_SUPPORTED_USE=1` to re-arm |
 | Redaction disabled | Requires startup flag and first-use confirmation | `--no-redaction` |
 | Non-loopback HTTP bind | Requires startup flag and first-use confirmation | `--bind <addr>` |
 
@@ -123,9 +158,32 @@ The checks gate Synapse's own behavior. They do not inspect or classify third-pa
 
 ## 7. Specific guidance for likely v1 profiles
 
-### 7.1 Productivity profiles
+### 7.1 Productivity profiles (active target)
 
-Notepad, VS Code, Chrome, Slack, Discord, Terminal, and File Explorer are `productivity` profiles. They prefer accessibility APIs and semantic invocation over coordinate motion whenever possible.
+The bundled `productivity` profiles cover everyday business and personal Windows
+use and are the **active FSV target**. They prefer accessibility APIs and
+semantic invocation over coordinate motion whenever possible:
+
+- **Documents / Office:** Word, Excel, PowerPoint, OneNote, WordPad, Notepad,
+  Adobe Acrobat/Reader (PDF)
+- **Email & communication:** Outlook, Microsoft Teams, Slack, Zoom
+- **Browsers:** Chrome (also Edge/Chromium), Firefox, Internet Explorer
+- **System & files:** File Explorer, Windows Settings, Task Manager, Calculator,
+  Snipping Tool, Command Prompt, PowerShell, Windows Terminal, Remote Desktop
+- **Dev & media:** VS Code, Paint, Photos
+
+Any app without a bundled profile is still fully actionable through the generic
+default-permissive path (§2a); a profile adds semantic keymaps, capture tuning,
+and FSV verification anchors. Profiles annotate outward-facing/irreversible
+actions in metadata so they are confirmed before dispatch.
+
+### 7.1.1 Legacy game profiles (inactive)
+
+The `minecraft.java`, `luanti.minetest`, and `everquest.live` profiles and the
+`supported_use.*` world/server gate are retained only as legacy fixtures. They
+are **not** the active target and the runtime gate that enforced them is off by
+default (§2a). The game-specific subsections below are kept for historical
+reference.
 
 ### 7.2 Minecraft Java Edition
 

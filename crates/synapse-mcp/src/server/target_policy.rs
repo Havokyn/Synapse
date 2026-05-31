@@ -33,6 +33,26 @@ const KEY_BENCHMARK_GAMEID: &str = "benchmark_world_gameid";
 const KEY_RUNTIME_EVERQUEST_EXE: &str = "runtime.everquest.exe";
 const KEY_RUNTIME_EVERQUEST_SERVER: &str = "runtime.everquest.server";
 
+/// Opt-in enforcement of the legacy game-target `supported_use` policy.
+///
+/// Synapse is general-purpose local Windows computer-control infrastructure;
+/// by default every profiled foreground app is actionable and this
+/// world/server gate does nothing. Set this env truthy to restore the
+/// historical benchmark/live-server gating (used only by the bundled game
+/// profiles). Functional safety (operator panic hotkey, release-all on panic,
+/// rate limits, foreground stabilization) is independent of this flag and
+/// always active.
+const ENFORCE_SUPPORTED_USE_ENV: &str = "SYNAPSE_ENFORCE_SUPPORTED_USE";
+
+fn supported_use_enforced() -> bool {
+    env::var_os(ENFORCE_SUPPORTED_USE_ENV).is_some_and(|raw| {
+        matches!(
+            raw.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        )
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SupportedTargetState {
     pub profile_id: ProfileId,
@@ -85,6 +105,11 @@ pub(super) fn ensure_supported_use_allows(
     foreground: &ForegroundContext,
     tool: &'static str,
 ) -> Result<(), ErrorData> {
+    if !supported_use_enforced() {
+        // Default posture: general Windows computer-control. The legacy
+        // game world/server gate is opt-in via SYNAPSE_ENFORCE_SUPPORTED_USE.
+        return Ok(());
+    }
     let observed_profile_id = runtime
         .resolve_foreground(&foreground_window(foreground))
         .map_err(|error| target_policy_internal_error(tool, &error.to_string()))?

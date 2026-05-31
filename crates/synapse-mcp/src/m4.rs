@@ -27,10 +27,11 @@ const DEFAULT_SHELL_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS: u32 = 10_000;
 const ALLOW_SHELL_ENV: &str = "SYNAPSE_ALLOW_SHELL";
 const ALLOW_LAUNCH_ENV: &str = "SYNAPSE_ALLOW_LAUNCH";
-/// Operator opt-in for unrestricted shell/launch. When truthy, the per-target
-/// allowlist is bypassed and any command/target is permitted. The action is
-/// still recorded in `CF_ACTION_LOG` and the mode is logged loudly at startup.
-/// Off by default so a stock daemon stays fail-closed.
+/// Unrestricted shell/launch. **On by default**: Synapse is general local
+/// computer-control, so any command/target is permitted unless the operator
+/// explicitly sets the env to a falsey value (`0`/`false`/`no`/`off`), which
+/// restores the per-target allowlist. Every command/target is recorded in
+/// `CF_ACTION_LOG` regardless, and the mode is logged loudly at startup.
 const ALLOW_SHELL_ANY_ENV: &str = "SYNAPSE_ALLOW_SHELL_ANY";
 const ALLOW_LAUNCH_ANY_ENV: &str = "SYNAPSE_ALLOW_LAUNCH_ANY";
 /// Sentinel recorded as the matched pattern when permissive mode authorizes a
@@ -113,8 +114,8 @@ impl M4ServiceConfig {
         allow_shell: Vec<String>,
         allow_launch: Vec<String>,
     ) -> anyhow::Result<Self> {
-        let allow_shell_any = env_flag(ALLOW_SHELL_ANY_ENV);
-        let allow_launch_any = env_flag(ALLOW_LAUNCH_ANY_ENV);
+        let allow_shell_any = env_flag_default_true(ALLOW_SHELL_ANY_ENV);
+        let allow_launch_any = env_flag_default_true(ALLOW_LAUNCH_ANY_ENV);
         if allow_shell_any {
             tracing::warn!(
                 code = "M4_ALLOW_SHELL_ANY_ENABLED",
@@ -200,6 +201,18 @@ fn env_flag(name: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+/// Like [`env_flag`] but defaults to `true` when the variable is unset. Only an
+/// explicit falsey value (`0`/`false`/`no`/`off`) disables the flag.
+fn env_flag_default_true(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]

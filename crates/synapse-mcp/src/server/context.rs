@@ -448,6 +448,13 @@ fn ensure_profile_scope_allows_action(
         .active_profile_id()
         .map_err(|error| mcp_error(error.code(), error.to_string()))?;
     let Some(active_profile_id) = active_profile_id else {
+        // Default posture (allow_unknown_profile): general Windows
+        // computer-control, so an unprofiled foreground is still actionable.
+        // Functional safety (panic hotkey, release-all, rate limits, focus
+        // stabilization) is unaffected by this allowance.
+        if allow_unknown_profile {
+            return Ok(());
+        }
         return Err(profile_action_scope_denied_error(
             tool,
             "no_profile",

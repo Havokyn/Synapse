@@ -21,8 +21,19 @@ Synapse runs locally with operator authority, exposes a powerful surface to its 
 3. **No exfiltration without consent.** Telemetry stays local unless OTLP is configured.
 4. **No background updates.** Never auto-updates.
 5. **Logs and replay redact secrets.** Built-in patterns; operator-extensible.
-6. **Action permissions gated.** Dangerous actions disabled by default; opt-in.
-7. **Always recoverable.** Kill-switch hotkey + `release_all` returns control in under a second.
+6. **Permissive by default, always recorded.** As general Windows
+   computer-control infrastructure, a stock daemon can drive any foreground app
+   and run shell/launch by default (see `08_supported_use_policy.md` §2a). This
+   is an operator-authority tool: every action — including shell commands and
+   launches — is recorded in `CF_ACTION_LOG`, and restriction switches
+   (`--restrict-unknown-profile`, `SYNAPSE_ALLOW_SHELL_ANY=0`,
+   `SYNAPSE_ALLOW_LAUNCH_ANY=0`, `SYNAPSE_ENFORCE_SUPPORTED_USE=1`) re-arm
+   fail-closed gating when wanted. The mitigation for a hostile/buggy agent is
+   the kill-switch, audit log, and operator confirmation of outward-facing /
+   irreversible actions — not a default-deny action surface.
+7. **Always recoverable.** Kill-switch hotkey (`Ctrl+Alt+Shift+P`) + `release_all`
+   returns control in under a second. This functional safety is always active
+   and independent of the permissive posture.
 
 ---
 

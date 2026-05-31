@@ -1,0 +1,39 @@
+id = "cmd"
+label = "Command Prompt"
+schema_version = 2
+use_scope = "productivity"
+mode = "a11y_only"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "cmd.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+cancel = "ctrl+c"
+paste = "ctrl+v"
+run = "enter"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"
+
+[metadata]
+"registry.family" = "profile-registry/audit-data"
+"registry.curated_seed" = "starter.v1"
+"registry.curated_status" = "shipped_curated_package"
+"registry.curated_tier" = "productivity.seed"
+"registry.curated_priority" = "p2"
+"registry.quality_signal" = "profile_quality.cmd"
+"registry.minimum_manual_fsv" = "profile_list,profile_registry_install,observe,act_clipboard,act_press,storage_inspect,profile_quality_refresh,cmd_command_output_readback"
+"registry.compatibility_target" = "cmd.windows"
+"registry.safe_default_backend_policy" = "auto; local productivity only; RUNNING commands can affect the machine and must be operator-confirmed; prefer clipboard paste + enter; act_type dispatch requires target readback; audit export requires explicit consent"
+"action.text_entry_verified_path" = "act_clipboard write + ctrl+v paste + enter + cmd_command_output_readback"
+"action.high_impact_actions" = "command_execution; require explicit operator confirmation before dispatch"

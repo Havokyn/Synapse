@@ -1,0 +1,53 @@
+id = "wordpad"
+label = "WordPad"
+schema_version = 2
+use_scope = "productivity"
+mode = "a11y_only"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "wordpad.exe"
+title_regex = ".* - WordPad$"
+
+[[matches]]
+exe = "wordpad.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+bold = "ctrl+b"
+copy = "ctrl+c"
+cut = "ctrl+x"
+find = "ctrl+f"
+italic = "ctrl+i"
+new_file = "ctrl+n"
+open = "ctrl+o"
+paste = "ctrl+v"
+print = "ctrl+p"
+save = "ctrl+s"
+select_all = "ctrl+a"
+underline = "ctrl+u"
+undo = "ctrl+z"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"
+
+[metadata]
+"registry.family" = "profile-registry/audit-data"
+"registry.curated_seed" = "starter.v1"
+"registry.curated_status" = "shipped_curated_package"
+"registry.curated_tier" = "productivity.seed"
+"registry.curated_priority" = "p2"
+"registry.quality_signal" = "profile_quality.wordpad"
+"registry.minimum_manual_fsv" = "profile_list,profile_registry_install,observe,act_type,storage_inspect,profile_quality_refresh,wordpad_document_text_readback"
+"registry.compatibility_target" = "wordpad.windows"
+"registry.safe_default_backend_policy" = "auto; local productivity only; no remote execution; audit export requires explicit consent"
+"action.save_key" = "ctrl+s"
+"action.act_type_text_integrity" = "dispatch_only_requires_target_readback"

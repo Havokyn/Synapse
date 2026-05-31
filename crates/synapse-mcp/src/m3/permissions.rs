@@ -251,6 +251,11 @@ fn parse_grants(raw: &str) -> Result<RequiredPermissions> {
 }
 
 fn default_grants(audio_enabled: bool) -> RequiredPermissions {
+    // Permissive by default: every non-audio permission is granted so a stock
+    // daemon can fully drive the Windows desktop. READ_AUDIO is a real
+    // capability dependency (requires --enable-audio / SYNAPSE_ENABLE_AUDIO),
+    // not a guardrail, so it stays conditional. INPUT_HARDWARE_HID is granted
+    // here but still requires an attached Pico HID device to actually emit.
     let mut granted = required([
         Permission::ReadEvents,
         Permission::WriteReflex,
@@ -263,6 +268,7 @@ fn default_grants(audio_enabled: bool) -> RequiredPermissions {
         Permission::InputKeyboard,
         Permission::InputMouse,
         Permission::InputPad,
+        Permission::InputHardwareHid,
     ]);
     if audio_enabled {
         granted.insert(Permission::ReadAudio);

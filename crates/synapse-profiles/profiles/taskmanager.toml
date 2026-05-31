@@ -1,0 +1,36 @@
+id = "taskmanager"
+label = "Windows Task Manager"
+schema_version = 2
+use_scope = "productivity"
+mode = "a11y_only"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "Taskmgr.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+select_all = "ctrl+a"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"
+
+[metadata]
+"registry.family" = "profile-registry/audit-data"
+"registry.curated_seed" = "starter.v1"
+"registry.curated_status" = "shipped_curated_package"
+"registry.curated_tier" = "productivity.seed"
+"registry.curated_priority" = "p2"
+"registry.quality_signal" = "profile_quality.taskmanager"
+"registry.minimum_manual_fsv" = "profile_list,profile_registry_install,observe,act_click,storage_inspect,profile_quality_refresh,taskmanager_process_list_readback"
+"registry.compatibility_target" = "taskmanager.windows"
+"registry.safe_default_backend_policy" = "auto; local process/resource readback; ENDING tasks/processes can cause data loss and must be operator-confirmed; no remote execution; audit export requires explicit consent"
+"action.irreversible_actions" = "end_task,end_process_tree; require explicit operator confirmation before dispatch"
