@@ -1,6 +1,29 @@
 # RECOVERY NOTES - Synapse
 
-## Current Resume Point - 2026-06-01T09:31:17-05:00
+## Current Resume Point - 2026-06-01T10:12:14-05:00
+- Active issue #616 has implementation, manual MCP FSV evidence, cleanup, final supporting checks, and diff review complete; commit, RESOLVED comment, close, and queue continuation are next.
+- Patch in `crates/synapse-mcp/src/server/reality.rs` makes `reality_audit` classify concrete compact-state drift instead of treating every physical mismatch as generic `rebase_required`.
+- FSV evidence is in `.runs\616\audit-fsv-20260601T0945`:
+  - repo-built daemon PID `80292`, bind `127.0.0.1:7844`, isolated DB, strict Inspector `tools/list` with 80 tools;
+  - source unavailable/missing baseline wrote `reality/audit/v1/chrome/audit-01780325611288876400-0000000001`;
+  - baseline+delta+no-drift wrote two delta rows and audit `...0000000002` with `in_sync`;
+  - minor title drift wrote audit `...0000000003` with `minor_drift`;
+  - immediate rebase audit wrote audit `...0000000004` with `in_sync`;
+  - major UI-structure drift wrote audit `...0000000006` with `major_drift`;
+  - stale epoch wrote audit `...0000000007` with `rebase_required`;
+  - invalid `depth=0` failed closed and left `CF_KV=18`, `CF_ACTION_LOG=14` unchanged.
+- Cleanup is done: release_all called, target PID `13676` stopped, daemon PID `80292` stopped, port `7844` closed, no visible `Issue616*` or `Issue615FanoutTarget` windows remain.
+- Final supporting checks passed: `cargo fmt --check`; `cargo check -p synapse-mcp -j 2`; full reality tests (20 passed); schema sanitize tests (3 passed); release build; `git diff --check` with line-ending warnings only.
+- Final release binary readback: length `46380544`, SHA256 `86D55735BD2FA893E22B16E955D431474147B5F3CE1F616BCBD4EB1E047B201B`, timestamp `2026-06-01T15:18:29.1464141Z`.
+- Next exact commands: commit with `[skip ci]`, post RESOLVED evidence to #616, close it, refresh queue.
+
+## Current Resume Point - 2026-06-01T09:39:21-05:00
+- Active issue #616 is patched locally but not yet fully verified or committed.
+  - Patch in `crates/synapse-mcp/src/server/reality.rs`: `reality_audit` now itemizes drift by comparing the stored head compact state to the fresh captured compact state, classifies field-level severity, distinguishes source unavailable/stale/mismatch cases, and persists changed paths in `RealityDriftItem`.
+  - Focused checks passed: `cargo fmt`; `cargo test -p synapse-mcp reality_audit_ --bin synapse-mcp -- --nocapture` (6 passed).
+  - Next action: run broader supporting checks/release build, then launch an isolated repo-built daemon for #616 manual MCP FSV.
+
+## #615 Closure Resume Point - 2026-06-01T09:31:17-05:00
 - #615 is closed.
   - Commit: `fad86c9 fix(mcp): harden reality fanout coalescing (#615) [skip ci]`.
   - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/615#issuecomment-4593549908

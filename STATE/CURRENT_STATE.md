@@ -1,5 +1,40 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T10:12:14-05:00
+- Active issue #616 `scenario(stress): reality drift injection -> reality_audit rebase` has implementation and manual MCP FSV evidence captured; final supporting checks/diff review/commit/issue closure are next.
+- Patch in `crates/synapse-mcp/src/server/reality.rs`:
+  - `reality_audit` now distinguishes missing baseline/source unavailable, stale epoch, caller assumption-hash mismatch, exact in-sync, minor physical drift, and major physical drift.
+  - Physical drift is computed by comparing stored head compact state to the freshly captured compact state with itemized `RealityDriftItem` rows and scoped source refs.
+  - Highest-severity-wins classification makes title/bounds/focused/diagnostics changes minor unless source unavailable, while UI structure/element appear/disappear and material profile/process changes are major.
+- Manual FSV run directory: `.runs\616\audit-fsv-20260601T0945`.
+  - Repo-built daemon PID `80292`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`, bind `127.0.0.1:7844`, isolated DB `.runs\616\audit-fsv-20260601T0945\db`, token `synapse-616-token`.
+  - Process/socket/auth/client-parity readbacks passed: process path matched repo release binary; socket listened on `127.0.0.1:7844`; unauth `/health=401`; auth `/health ok=true`; official MCP Inspector strict `tools/list` returned 80 tools including `reality_baseline`, `observe_delta`, `reality_audit`, `act_launch`, `act_run_shell`, `storage_inspect`, and `release_all`.
+  - Source-unavailable/missing baseline edge: before isolated `CF_KV=0`; real Inspector `tools/call reality_audit depth=1 max_elements=5` on Chrome with no baseline returned `baseline_status=source_unavailable`, `drift_status=source_unavailable`, `/baseline` drift item, and wrote `reality/audit/v1/chrome/audit-01780325611288876400-0000000001`; separate `storage_inspect` read `CF_KV=1`, `CF_OBSERVATIONS=1`.
+  - Baseline + delta + no-drift: real MCP `act_launch` started target PID `57796`, HWND `0xe1b6a`, title `Issue616DriftTarget Baseline`. Baseline `issue616-loop-20260601T1002` wrote baseline/head rows for profile `powershell`; an out-of-band `SetWindowText` changed title to `Issue616DriftTarget LoopDelta`; real `observe_delta since_seq=0` wrote two delta rows and the head row; real `reality_audit` returned `drift_status=in_sync`, `assumption_hash == actual_hash`, 0 drift items, audit row `reality/audit/v1/powershell/audit-01780326192261774400-0000000002`.
+  - Minor drift boundary: baseline `issue616-minor-20260601T1004`, out-of-band title-only change to `Issue616DriftTarget MinorOnly`; real `reality_audit` returned `drift_status=minor_drift`, `rebase_required=true`, two minor drift items for `/foreground/window_title_sha256` and window element name hash, audit row `reality/audit/v1/powershell/audit-01780326236144393800-0000000003`.
+  - Audit immediately after rebase: baseline `issue616-rebase-20260601T1005`; immediate `reality_audit` returned `drift_status=in_sync`, `rebase_required=false`, `assumption_hash == actual_hash`, audit row `reality/audit/v1/powershell/audit-01780326257510657800-0000000004`.
+  - Major drift boundary: launched temporary target PID `13676`, HWND `0x101530`, title `Issue616MajorTarget Baseline`; baseline `issue616-major-structure-20260601T1009`; out-of-band Win32 `BM_CLICK` on `AddMajor` changed physical child texts from `major-baseline-state|AddMajor|CloseTarget` to `major-baseline-state|AddMajor|CloseTarget|major-new-control`; real `reality_audit` returned `drift_status=major_drift`, `rebase_required=true`, with a major `/elements/...MajorNewControl` drift item, audit row `reality/audit/v1/powershell/audit-01780326554678039600-0000000006`.
+  - Stale epoch edge: after baseline `issue616-stale-current-20260601T1010`, real `reality_audit epoch_id=issue616-major-structure-20260601T1009` returned `baseline_status=stale`, `drift_status=rebase_required`, `/epoch_id` item comparing old to current epoch, audit row `reality/audit/v1/powershell/audit-01780326600716104200-0000000007`.
+  - Structurally invalid edge: before invalid `CF_KV=18`, `CF_ACTION_LOG=14`; real Inspector `tools/call reality_audit depth=0` failed closed with `MCP error -32099: depth must be between 1 and 6`; after invalid `CF_KV=18`, `CF_ACTION_LOG=14`.
+  - Cleanup readback: real `release_all` completed; stopped target PID `13676`; stopped isolated daemon PID `80292`; port `127.0.0.1:7844` no longer listens; no visible `Issue616*` or `Issue615FanoutTarget` windows remain.
+- Final supporting checks after FSV passed: `cargo fmt --check`; `cargo check -p synapse-mcp -j 2`; `cargo test -p synapse-mcp server::reality::tests --bin synapse-mcp -- --nocapture` (20 passed); `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture` (3 passed); `cargo build --release -p synapse-mcp -j 2`; `git diff --check` exited 0 with line-ending warnings only.
+- Final release binary readback: `target\release\synapse-mcp.exe`, length `46380544`, SHA256 `86D55735BD2FA893E22B16E955D431474147B5F3CE1F616BCBD4EB1E047B201B`, `LastWriteTimeUtc=2026-06-01T15:18:29.1464141Z`.
+- Diff review completed for `crates/synapse-mcp/src/server/reality.rs` and `STATE/*`.
+- Next: commit with `[skip ci]`, post #616 RESOLVED evidence, close #616, update state, and continue the open queue.
+
+## 2026-06-01T09:39:21-05:00
+- Active issue #616 `scenario(stress): reality drift injection -> reality_audit rebase` is in implementation/checkpoint state.
+- Code inspection found a real gap in `crates/synapse-mcp/src/server/reality.rs`: `reality_audit` compared only `assumption_hash` to the fresh compact-state hash, so every non-matching physical state collapsed into `rebase_required` and the public `minor_drift` / `major_drift` statuses were never produced.
+- Patch in worktree:
+  - `reality_audit` now compares the stored head compact state to the fresh captured compact state through `reality_changes`.
+  - Drift items are persisted per changed path with before/after values, source refs scoped by change kind, and severity.
+  - Stale epoch, missing baseline, caller assumption-hash mismatch, source-unavailable diagnostics, in-sync, minor physical drift, and major physical drift are distinguished.
+  - Severity policy is highest-severity-wins, following the drift-classification research pattern from the Exa lookup.
+- Focused supporting checks passed:
+  - `cargo fmt`
+  - `cargo test -p synapse-mcp reality_audit_ --bin synapse-mcp -- --nocapture` (6 passed)
+- Next: run broader supporting checks/release build, update state, launch isolated repo-built daemon, and perform #616 manual MCP FSV.
+
 ## 2026-06-01T09:31:17-05:00
 - #615 `scenario(stress): reality high-fanout delta coalescing + snapshot-budget-exceeded` is closed.
   - Commit: `fad86c9 fix(mcp): harden reality fanout coalescing (#615) [skip ci]`.

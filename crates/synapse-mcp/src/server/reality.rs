@@ -876,26 +876,14 @@ impl SynapseService {
         } else {
             RealityBaselineStatus::Current
         };
-        let drift_status = if baseline_status == RealityBaselineStatus::SourceUnavailable {
-            RealityDriftStatus::SourceUnavailable
-        } else if baseline_status == RealityBaselineStatus::Stale {
-            RealityDriftStatus::RebaseRequired
-        } else if assumption_hash == captured.compact_state_hash {
-            RealityDriftStatus::InSync
-        } else {
-            RealityDriftStatus::RebaseRequired
-        };
+        let (drift_status, drift_items) = audit_drift_status_and_items(
+            params,
+            head.as_ref(),
+            &captured,
+            baseline_status,
+            &assumption_hash,
+        )?;
         let rebase_required = drift_status != RealityDriftStatus::InSync;
-        let mut drift_items = Vec::new();
-        if assumption_hash != captured.compact_state_hash {
-            drift_items.push(RealityDriftItem {
-                path: "/compact_state_hash".to_owned(),
-                assumed: Value::String(assumption_hash.clone()),
-                actual: Value::String(captured.compact_state_hash.clone()),
-                severity: drift_status,
-                source_refs: captured.source_refs.clone(),
-            });
-        }
         let audit_id = new_audit_id();
         let audit = RealityAudit {
             audit_id: audit_id.clone(),
@@ -2996,10 +2984,198 @@ fn rebase_reason(
         (_, RealityDriftStatus::RebaseRequired) => {
             "assumption hash differs from physical reality; rebase required".to_owned()
         }
+        (_, RealityDriftStatus::MajorDrift) => {
+            "major physical drift detected; capture a fresh baseline to rebase".to_owned()
+        }
+        (_, RealityDriftStatus::MinorDrift) => {
+            "minor physical drift detected; capture a fresh baseline to rebase".to_owned()
+        }
         (_, RealityDriftStatus::SourceUnavailable) => {
             "physical source unavailable; rebase required after source recovery".to_owned()
         }
         _ => "drift detected; rebase required".to_owned(),
+    }
+}
+
+fn audit_drift_status_and_items(
+    params: &RealityAuditParams,
+    head: Option<&RealityHeadRow>,
+    captured: &CapturedReality,
+    baseline_status: RealityBaselineStatus,
+    assumption_hash: &str,
+) -> Result<(RealityDriftStatus, Vec<RealityDriftItem>), ErrorData> {
+    let Some(head) = head else {
+        return Ok((
+            RealityDriftStatus::SourceUnavailable,
+            vec![RealityDriftItem {
+                path: "/baseline".to_owned(),
+                assumed: Value::String("reality/head".to_owned()),
+                actual: Value::Null,
+                severity: RealityDriftStatus::SourceUnavailable,
+                source_refs: captured.source_refs.clone(),
+            }],
+        ));
+    };
+
+    if baseline_status == RealityBaselineStatus::Stale {
+        return Ok((
+            RealityDriftStatus::RebaseRequired,
+            vec![RealityDriftItem {
+                path: "/epoch_id".to_owned(),
+                assumed: params
+                    .epoch_id
+                    .as_ref()
+                    .map_or(Value::Null, |epoch| Value::String(epoch.clone())),
+                actual: Value::String(head.epoch_id.clone()),
+                severity: RealityDriftStatus::RebaseRequired,
+                source_refs: captured.source_refs.clone(),
+            }],
+        ));
+    }
+
+    if audit_source_unavailable(&captured.compact_state.diagnostics, &params.include) {
+        return Ok((
+            RealityDriftStatus::SourceUnavailable,
+            vec![RealityDriftItem {
+                path: "/diagnostics".to_owned(),
+                assumed: serde_json::to_value(&head.compact_state.diagnostics)
+                    .unwrap_or(Value::Null),
+                actual: serde_json::to_value(&captured.compact_state.diagnostics)
+                    .unwrap_or(Value::Null),
+                severity: RealityDriftStatus::SourceUnavailable,
+                source_refs: source_refs_for_change("diagnostics_changed", &captured.source_refs),
+            }],
+        ));
+    }
+
+    if assumption_hash != head.compact_state_hash {
+        return Ok((
+            RealityDriftStatus::RebaseRequired,
+            vec![RealityDriftItem {
+                path: "/compact_state_hash".to_owned(),
+                assumed: Value::String(assumption_hash.to_owned()),
+                actual: Value::String(head.compact_state_hash.clone()),
+                severity: RealityDriftStatus::RebaseRequired,
+                source_refs: captured.source_refs.clone(),
+            }],
+        ));
+    }
+
+    if head.compact_state_hash == captured.compact_state_hash {
+        return Ok((RealityDriftStatus::InSync, Vec::new()));
+    }
+
+    let changes = reality_changes(&head.compact_state, &captured.compact_state)?;
+    let mut drift_status = RealityDriftStatus::MinorDrift;
+    let mut drift_items = Vec::with_capacity(changes.len());
+    for change in changes {
+        let severity = drift_severity_for_change(&change, &captured.compact_state.diagnostics);
+        drift_status = max_drift_status(drift_status, severity);
+        drift_items.push(RealityDriftItem {
+            path: change.path,
+            assumed: change.before,
+            actual: change.after,
+            severity,
+            source_refs: source_refs_for_change(change.kind, &captured.source_refs),
+        });
+    }
+    if drift_items.is_empty() {
+        drift_items.push(RealityDriftItem {
+            path: "/compact_state_hash".to_owned(),
+            assumed: Value::String(head.compact_state_hash.clone()),
+            actual: Value::String(captured.compact_state_hash.clone()),
+            severity: drift_status,
+            source_refs: captured.source_refs.clone(),
+        });
+    }
+    Ok((drift_status, drift_items))
+}
+
+fn audit_source_unavailable(diagnostics: &CompactDiagnostics, include: &[ObserveSlot]) -> bool {
+    let default_include = include.is_empty();
+    let includes_a11y = default_include
+        || include.iter().any(|slot| {
+            matches!(
+                slot,
+                ObserveSlot::Focused
+                    | ObserveSlot::Elements
+                    | ObserveSlot::Hud
+                    | ObserveSlot::Diagnostics
+            )
+        });
+    let includes_capture = default_include
+        || include.iter().any(|slot| {
+            matches!(
+                slot,
+                ObserveSlot::Focused
+                    | ObserveSlot::Elements
+                    | ObserveSlot::Entities
+                    | ObserveSlot::Hud
+                    | ObserveSlot::Diagnostics
+            )
+        });
+    let includes_detection = default_include
+        || include
+            .iter()
+            .any(|slot| matches!(slot, ObserveSlot::Entities | ObserveSlot::Diagnostics));
+    let includes_audio = include
+        .iter()
+        .any(|slot| matches!(slot, ObserveSlot::Audio | ObserveSlot::Diagnostics));
+
+    (includes_a11y && sensor_source_unavailable(&diagnostics.a11y_status))
+        || (includes_capture && sensor_source_unavailable(&diagnostics.capture_status))
+        || (includes_detection && sensor_source_unavailable(&diagnostics.detection_status))
+        || (includes_audio && sensor_source_unavailable(&diagnostics.audio_status))
+}
+
+fn sensor_source_unavailable(status: &str) -> bool {
+    status == "unavailable" || status.starts_with("degraded_sensor_failed:")
+}
+
+fn drift_severity_for_change(
+    change: &RealityChange,
+    diagnostics: &CompactDiagnostics,
+) -> RealityDriftStatus {
+    if change.path == "/diagnostics"
+        && audit_source_unavailable(diagnostics, &[ObserveSlot::Diagnostics])
+    {
+        return RealityDriftStatus::SourceUnavailable;
+    }
+    match change.kind {
+        "foreground_changed" => match change.path.as_str() {
+            "/foreground/window_bounds"
+            | "/foreground/window_title_sha256"
+            | "/foreground/monitor_index"
+            | "/foreground/is_fullscreen" => RealityDriftStatus::MinorDrift,
+            _ => RealityDriftStatus::MajorDrift,
+        },
+        "uia_structure_changed" | "uia_elements_changed" | "compact_state_changed" => {
+            RealityDriftStatus::MajorDrift
+        }
+        "uia_element_appeared" | "uia_element_disappeared" => RealityDriftStatus::MajorDrift,
+        "diagnostics_changed" => RealityDriftStatus::MinorDrift,
+        _ => RealityDriftStatus::MinorDrift,
+    }
+}
+
+fn max_drift_status(
+    current: RealityDriftStatus,
+    candidate: RealityDriftStatus,
+) -> RealityDriftStatus {
+    if drift_status_rank(candidate) > drift_status_rank(current) {
+        candidate
+    } else {
+        current
+    }
+}
+
+const fn drift_status_rank(status: RealityDriftStatus) -> u8 {
+    match status {
+        RealityDriftStatus::InSync => 0,
+        RealityDriftStatus::MinorDrift => 1,
+        RealityDriftStatus::MajorDrift => 2,
+        RealityDriftStatus::RebaseRequired => 3,
+        RealityDriftStatus::SourceUnavailable => 4,
     }
 }
 
@@ -3644,6 +3820,155 @@ mod tests {
             RealityDriftStatus::RebaseRequired
         );
         assert!(!audit.0.readback_rows.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reality_audit_reports_in_sync_without_drift() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        install_synthetic_input(&service, synthetic_input("Window A"))?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-in-sync-epoch".to_owned()),
+                force_new_epoch: true,
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let audit = service
+            .reality_audit(Parameters(RealityAuditParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-in-sync-epoch".to_owned()),
+                assumption_hash: None,
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        assert!(!audit.0.rebase_required);
+        assert_eq!(audit.0.reason.as_deref(), Some("in_sync"));
+        assert_eq!(audit.0.audit.drift_status, RealityDriftStatus::InSync);
+        assert!(audit.0.audit.drift_items.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reality_audit_classifies_minor_and_major_physical_drift() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        install_synthetic_input(&service, synthetic_input("Window A"))?;
+        let baseline = service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-severity-epoch".to_owned()),
+                force_new_epoch: true,
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+        let baseline_hash = baseline.0.head.compact_state_hash.clone();
+
+        install_synthetic_input(&service, synthetic_input("Window B"))?;
+        let minor = service
+            .reality_audit(Parameters(RealityAuditParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-severity-epoch".to_owned()),
+                assumption_hash: Some(baseline_hash.clone()),
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+        assert!(minor.0.rebase_required);
+        assert_eq!(minor.0.audit.drift_status, RealityDriftStatus::MinorDrift);
+        assert!(
+            minor
+                .0
+                .audit
+                .drift_items
+                .iter()
+                .any(|item| item.path == "/foreground/window_title_sha256"
+                    && item.severity == RealityDriftStatus::MinorDrift)
+        );
+
+        let mut other_process = synthetic_input("Window A");
+        other_process.foreground.pid = 5678;
+        other_process.foreground.process_name = "other.exe".to_owned();
+        install_synthetic_input(&service, other_process)?;
+        let major = service
+            .reality_audit(Parameters(RealityAuditParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-severity-epoch".to_owned()),
+                assumption_hash: Some(baseline_hash),
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+        assert!(major.0.rebase_required);
+        assert_eq!(major.0.audit.drift_status, RealityDriftStatus::MajorDrift);
+        assert!(
+            major
+                .0
+                .audit
+                .drift_items
+                .iter()
+                .any(|item| item.path == "/foreground/pid"
+                    && item.severity == RealityDriftStatus::MajorDrift)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reality_audit_reports_source_unavailable_sensor_state() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        install_synthetic_input(&service, synthetic_input("Window A"))?;
+        let baseline = service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-source-unavailable-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Elements, ObserveSlot::Diagnostics],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let mut unavailable = synthetic_input("Window A");
+        unavailable.a11y_status = SensorStatus::Unavailable;
+        install_synthetic_input(&service, unavailable)?;
+        let audit = service
+            .reality_audit(Parameters(RealityAuditParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("audit-source-unavailable-epoch".to_owned()),
+                assumption_hash: Some(baseline.0.head.compact_state_hash),
+                include: vec![ObserveSlot::Elements, ObserveSlot::Diagnostics],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        assert!(audit.0.rebase_required);
+        assert_eq!(
+            audit.0.audit.drift_status,
+            RealityDriftStatus::SourceUnavailable
+        );
+        assert!(
+            audit
+                .0
+                .audit
+                .drift_items
+                .iter()
+                .any(|item| item.path == "/diagnostics"
+                    && item.severity == RealityDriftStatus::SourceUnavailable)
+        );
         Ok(())
     }
 

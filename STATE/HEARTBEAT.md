@@ -75,3 +75,6 @@
 - 2026-06-01T08:19:00-05:00 iteration #614-close-615-start: pushed #614 commit 72918cd, posted RESOLVED evidence, closed #614, refreshed queue, and posted #615 START.
 - 2026-06-01T09:28:31-05:00 iteration #615-final-fsv-checks: patched UIA coalescing threshold pressure, completed manual MCP FSV for Show7/Show8/Rename8/Mixed8/budget/no-change/invalid/disappear8, stopped target PID 79124 and daemon PID 64500, and passed final checks/release build.
 - 2026-06-01T09:31:17-05:00 iteration #615-close-616-start: pushed #615 commit fad86c9, posted RESOLVED evidence, closed #615, refreshed queue to #594 plus #595-#604/#616-#634, and posted #616 START.
+- 2026-06-01T09:39:21-05:00 iteration #616-audit-classification: patched reality_audit to itemize compact-state drift and classify in-sync/minor/major/rebase/source-unavailable states; focused audit checks passed.
+- 2026-06-01T10:12:14-05:00 iteration #616-manual-fsv: completed manual MCP evidence for source-unavailable, baseline+delta in-sync, minor drift, immediate rebase, major UI-structure drift, stale epoch, and invalid depth; cleaned target windows and daemon.
+- 2026-06-01T10:22:00-05:00 iteration #616-final-checks: final fmt/check/reality tests/schema sanitize/release build/diff check passed and diff review completed; release synapse-mcp SHA256 86D55735BD2FA893E22B16E955D431474147B5F3CE1F616BCBD4EB1E047B201B.

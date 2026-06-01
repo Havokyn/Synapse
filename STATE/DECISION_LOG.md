@@ -249,3 +249,30 @@ Evidence:
 
 Outcome:
 - Next action is code/test inspection for `reality_audit`, followed by repo-built isolated daemon setup and manual MCP FSV.
+
+# 2026-06-01T09:39:21-05:00 - #616 audit drift must be classified from changed fields, not hash inequality alone
+
+Decision: Patch `reality_audit` to compute itemized physical drift from compact-state differences and apply a highest-severity-wins policy.
+
+Evidence:
+- Code readback showed `reality_audit` returned only `in_sync`, `rebase_required`, or `source_unavailable`; `minor_drift` and `major_drift` existed in the schema but were unreachable for physical drift.
+- #616 requires no-drift, source-unavailable, minor-vs-major boundary, and rebase guidance.
+- Exa lookup on drift-classification practice supported comparing concrete changed attributes and letting the maximum severity decide the verdict.
+
+Outcome:
+- Added audit drift analysis helpers, source-unavailable diagnostics detection, field-level severity classification, and focused regressions for in-sync, minor/major, source unavailable, and forced assumption mismatch.
+- Focused `reality_audit_` test run passed; broader checks and manual MCP FSV are next.
+
+# 2026-06-01T10:12:14-05:00 - #616 major drift should be a same-profile state divergence
+
+Decision: Prove the major-drift boundary with an out-of-band UI-structure change inside a controlled `powershell` WinForms target, not by switching to a different foreground profile.
+
+Evidence:
+- `reality_audit` selects the profile from the freshly captured observation; a different-profile foreground switch would audit that profile's head or fail profile validation instead of testing the stored `powershell` head against changed physical state.
+- The first attempt to launch a second PowerShell foreground was hosted by Windows Terminal, changing the observed profile surface and making it the wrong discriminator for #616.
+- A same-profile WinForms target with a known new control directly exercises `uia_element_appeared`, which the patch classifies as `major_drift`.
+
+Outcome:
+- Temporary `.runs\616\issue616_major_target.ps1` was used only as FSV setup.
+- Physical before/after readback showed child texts changed from `major-baseline-state|AddMajor|CloseTarget` to `major-baseline-state|AddMajor|CloseTarget|major-new-control`.
+- Real Inspector `tools/call reality_audit` returned `drift_status=major_drift`, `rebase_required=true`, and persisted `reality/audit/v1/powershell/audit-01780326554678039600-0000000006`.
