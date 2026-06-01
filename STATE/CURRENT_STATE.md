@@ -1,5 +1,19 @@
 # CURRENT STATE - Synapse
 
+## 2026-05-31T22:07:00-05:00
+- #609 `scenario(stress): 1ms reflex tick jitter under system load` is closed.
+  - Commit: `b7ecd73 fix(reflex): persist tick-late audit rows (#609) [skip ci]`
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/609#issuecomment-4589227231
+  - Closure readback: `gh issue close 609` succeeded; refreshed issue readback shows state `CLOSED`, closed at `2026-06-01T03:06:23Z`.
+  - Post-close git readback before state update: `git status --short --branch` was clean and `main...origin/main`.
+- Active issue is now #610 `scenario(stress): aim_track reflex - moving target + track-loss`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/610#issuecomment-4589229027
+  - Issue requires proving `aim_track` follows a moving target and handles target loss, using real MCP `tools/call` triggers and separate physical SoT readbacks.
+  - Required SoTs: cursor position (`GetCursorPos`), target/observation state, `reflex_history` / `CF_REFLEX_AUDIT`, `storage_inspect`, daemon logs, process/socket state, and cleanup state.
+  - Required edges: X-only/Y-only axis, deadzone larger than error, target teleport, max-speed clamp, plus empty/boundary/structurally invalid params.
+  - Next: inspect existing `aim_track` target resolution, stateful controller, audit/history, and track-loss code paths before launching an isolated repo-built daemon for manual FSV.
+- Current live open queue after closing #609: #594 parent plus #595-#604 and #610-#634.
+
 ## 2026-05-31T21:53:59-05:00
 - Active issue remains #609 `scenario(stress): 1ms reflex tick jitter under system load`.
 - #609 implementation is in the worktree:
