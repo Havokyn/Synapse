@@ -601,3 +601,18 @@ Evidence:
 
 Outcome:
 - Post RESOLVED evidence to #626, close it, refresh queue, and continue.
+
+# 2026-06-01T17:50:00-05:00 - #627 follows #626 as next showcase child
+
+Decision: Take #627 next after closing #626, because #627 is the next open unblocked numbered showcase child in the #594 campaign and has reversible local Office work available.
+
+Evidence:
+- #626 readback shows `state=CLOSED`, closed at `2026-06-01T22:44:50Z`, with RESOLVED evidence comment https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4597095341.
+- `git status --short --branch` read clean after pushing commit `9382bd2`.
+- Live open queue still contains #627 and later showcase/stress issues plus #595-#604, while #624/#625 remain blocked on the operator-only Daybreak boundary.
+- #627 requires real MCP `act_launch`, action entry, visual readback, and saved `.xlsx` file SoT evidence.
+- Excel is installed locally at `C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE`; App Paths registry entries point to it.
+- Posted #627 START comment at https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597099075 and labeled it `status:in-progress`, `agent:codex`.
+
+Outcome:
+- Inspect Excel/action/file verification surfaces and run #627 manual FSV through real Synapse MCP tools.

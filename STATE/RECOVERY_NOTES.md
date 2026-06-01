@@ -1,5 +1,25 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T17:50:00-05:00
+- #626 is closed with RESOLVED evidence:
+  - evidence comment: https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4597095341
+  - closed at `2026-06-01T22:44:50Z`
+  - pushed commit `9382bd2 docs(state): record issue 626 evidence [skip ci]`
+- Active issue is #627:
+  - title `scenario(showcase): self-driving spreadsheet - launch Excel, build, verify file`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597099075
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`
+- Excel prerequisite readback:
+  - `C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE`
+  - length `75917120`, `LastWriteTimeUtc=2026-05-17T00:11:53Z`
+  - HKLM App Paths entries point to the same executable.
+- Wired Synapse MCP is healthy through the configured client; process readback found `synapse-mcp.exe` PID `66040` plus stdio child PID `70072`.
+- Exact next actions:
+  1. Inspect `act_launch`, `act_type`, `act_press`, `act_click`, `find`, `observe`, and `read_text` behavior relevant to Excel/Office foregrounding.
+  2. Decide the issue-local workbook path and synthetic dataset/formulas/chart with known expected results.
+  3. Launch Excel through real MCP, create/save the workbook, and read independent file SoTs from the `.xlsx` package bytes.
+  4. Exercise edges: formula error, large paste/boundary, undo/redo, save-dialog handling, and empty/boundary/structurally-invalid tool inputs.
+
 ## Current Resume Point - 2026-06-01T17:45:00-05:00
 - #626 manual evidence is complete and cleanup/supporting checks passed; no product-code patch was required.
 - Evidence directory: `.runs\626\pianist-fsv-20260601T1709`.

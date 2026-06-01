@@ -1,5 +1,23 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T17:50:00-05:00
+- #626 is closed:
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4597095341
+  - Closure readback: `state=CLOSED`, `closedAt=2026-06-01T22:44:50Z`.
+  - State/evidence commit pushed: `9382bd2 docs(state): record issue 626 evidence [skip ci]`.
+  - Worktree readback after push: `## main...origin/main`.
+- Active issue is now #627 `scenario(showcase): self-driving spreadsheet - launch Excel, build, verify file`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597099075
+  - #627 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - Goal: use real Synapse MCP tools to launch Excel, enter known data/formulas, create/verify spreadsheet content and chart, save an issue-local `.xlsx`, then independently read file bytes/worksheet/formula values as SoT.
+  - Required edges: formula error cell, large paste/boundary input, undo/redo, save-dialog handling, and empty/boundary/structurally-invalid tool inputs.
+  - Local Excel prerequisite exists:
+    - `C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE`
+    - length `75917120`, `LastWriteTimeUtc=2026-05-17T00:11:53Z`
+    - App Paths registry entries point to the same Office16 executable.
+  - Wired Synapse MCP is healthy via stdio: process PID `66040` plus stdio child `70072`, active storage initialized, operator hotkey registered.
+  - Next: inspect relevant action/launch/profile/spreadsheet verification surfaces, then run #627 manual FSV with real MCP triggers and separate Excel/file SoT reads.
+
 ## 2026-06-01T17:45:00-05:00
 - #626 manual evidence is complete; no product-code patch was required.
   - Active issue: `scenario(showcase): autonomous pianist - act_combo song verified by audio_tail`.
