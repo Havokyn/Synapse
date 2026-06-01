@@ -8,9 +8,17 @@ Resume by:
 5. #608 is closed with commit `5873c37` and RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/608#issuecomment-4589052871.
 6. Active issue is #609: `scenario(stress): 1ms reflex tick jitter under system load`.
    - START comment: https://github.com/ChrisRoyse/Synapse/issues/609#issuecomment-4589054448
-   - Issue body requires registering active reflexes, loading the host, monitoring `REFLEX_TICK_LATE` events and 2ms degraded fallback engagement, and reading SoTs from `reflex_history`, `CF_REFLEX_AUDIT`, health tick/sample fields, daemon logs, process/socket state, and host load counters.
-   - Edges: idle baseline, sudden load spike, sustained CPU/GPU/capture churn, many concurrent subscribers competing, tick late >2ms threshold, plus empty/boundary/structurally invalid params.
-7. Next #609 step: inspect scheduler tick/degraded-mode code and MCP surfaces, then launch an isolated repo-built daemon for manual FSV.
+   - Patch in worktree: `REFLEX_TICK_LATE` persists to `CF_REFLEX_AUDIT` as `reflex_id="__scheduler__"` with elapsed/jitter/target/late-after/fallback/reason/degraded details; health exposes p99 jitter, late retained-sample count, and degraded retained-sample count; supporting scheduler test asserts the persisted row.
+   - Final supporting checks passed after FSV: `cargo fmt --check`; `cargo check -p synapse-core`; `cargo check -p synapse-reflex`; focused tick-late scheduler test; full `cargo test -p synapse-reflex --test scheduler_behavior -- --nocapture` (20 passed); `cargo check -p synapse-mcp`; `cargo test -p synapse-mcp schema_sanitize -- --nocapture`; `cargo build --release -p synapse-mcp`; `git diff --check` (line-ending warnings only). Final rebuilt release binary SHA256 `A245308F45D5A0F1F6354BDF2A99ACD8DF7DA9A44F6FC5CA9115E8240D3C9592`.
+   - Manual FSV evidence captured:
+     - Baseline daemon PID `72424`, port `7826`, repo release SHA256 `B8F8593228BF9730BB523467384CA1C55870D96BF4E2DA40374F26D8FCD87DA8`, strict tools/list 80 tools.
+     - Idle baseline persisted scheduler tick-late rows in `reflex_history`/`CF_REFLEX_AUDIT`.
+     - Real `act_run_shell` CPU load peaked at 78 percent and persisted `REFLEX_TICK_LATE` rows with elapsed_us up to 12678, jitter_us 11678, fallback_interval_us 2000, degraded false.
+     - 16 real subscribers plus second CPU load peaked at 75 percent; health showed `sse_subscribers=16`, p99 jitter 38us, `late_tick_count=33`, and `CF_REFLEX_AUDIT=486`; all subscribers later cancelled to 0.
+     - Edges covered `subscribe buffer_size=0`, `subscribe_cancel subscription_id=""`, `reflex_history limit=0`, `reflex_history limit=1001`, and structurally invalid `reflex_register` target.
+     - Forced degraded daemon PID `16712`, port `7827`, strict tools/list 80 tools, `SYNAPSE_REFLEX_FORCE_DEGRADED=1`: health after wait showed `status=degraded_latency`, sample ring 4096/4096, `degraded_tick_count=4096`, `late_tick_count=546`, p99 jitter 14249us; `reflex_history` latest rows had `degraded=true` and fallback_interval_us 2000.
+     - Cleanup: both FSV daemons cancelled their active reflexes through real `reflex_cancel`, read back active 0/subscribers 0, then stopped; ports `7826` and `7827` are closed.
+7. Next #609 step: commit with `[skip ci]`, post #609 RESOLVED evidence, close #609, update state closure, then refresh the queue.
 
 Closed #608 reference notes:
 

@@ -39,3 +39,6 @@
 - 2026-05-31T20:38:43-05:00 iteration #608-stateful-arbitration: cleaned stale aim-starvation daemon, confirmed both aim_track reflexes had fired equally, patched stateful conflict arbitration plus once-per-tick starvation accounting, and passed focused supporting checks.
 - 2026-05-31T21:12:06-05:00 iteration #608-final-fsv: completed final manual FSV evidence for cap/33rd/duplicates/invalids/starvation/cancel/same-tick, cleaned PID 70124, verified port 7825 closed, and recorded state before commit/closure.
 - 2026-05-31T21:15:24-05:00 iteration #608-close-609-start: pushed #608 commit 5873c37, posted RESOLVED evidence, closed #608, refreshed queue, and posted #609 START.
+- 2026-05-31T21:22:49-05:00 iteration #609-tick-late-sot: patched tick-late audit persistence plus health jitter/late/degraded counters and passed focused checks/schema sanitize.
+- 2026-05-31T21:53:59-05:00 iteration #609-final-fsv: completed manual FSV for idle/load/subscriber/invalid/degraded tick behavior, cancelled reflexes/subscribers, stopped isolated daemons, and recorded final SoT evidence before final checks.
+- 2026-05-31T22:05:00-05:00 iteration #609-final-checks: final fmt/check/tests/schema sanitize/release build/diff check passed and diff review found the #609 patch scoped to scheduler audit persistence plus health counters.

@@ -142,6 +142,9 @@ impl SynapseService {
                             sample_count: Some(runtime.sample_count()),
                             sample_limit: Some(runtime.sample_limit()),
                             last_tick_jitter_us: runtime.last_tick_jitter_us(),
+                            p99_tick_jitter_us: runtime.p99_tick_jitter_us(),
+                            late_tick_count: Some(runtime.late_tick_count()),
+                            degraded_tick_count: Some(runtime.degraded_tick_count()),
                             recursion_clamps_total: Some(recursion_clamps_total),
                             ..SubsystemHealth::default()
                         },
@@ -152,6 +155,9 @@ impl SynapseService {
                             sample_count: Some(runtime.sample_count()),
                             sample_limit: Some(runtime.sample_limit()),
                             last_tick_jitter_us: runtime.last_tick_jitter_us(),
+                            p99_tick_jitter_us: runtime.p99_tick_jitter_us(),
+                            late_tick_count: Some(runtime.late_tick_count()),
+                            degraded_tick_count: Some(runtime.degraded_tick_count()),
                             ..SubsystemHealth::default()
                         },
                     },

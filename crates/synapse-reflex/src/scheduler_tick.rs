@@ -343,7 +343,7 @@ fn record_tick_sample(
         } else {
             "deadline_miss"
         };
-        emit_tick_late(runtime, elapsed_us, jitter_us, reason);
+        emit_tick_late(runtime, elapsed_us, jitter_us, reason, degraded);
     }
 
     let sample = TickSample {
@@ -372,7 +372,13 @@ fn record_tick_sample(
     runtime.tick_index = runtime.tick_index.saturating_add(1);
 }
 
-fn emit_tick_late(runtime: &RuntimeState, elapsed_us: u64, jitter_us: u64, reason: &str) {
+fn emit_tick_late(
+    runtime: &RuntimeState,
+    elapsed_us: u64,
+    jitter_us: u64,
+    reason: &str,
+    degraded: bool,
+) {
     let event = Event {
         seq: runtime.tick_index,
         at: Utc::now(),
@@ -384,10 +390,56 @@ fn emit_tick_late(runtime: &RuntimeState, elapsed_us: u64, jitter_us: u64, reaso
             "jitter_us": jitter_us,
             "target_us": duration_us(runtime.config.target_interval),
             "reason": reason,
+            "degraded": degraded,
         }),
         correlations: Vec::new(),
     };
     let _report = runtime.event_bus.publish(event);
+    write_tick_late_audit(runtime, elapsed_us, jitter_us, reason, degraded);
+}
+
+fn write_tick_late_audit(
+    runtime: &RuntimeState,
+    elapsed_us: u64,
+    jitter_us: u64,
+    reason: &str,
+    degraded: bool,
+) {
+    let Some(db) = runtime.audit_db.as_deref() else {
+        return;
+    };
+    let audit = StoredReflexAudit {
+        schema_version: SCHEMA_VERSION,
+        audit_id: Uuid::now_v7().to_string(),
+        reflex_id: "__scheduler__".to_owned(),
+        ts_ns: now_ts_ns(),
+        status: ReflexState::Active,
+        event_id: None,
+        audit_context: runtime.audit_context.clone(),
+        steps: Vec::new(),
+        error_code: Some(error_codes::REFLEX_TICK_LATE.to_owned()),
+        details: json!({
+            "kind": REFLEX_TICK_LATE_KIND,
+            "tick_index": runtime.tick_index,
+            "elapsed_us": elapsed_us,
+            "jitter_us": jitter_us,
+            "target_us": duration_us(runtime.config.target_interval),
+            "late_after_us": duration_us(runtime.config.late_after),
+            "fallback_interval_us": duration_us(runtime.config.fallback_interval),
+            "reason": reason,
+            "degraded": degraded,
+        }),
+        redacted: false,
+        redactions: Vec::new(),
+    };
+    if let Err(error) = write_audit(db, &audit) {
+        tracing::warn!(
+            component = "reflex_scheduler",
+            audit_id = %audit.audit_id,
+            detail = %error,
+            "reflex tick-late audit write failed"
+        );
+    }
 }
 
 fn warn_dispatch_blocked(reflex_id: &ReflexId, error: &ReflexError) {

@@ -306,6 +306,8 @@ fn thirty_two_reflexes_fire_same_tick_without_tick_late() -> Result<(), Box<dyn 
 
 #[test]
 fn blocked_dispatch_path_emits_reflex_tick_late() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = std::sync::Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
     let bus = EventBus::default();
     let late_events = bus.subscribe(
         EventFilter::Kind {
@@ -322,16 +324,19 @@ fn blocked_dispatch_path_emits_reflex_tick_late() -> Result<(), Box<dyn Error>> 
     assert_eq!(late_events.len(), 0);
 
     let reflex = ScheduledReflex::every_tick("reflex-blocked", vec![Action::ReleaseAll]);
-    let mut scheduler = ReflexScheduler::spawn(
+    let mut scheduler = ReflexScheduler::spawn_with_audit_db(
         bus,
         action_handle,
         vec![reflex],
         SchedulerConfig::default().with_max_ticks(1),
+        std::sync::Arc::clone(&db),
     )?;
     let samples = scheduler.wait_for_samples(1, WAIT_TIMEOUT);
     scheduler.stop()?;
+    db.flush()?;
 
     let late = late_events.drain();
+    let audits = read_audits(&db)?;
     let Some(sample) = samples.first().copied() else {
         return Err(Box::new(io::Error::other(
             "scheduler did not record blocked-dispatch sample",
@@ -344,6 +349,16 @@ fn blocked_dispatch_path_emits_reflex_tick_late() -> Result<(), Box<dyn Error>> 
     assert_eq!(late.len(), 1);
     assert_eq!(late[0].data["code"], error_codes::REFLEX_TICK_LATE);
     assert_eq!(late[0].data["reason"], "dispatch_blocked");
+    let tick_late_audit = audits
+        .iter()
+        .find(|audit| audit.error_code.as_deref() == Some(error_codes::REFLEX_TICK_LATE))
+        .ok_or_else(|| io::Error::other("missing persisted tick-late audit row"))?;
+    assert_eq!(tick_late_audit.reflex_id, "__scheduler__");
+    assert_eq!(tick_late_audit.details["kind"], REFLEX_TICK_LATE_KIND);
+    assert_eq!(tick_late_audit.details["reason"], "dispatch_blocked");
+    assert_eq!(tick_late_audit.details["degraded"], false);
+    assert!(tick_late_audit.details["elapsed_us"].as_u64().is_some());
+    assert!(tick_late_audit.details["jitter_us"].as_u64().is_some());
     Ok(())
 }
 

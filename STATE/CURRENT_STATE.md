@@ -1,5 +1,41 @@
 # CURRENT STATE - Synapse
 
+## 2026-05-31T21:53:59-05:00
+- Active issue remains #609 `scenario(stress): 1ms reflex tick jitter under system load`.
+- #609 implementation is in the worktree:
+  - `REFLEX_TICK_LATE` is now persisted to `CF_REFLEX_AUDIT` with `reflex_id="__scheduler__"`, `error_code=REFLEX_TICK_LATE`, tick index, elapsed/jitter/target/late-after/fallback interval, reason, and `degraded`.
+  - Health now exposes retained `p99_tick_jitter_us`, `late_tick_count`, and `degraded_tick_count`.
+  - Supporting scheduler regression asserts both the event and persisted scheduler audit row.
+- Manual #609 FSV evidence was captured with repo-built release binary `C:\code\Synapse\target\release\synapse-mcp.exe`, SHA256 `B8F8593228BF9730BB523467384CA1C55870D96BF4E2DA40374F26D8FCD87DA8`, official MCP Inspector strict `tools/list`, real `tools/call` triggers, and separate SoT readbacks.
+  - Baseline daemon PID `72424`, bind `127.0.0.1:7826`, isolated DB `.runs\609\baseline-20260531T2134\db`: unauth `/health` 401, auth health 200, strict tools/list 80 tools. Idle baseline registered quiet on_event reflex `019e8109-d40e-7c20-8eee-c03fb6348cc7`; before `CF_REFLEX_AUDIT=0`; after idle `reflex_history` showed `REFLEX_TICK_LATE` rows persisted with `degraded=false`, `CF_REFLEX_AUDIT=6`, sample ring 4096/4096.
+  - Load trigger used real `act_run_shell` to run 16-core PowerShell CPU stress for 20s. The command sampled Windows CPU at 75/66/67/78/71/64/60/11 percent, max 78. Separate after-read: health ok, `late_tick_count=4`, `degraded_tick_count=0`, `reflex_history` count 104 / tick-late 103, latest rows had elapsed_us up to 12678 and jitter_us 11678 with fallback_interval_us 2000, and `CF_REFLEX_AUDIT=104`, `CF_ACTION_LOG=4`.
+  - Subscriber competition edge created 16 real `subscribe` tool subscribers for `reflex_tick_late`; health read `sse_subscribers=16`. A second MCP shell load peaked at 75 percent CPU. After-read: `sse_subscribers=16`, p99 jitter 38us, `late_tick_count=33`, `reflex_history` count 486 / tick-late 485, `CF_REFLEX_AUDIT=486`, `CF_ACTION_LOG=6`. All 16 subscriptions were later cancelled through real `subscribe_cancel`, and health read `sse_subscribers=0`.
+  - Invalid/boundary edges: `subscribe buffer_size=0` failed closed and kept subscribers at 16; `subscribe_cancel subscription_id=""` reached the tool and failed closed with subscribers still 16; `reflex_history limit=0` returned zero events; `reflex_history limit=1001` failed closed; structurally invalid `reflex_register` target failed deserialization and `reflex_list` remained total 1 / active 1 before cleanup.
+  - Forced degraded daemon PID `16712`, bind `127.0.0.1:7827`, isolated DB `.runs\609\degraded-20260531T2254\db`: unauth `/health` 401, auth health ok, strict tools/list 80 tools. Started with `SYNAPSE_REFLEX_FORCE_DEGRADED=1` / `--reflex-force-degraded`. Registered quiet reflex `019e8118-9a9e-77e1-8664-8bf3ff5fac46`; after 6s health read `status=degraded_latency`, sample ring 4096/4096, `degraded_tick_count=4096`, `late_tick_count=546`, p99 jitter 14249us. `reflex_history limit=1000` returned 1000 tick-late rows, latest rows had `degraded=true`, fallback_interval_us 2000, elapsed_us around 14-15ms, and `CF_REFLEX_AUDIT=1992`; daemon log readback had `degraded=true` tick lines and `forced_degraded_config`.
+  - Cleanup used real `reflex_cancel` for both registered reflexes; final list readbacks showed both daemons total 1 / active 0 / cancelled 1 and subscribers 0. Final storage readbacks: baseline `CF_REFLEX_AUDIT=3190`, `CF_ACTION_LOG=6`, pressure Normal; degraded `CF_REFLEX_AUDIT=5302`, pressure Normal. PIDs `72424` and `16712` stopped and ports `7826`/`7827` are closed.
+- Known setup noise excluded from acceptance: early daemon attempts failed auth due inherited APPDATA token, a background Inspector load wrapper split the auth header, and a first degraded launch rejected `SYNAPSE_ALLOW_SHELL=.*` as `SHELL_PATTERN_TOO_BROAD`. Each was corrected before accepted FSV evidence.
+- Final supporting checks passed after FSV: `cargo fmt --check`; `cargo check -p synapse-core`; `cargo check -p synapse-reflex`; focused tick-late scheduler test; full `cargo test -p synapse-reflex --test scheduler_behavior -- --nocapture` (20 passed); `cargo check -p synapse-mcp`; `cargo test -p synapse-mcp schema_sanitize -- --nocapture`; `cargo build --release -p synapse-mcp`; `git diff --check` (line-ending warnings only). The final rebuilt release binary SHA256 is `A245308F45D5A0F1F6354BDF2A99ACD8DF7DA9A44F6FC5CA9115E8240D3C9592`, length `46281216`, timestamp `2026-05-31 22:04:25`.
+- Diff review completed for code and state files. Next: commit `[skip ci]`, post #609 RESOLVED evidence, close #609, update state closure, then refresh the issue queue.
+
+## 2026-05-31T21:22:49-05:00
+- Active issue is #609 `scenario(stress): 1ms reflex tick jitter under system load`.
+- Code inspection found a real #609 evidence-surface gap:
+  - The scheduler already emitted `REFLEX_TICK_LATE` on the in-process event bus and logged every tick sample.
+  - It did not persist tick-late rows to `CF_REFLEX_AUDIT`, so `reflex_history` could not be the physical SoT requested by the issue body.
+  - Health exposed last jitter/sample count/limit from #608, but not retained p99 jitter, late count, or degraded fallback count.
+- Current #609 patch in worktree:
+  - `scheduler_tick.rs` writes one `CF_REFLEX_AUDIT` row for each late tick with `reflex_id="__scheduler__"`, `error_code=REFLEX_TICK_LATE`, and details for tick index, elapsed/jitter/target/late-after/fallback interval, reason, and degraded flag.
+  - `SubsystemHealth` / MCP health now expose `p99_tick_jitter_us`, `late_tick_count`, and `degraded_tick_count` in addition to sample count/limit and last jitter.
+  - Existing supporting regression `blocked_dispatch_path_emits_reflex_tick_late` now proves the tick-late event and persisted scheduler audit row shape.
+- Supporting checks after this patch:
+  - `cargo fmt`
+  - `cargo check -p synapse-reflex`
+  - `cargo check -p synapse-core`
+  - `cargo test -p synapse-reflex --test scheduler_behavior blocked_dispatch_path_emits_reflex_tick_late -- --nocapture`
+  - `cargo check -p synapse-mcp`
+  - `cargo test -p synapse-mcp schema_sanitize -- --nocapture`
+- Next #609 step: run final fmt/checks as needed, build release `synapse-mcp`, launch isolated repo-built daemons for baseline and forced-degraded/load FSV, prove process/socket/auth/health/strict Inspector tools/list, then manually drive idle, load, subscriber, and invalid/boundary edges with real MCP tools plus separate SoT readbacks.
+
 ## 2026-05-31T21:15:24-05:00
 - #608 `scenario(stress): 32-reflex saturation - priority, exclusive, starvation` is closed.
   - Commit: `5873c37 fix(reflex): arbitrate saturated stateful reflexes (#608) [skip ci]`

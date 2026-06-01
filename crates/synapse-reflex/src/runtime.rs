@@ -126,6 +126,41 @@ impl ReflexRuntime {
         self.scheduler_config.sample_limit
     }
 
+    /// Returns p99 jitter across retained scheduler tick samples.
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn p99_tick_jitter_us(&self) -> Option<u64> {
+        self.scheduler
+            .as_ref()
+            .map(|scheduler| crate::scheduler::p99_jitter_us(&scheduler.samples()))
+    }
+
+    /// Returns retained tick samples marked late.
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn late_tick_count(&self) -> usize {
+        self.scheduler.as_ref().map_or(0, |scheduler| {
+            scheduler
+                .samples()
+                .iter()
+                .filter(|sample| sample.late)
+                .count()
+        })
+    }
+
+    /// Returns retained tick samples that ran through the degraded fallback interval.
+    #[must_use]
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn degraded_tick_count(&self) -> usize {
+        self.scheduler.as_ref().map_or(0, |scheduler| {
+            scheduler
+                .samples()
+                .iter()
+                .filter(|sample| sample.degraded)
+                .count()
+        })
+    }
+
     /// Returns true when the latest tick ran in degraded mode or missed its deadline.
     #[must_use]
     #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
