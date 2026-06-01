@@ -1,7 +1,8 @@
 use super::{
     ActComboParams, ActComboResponse, ActLaunchParams, ActLaunchResponse, ActRunShellParams,
     ActRunShellResponse, ErrorData, Json, Parameters, RunShellAuthorization, SynapseService,
-    authorize_run_shell, execute_combo, launch, mcp_error, required_combo_permissions,
+    authorize_run_shell, execute_combo, launch, launch_process_history_row,
+    launch_process_history_row_key, launch_request_details, mcp_error, required_combo_permissions,
     run_authorized_shell, run_shell_idempotency_completed_row, run_shell_idempotency_replay,
     run_shell_idempotency_reservation_row, run_shell_idempotency_row_key,
     run_shell_request_details, tool, tool_router,
@@ -77,11 +78,37 @@ impl SynapseService {
             self.audit_action_denied("act_launch", &error);
             return Err(error);
         }
-        self.audit_action_started("act_launch")?;
-        let result = launch(&self.m4_config, params.0).await;
+        let params = params.0;
+        self.audit_action_started_with_details("act_launch", &launch_request_details(&params))?;
+        let result = match launch(&self.m4_config, params.clone()).await {
+            Ok(response) => {
+                record_launch_process_history(self, &params, &response)?;
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        };
         self.audit_action_result("act_launch", &result)?;
         result.map(Json)
     }
+}
+
+fn record_launch_process_history(
+    service: &SynapseService,
+    params: &ActLaunchParams,
+    response: &ActLaunchResponse,
+) -> Result<(), ErrorData> {
+    let row = launch_process_history_row(params, response)?;
+    let row_key = launch_process_history_row_key(response);
+    let runtime = service.reflex_runtime()?;
+    let runtime = runtime.lock().map_err(|_error| {
+        mcp_error(
+            synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+            "reflex runtime lock poisoned while recording act_launch process history",
+        )
+    })?;
+    runtime
+        .storage_put_process_history_rows(vec![(row_key, row)])
+        .map_err(|error| mcp_error(error.code(), error.to_string()))
 }
 
 async fn run_shell_with_idempotency(

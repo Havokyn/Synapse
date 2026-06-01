@@ -667,6 +667,16 @@ fn policy_specs() -> Vec<PolicySpec> {
             strategic: false,
         },
         PolicySpec {
+            audit_class: "process_history",
+            cf_name: cf::CF_PROCESS_HISTORY,
+            key_prefix: None,
+            ttl_label: "6h",
+            ttl_ns: ttl_to_ns(RetentionTtl::Hours(6)),
+            dedupe_key_fields: &["tool", "status", "target", "pid"],
+            pressure_preserve: false,
+            strategic: false,
+        },
+        PolicySpec {
             audit_class: "reflex_audit",
             cf_name: cf::CF_REFLEX_AUDIT,
             key_prefix: None,
@@ -928,5 +938,28 @@ mod tests {
         assert_eq!(delta.key_prefix.as_deref(), Some("reality/delta/v1/"));
         assert!(!delta.strategic);
         assert!(!delta.pressure_preserve);
+    }
+
+    #[test]
+    fn process_history_has_retention_class() {
+        let policies = audit_retention_policies();
+        let process_history = policies
+            .iter()
+            .find(|policy| policy.audit_class == "process_history")
+            .unwrap_or_else(|| panic!("missing process_history retention policy"));
+
+        assert_eq!(process_history.cf_name, cf::CF_PROCESS_HISTORY);
+        assert_eq!(process_history.ttl, "6h");
+        assert_eq!(
+            process_history.dedupe_key_fields,
+            vec![
+                "tool".to_owned(),
+                "status".to_owned(),
+                "target".to_owned(),
+                "pid".to_owned()
+            ]
+        );
+        assert!(!process_history.strategic);
+        assert!(!process_history.pressure_preserve);
     }
 }

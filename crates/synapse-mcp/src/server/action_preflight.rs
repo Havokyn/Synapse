@@ -227,10 +227,7 @@ impl SynapseService {
     }
 
     fn read_current_action_foreground(&self) -> Result<ForegroundContext, ErrorData> {
-        let state = self.m1_state()?;
-        let input = current_input(&state, 1)?;
-        drop(state);
-        Ok(input.foreground)
+        self.current_audit_foreground()
     }
 
     pub(super) fn ensure_everquest_live_ui_context_for_action(

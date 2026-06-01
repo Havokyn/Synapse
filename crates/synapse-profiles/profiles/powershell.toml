@@ -12,6 +12,22 @@ exe = "powershell.exe"
 [[matches]]
 exe = "pwsh.exe"
 
+[[matches]]
+exe = "OpenConsole.exe"
+title_regex = "(?i).*(powershell|pwsh).*"
+
+[[matches]]
+exe = "conhost.exe"
+title_regex = "(?i).*(powershell|pwsh).*"
+
+[[matches]]
+exe = "WindowsTerminal.exe"
+title_regex = "(?i).*(powershell|pwsh).*"
+
+[[matches]]
+exe = "wt.exe"
+title_regex = "(?i).*(powershell|pwsh).*"
+
 [capture]
 target = "foreground_window"
 min_update_interval_ms = 50

@@ -159,18 +159,15 @@ impl SynapseService {
     }
 
     fn action_audit_foreground(&self) -> Value {
-        let input = self
-            .m1_state()
-            .and_then(|state| crate::m1::current_input(&state, 1));
-        match input {
-            Ok(input) => {
-                let observed_profile = self.action_audit_observed_profile(&input.foreground);
+        match self.current_audit_foreground() {
+            Ok(foreground) => {
+                let observed_profile = self.action_audit_observed_profile(&foreground);
                 json!({
-                    "hwnd": input.foreground.hwnd,
-                    "pid": input.foreground.pid,
-                    "process_name": input.foreground.process_name,
-                    "process_path": input.foreground.process_path,
-                    "window_title": input.foreground.window_title,
+                    "hwnd": foreground.hwnd,
+                    "pid": foreground.pid,
+                    "process_name": foreground.process_name,
+                    "process_path": foreground.process_path,
+                    "window_title": foreground.window_title,
                     "profile_id": observed_profile.profile_id,
                     "profile_schema_version": observed_profile.schema_version,
                 })

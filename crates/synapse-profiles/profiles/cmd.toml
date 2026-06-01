@@ -9,6 +9,22 @@ keyboard_dynamics_default = "natural"
 [[matches]]
 exe = "cmd.exe"
 
+[[matches]]
+exe = "OpenConsole.exe"
+title_regex = "(?i).*(cmd\\.exe|Command Prompt).*"
+
+[[matches]]
+exe = "conhost.exe"
+title_regex = "(?i).*(cmd\\.exe|Command Prompt).*"
+
+[[matches]]
+exe = "WindowsTerminal.exe"
+title_regex = "(?i).*(cmd\\.exe|Command Prompt).*"
+
+[[matches]]
+exe = "wt.exe"
+title_regex = "(?i).*(cmd\\.exe|Command Prompt).*"
+
 [capture]
 target = "foreground_window"
 min_update_interval_ms = 50

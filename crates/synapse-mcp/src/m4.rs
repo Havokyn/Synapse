@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, HashSet},
     io,
-    process::Stdio,
+    path::Path,
+    process::{Command as StdCommand, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -16,7 +17,7 @@ use synapse_core::{
 };
 use synapse_reflex::{ComboParams, ReflexRuntime, ScheduledReflex};
 use synapse_storage::{decode_json, encode_json};
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::{io::AsyncReadExt, process::Command as TokioCommand};
 
 use crate::{
     m1::mcp_error,
@@ -28,6 +29,9 @@ const MAX_COMBO_STEPS: usize = 256;
 const DEFAULT_SHELL_TIMEOUT_MS: u32 = 30_000;
 const MAX_SHELL_TIMEOUT_MS: u32 = 600_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS: u32 = 10_000;
+const MAX_LAUNCH_TIMEOUT_MS: u32 = 600_000;
+#[cfg(windows)]
+const SW_SHOWNORMAL: u16 = 1;
 const MAX_SHELL_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const ALLOW_SHELL_ENV: &str = "SYNAPSE_ALLOW_SHELL";
 const ALLOW_LAUNCH_ENV: &str = "SYNAPSE_ALLOW_LAUNCH";
@@ -303,7 +307,7 @@ struct RunShellIdempotencyRow {
     response: Option<ActRunShellResponse>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActLaunchParams {
     pub target: String,
@@ -329,6 +333,62 @@ pub struct ActLaunchResponse {
     pub matched_title: Option<String>,
     pub launched_at: String,
     pub reason: Option<String>,
+}
+
+pub fn launch_request_details(params: &ActLaunchParams) -> serde_json::Value {
+    json!({
+        "target": params.target,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
+        "wait_for_window_title_regex": params.wait_for_window_title_regex,
+        "timeout_ms": params.timeout_ms,
+        "idempotency_key_present": params.idempotency_key.is_some(),
+        "windows_new_console": launch_target_needs_new_console(&params.target),
+        "request_sha256": launch_request_sha256(params).ok(),
+    })
+}
+
+pub fn launch_process_history_row_key(response: &ActLaunchResponse) -> Vec<u8> {
+    format!(
+        "process_history/v1/act_launch/{}/{}",
+        response.launched_at.replace(':', "_"),
+        response.pid
+    )
+    .into_bytes()
+}
+
+pub fn launch_process_history_row(
+    params: &ActLaunchParams,
+    response: &ActLaunchResponse,
+) -> Result<Vec<u8>, ErrorData> {
+    let row = json!({
+        "schema_version": 1,
+        "row_kind": "process_start",
+        "tool": "act_launch",
+        "status": "started",
+        "target": params.target,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
+        "wait_for_window_title_regex": params.wait_for_window_title_regex,
+        "timeout_ms": params.timeout_ms,
+        "idempotency_key_present": params.idempotency_key.is_some(),
+        "windows_new_console": launch_target_needs_new_console(&params.target),
+        "request_sha256": launch_request_sha256(params).ok(),
+        "command_line": launch_command_line(params).ok(),
+        "pid": response.pid,
+        "hwnd": response.hwnd,
+        "matched_title": response.matched_title,
+        "launched_at": response.launched_at,
+        "reason": response.reason,
+    });
+    encode_json(&row).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_launch process history row encode failed: {error}"),
+        )
+    })
 }
 
 pub async fn execute_combo(
@@ -619,6 +679,24 @@ fn run_shell_request_sha256(params: &ActRunShellParams) -> Result<String, ErrorD
     Ok(sha256_hex(&bytes))
 }
 
+fn launch_request_sha256(params: &ActLaunchParams) -> Result<String, ErrorData> {
+    let payload = json!({
+        "target": params.target,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env": params.env,
+        "wait_for_window_title_regex": params.wait_for_window_title_regex,
+        "timeout_ms": params.timeout_ms,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_launch request fingerprint encode failed: {error}"),
+        )
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
 pub async fn launch(
     config: &M4ServiceConfig,
     params: ActLaunchParams,
@@ -666,23 +744,19 @@ pub async fn launch(
     } else {
         HashSet::new()
     };
-    let child = spawn_launch_child(&params)?;
-    let pid = child.id().ok_or_else(|| {
-        launch_tool_error(
-            error_codes::ACTION_TARGET_INVALID,
-            "act_launch spawned process without a process id",
-            json!({
-                "code": error_codes::ACTION_TARGET_INVALID,
-                "target": params.target,
-                "args": params.args,
-                "reason": "spawned_process_missing_pid",
-            }),
-        )
-    })?;
-    drop(child);
+    let pid = spawn_launch_child(&params)?;
+    let launch_target_name = launch_target_file_name(&params.target);
 
     let window = if let Some(regex) = wait_regex {
-        wait_for_launch_window(pid, &regex, params.timeout_ms, &excluded_hwnds).await
+        wait_for_launch_window(
+            pid,
+            &regex,
+            params.timeout_ms,
+            &excluded_hwnds,
+            &launch_target_name,
+            &params.args,
+        )
+        .await
     } else {
         WindowWaitResult::not_requested()
     };
@@ -897,6 +971,12 @@ fn validate_launch_params(params: &ActLaunchParams) -> Result<(), ErrorData> {
             "act_launch target must not be empty",
         ));
     }
+    if params.timeout_ms == 0 || params.timeout_ms > MAX_LAUNCH_TIMEOUT_MS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("act_launch timeout_ms must be 1..={MAX_LAUNCH_TIMEOUT_MS}"),
+        ));
+    }
     if let Some(pattern) = &params.wait_for_window_title_regex {
         regex::Regex::new(pattern).map_err(|error| {
             mcp_error(
@@ -908,25 +988,29 @@ fn validate_launch_params(params: &ActLaunchParams) -> Result<(), ErrorData> {
     Ok(())
 }
 
-fn spawn_launch_child(params: &ActLaunchParams) -> Result<tokio::process::Child, ErrorData> {
-    let mut command = Command::new(&params.target);
+fn spawn_launch_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
+    let needs_new_console = launch_target_needs_new_console(&params.target);
+    #[cfg(windows)]
+    if needs_new_console {
+        return spawn_windows_console_child(params);
+    }
+
+    let mut command = StdCommand::new(&params.target);
     command.args(&params.args);
     if let Some(working_dir) = &params.working_dir {
         command.current_dir(working_dir);
     }
-    command.env_clear();
-    for key in PROCESS_BASE_ENV_KEYS {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
+    apply_launch_environment(&mut command, params);
+    if needs_new_console {
+        apply_new_console_creation_flags(&mut command);
+    } else {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
     }
-    command.envs(&params.env);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
 
-    command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         launch_tool_error(
             error_codes::ACTION_TARGET_INVALID,
             format!("act_launch failed to spawn target: {error}"),
@@ -938,8 +1022,159 @@ fn spawn_launch_child(params: &ActLaunchParams) -> Result<tokio::process::Child,
                 "reason": "spawn_failed",
             }),
         )
-    })
+    })?;
+    Ok(child.id())
 }
+
+fn apply_launch_environment(command: &mut StdCommand, params: &ActLaunchParams) {
+    command.env_clear();
+    for key in PROCESS_BASE_ENV_KEYS {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command.envs(&params.env);
+}
+
+fn launch_target_needs_new_console(target: &str) -> bool {
+    let name = launch_target_file_name(target);
+    matches!(name.as_str(), "cmd.exe" | "powershell.exe" | "pwsh.exe")
+}
+
+fn launch_target_file_name(target: &str) -> String {
+    Path::new(target)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(target)
+        .to_ascii_lowercase()
+}
+
+#[cfg(windows)]
+fn spawn_windows_console_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
+    use windows::{
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+                CreateProcessW, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+            },
+        },
+        core::{PCWSTR, PWSTR},
+    };
+
+    let command_line = launch_command_line(params)?;
+    let mut command_line_wide = wide_null(&command_line);
+    let current_dir_wide = params.working_dir.as_ref().map(|dir| wide_null(dir));
+    let environment = launch_environment_block(params)?;
+    let startup_info_cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>()).map_err(|error| {
+        launch_tool_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_launch failed to prepare console startup info: {error}"),
+            json!({
+                "code": error_codes::TOOL_INTERNAL_ERROR,
+                "reason": "launch_startup_info_size_overflow",
+                "target": params.target,
+            }),
+        )
+    })?;
+
+    let startup_info = STARTUPINFOW {
+        cb: startup_info_cb,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+
+    let mut process_info = PROCESS_INFORMATION::default();
+    let current_dir = current_dir_wide
+        .as_ref()
+        .map_or(PCWSTR::null(), |dir| PCWSTR(dir.as_ptr()));
+
+    let result = unsafe {
+        CreateProcessW(
+            PCWSTR::null(),
+            Some(PWSTR(command_line_wide.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+            Some(environment.as_ptr().cast()),
+            current_dir,
+            &raw const startup_info,
+            &raw mut process_info,
+        )
+    };
+
+    match result {
+        Ok(()) => {
+            let pid = process_info.dwProcessId;
+            let _ = unsafe { CloseHandle(process_info.hThread) };
+            let _ = unsafe { CloseHandle(process_info.hProcess) };
+            Ok(pid)
+        }
+        Err(error) => Err(launch_tool_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!("act_launch failed to spawn console target: {error}"),
+            json!({
+                "code": error_codes::ACTION_TARGET_INVALID,
+                "target": params.target,
+                "args": params.args,
+                "working_dir": params.working_dir,
+                "reason": "spawn_failed",
+            }),
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn launch_environment_block(params: &ActLaunchParams) -> Result<Vec<u16>, ErrorData> {
+    let mut env: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for key in PROCESS_BASE_ENV_KEYS {
+        if let Some(value) = std::env::var_os(key) {
+            env.insert(
+                key.to_ascii_uppercase(),
+                (key.to_owned(), value.to_string_lossy().into_owned()),
+            );
+        }
+    }
+    for (key, value) in &params.env {
+        validate_launch_environment_entry(key, value)?;
+        env.insert(key.to_ascii_uppercase(), (key.clone(), value.clone()));
+    }
+
+    let mut block = Vec::new();
+    for (_sort_key, (key, value)) in env {
+        block.extend(format!("{key}={value}").encode_utf16());
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
+#[cfg(windows)]
+fn validate_launch_environment_entry(key: &str, value: &str) -> Result<(), ErrorData> {
+    if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_launch env entries must have non-empty keys without '=' or NUL and values without NUL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+const fn apply_new_console_creation_flags(_command: &mut StdCommand) {}
+
+#[cfg(not(windows))]
+const fn apply_new_console_creation_flags(_command: &mut StdCommand) {}
 
 #[derive(Debug)]
 struct WindowWaitResult {
@@ -987,6 +1222,8 @@ async fn wait_for_launch_window(
     title_regex: &regex::Regex,
     timeout_ms: u32,
     excluded_hwnds: &HashSet<i64>,
+    launch_target_name: &str,
+    launch_args: &[String],
 ) -> WindowWaitResult {
     let started = Instant::now();
     let timeout = Duration::from_millis(u64::from(timeout_ms));
@@ -994,9 +1231,14 @@ async fn wait_for_launch_window(
     loop {
         match synapse_a11y::visible_top_level_window_contexts() {
             Ok(contexts) => {
-                if let Some(context) =
-                    select_launch_window(&contexts, pid, title_regex, excluded_hwnds)
-                {
+                if let Some(context) = select_launch_window(
+                    &contexts,
+                    pid,
+                    title_regex,
+                    excluded_hwnds,
+                    launch_target_name,
+                    launch_args,
+                ) {
                     // Best-effort foreground so the launched window is
                     // immediately actionable/observable. Without this, a newly
                     // launched window can open behind the caller's foreground
@@ -1047,6 +1289,8 @@ fn select_launch_window<'a>(
     pid: u32,
     title_regex: &regex::Regex,
     excluded_hwnds: &HashSet<i64>,
+    launch_target_name: &str,
+    launch_args: &[String],
 ) -> Option<&'a ForegroundContext> {
     contexts
         .iter()
@@ -1061,6 +1305,70 @@ fn select_launch_window<'a>(
                     && title_regex.is_match(&context.window_title)
             })
         })
+        .or_else(|| {
+            contexts.iter().find(|context| {
+                excluded_hwnds.contains(&context.hwnd)
+                    && launch_target_matches_existing_window(
+                        launch_target_name,
+                        launch_args,
+                        context,
+                    )
+                    && title_regex.is_match(&context.window_title)
+            })
+        })
+}
+
+fn launch_target_matches_existing_window(
+    target_name: &str,
+    launch_args: &[String],
+    context: &ForegroundContext,
+) -> bool {
+    let target_name = target_name.to_ascii_lowercase();
+    let process_name = context.process_name.to_ascii_lowercase();
+    target_name == process_name
+        || launch_target_matches_shell_activation(&target_name, launch_args, &process_name)
+        || matches!(
+            (target_name.as_str(), process_name.as_str()),
+            ("wt.exe", "windowsterminal.exe")
+                | (
+                    "calc.exe",
+                    "calculatorapp.exe" | "calculator.exe" | "applicationframehost.exe",
+                )
+                | (
+                    "cmd.exe" | "powershell.exe" | "pwsh.exe",
+                    "windowsterminal.exe" | "openconsole.exe" | "conhost.exe",
+                )
+        )
+}
+
+fn launch_target_matches_shell_activation(
+    target_name: &str,
+    launch_args: &[String],
+    process_name: &str,
+) -> bool {
+    if target_name != "explorer.exe" {
+        return false;
+    }
+    let args = launch_args
+        .iter()
+        .map(|arg| arg.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "ms-settings:") {
+        return matches!(
+            process_name,
+            "systemsettings.exe" | "applicationframehost.exe"
+        );
+    }
+    if args
+        .iter()
+        .any(|arg| arg.contains("microsoft.windows.photos"))
+    {
+        return matches!(
+            process_name,
+            "photos.exe" | "microsoft.photos.exe" | "applicationframehost.exe"
+        );
+    }
+    false
 }
 
 fn snapshot_visible_window_hwnds() -> HashSet<i64> {
@@ -1098,7 +1406,7 @@ async fn run_allowlisted_shell(
 }
 
 fn spawn_shell_child(params: &ActRunShellParams) -> Result<tokio::process::Child, ErrorData> {
-    let mut command = Command::new(&params.command);
+    let mut command = TokioCommand::new(&params.command);
     command.args(&params.args);
     if let Some(working_dir) = &params.working_dir {
         command.current_dir(working_dir);
@@ -1679,6 +1987,33 @@ mod tests {
         }
     }
 
+    fn foreground_for_launch_selection(
+        hwnd: i64,
+        pid: u32,
+        process_name: &str,
+        window_title: &str,
+    ) -> ForegroundContext {
+        ForegroundContext {
+            hwnd,
+            pid,
+            process_name: process_name.to_owned(),
+            process_path: format!(r"C:\Synthetic\{process_name}"),
+            window_title: window_title.to_owned(),
+            window_bounds: synapse_core::Rect {
+                x: 0,
+                y: 0,
+                w: 640,
+                h: 480,
+            },
+            monitor_index: 0,
+            dpi_scale: 1.0,
+            profile_id: None,
+            steam_appid: None,
+            is_fullscreen: false,
+            is_dwm_composed: true,
+        }
+    }
+
     fn launch_config_for(params: &ActLaunchParams) -> M4ServiceConfig {
         let command_line = launch_command_line(params)
             .unwrap_or_else(|error| panic!("synthetic launch command line should build: {error}"));
@@ -1829,6 +2164,86 @@ mod tests {
                 .and_then(|reason| reason.as_str()),
             Some("launch_target_path_resolution_failed")
         );
+    }
+
+    #[test]
+    fn launch_window_selection_prefers_new_matching_window() {
+        let contexts = vec![
+            foreground_for_launch_selection(10, 100, "chrome.exe", "Google Chrome"),
+            foreground_for_launch_selection(11, 200, "chrome.exe", "Google Chrome"),
+        ];
+        let excluded = HashSet::from([10]);
+        let title_regex = regex::Regex::new("Chrome|Chromium").expect("synthetic regex compiles");
+
+        let selected =
+            select_launch_window(&contexts, 999, &title_regex, &excluded, "chrome.exe", &[])
+                .expect("new matching window should be selected");
+
+        assert_eq!(selected.hwnd, 11);
+    }
+
+    #[test]
+    fn launch_window_selection_accepts_existing_single_instance_window() {
+        let contexts = vec![foreground_for_launch_selection(
+            10,
+            100,
+            "chrome.exe",
+            "Google Chrome",
+        )];
+        let excluded = HashSet::from([10]);
+        let title_regex = regex::Regex::new("Chrome|Chromium").expect("synthetic regex compiles");
+
+        let selected =
+            select_launch_window(&contexts, 999, &title_regex, &excluded, "chrome.exe", &[])
+                .expect("existing single-instance matching window should be selected");
+
+        assert_eq!(selected.hwnd, 10);
+    }
+
+    #[test]
+    fn launch_window_selection_rejects_unrelated_existing_window() {
+        let contexts = vec![foreground_for_launch_selection(
+            10,
+            100,
+            "WindowsTerminal.exe",
+            "Synapse - Windows Terminal",
+        )];
+        let excluded = HashSet::from([10]);
+        let title_regex = regex::Regex::new("Synapse|Explorer").expect("synthetic regex compiles");
+
+        let selected =
+            select_launch_window(&contexts, 999, &title_regex, &excluded, "explorer.exe", &[]);
+
+        assert!(
+            selected.is_none(),
+            "unrelated existing windows must not satisfy broad launch title regexes"
+        );
+    }
+
+    #[test]
+    fn launch_window_selection_accepts_known_shell_activation_window() {
+        let contexts = vec![foreground_for_launch_selection(
+            10,
+            100,
+            "ApplicationFrameHost.exe",
+            "Settings",
+        )];
+        let excluded = HashSet::from([10]);
+        let title_regex =
+            regex::Regex::new("^(Settings|Control Panel)$").expect("synthetic regex compiles");
+        let launch_args = vec!["ms-settings:".to_owned()];
+
+        let selected = select_launch_window(
+            &contexts,
+            999,
+            &title_regex,
+            &excluded,
+            "explorer.exe",
+            &launch_args,
+        )
+        .expect("known shell-activated app window should be accepted");
+
+        assert_eq!(selected.hwnd, 10);
     }
 
     #[test]
@@ -2082,6 +2497,81 @@ mod tests {
             Some(error_codes::TOOL_PARAMS_INVALID)
         );
         assert!(error.message.contains("timeout_ms must be"));
+    }
+
+    #[test]
+    fn launch_rejects_timeout_outside_schema_bounds() {
+        for timeout_ms in [0, MAX_LAUNCH_TIMEOUT_MS + 1] {
+            let params = launch_params("notepad.exe", Vec::new(), timeout_ms);
+
+            let error = match validate_launch_params(&params) {
+                Ok(()) => panic!("timeout {timeout_ms} should reject"),
+                Err(error) => error,
+            };
+
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("code"))
+                    .and_then(|code| code.as_str()),
+                Some(error_codes::TOOL_PARAMS_INVALID)
+            );
+            assert!(error.message.contains("timeout_ms must be"));
+        }
+    }
+
+    #[test]
+    fn launch_process_history_row_records_spawn_without_env_values() {
+        let mut params = launch_params("notepad.exe", vec!["C:\\tmp\\launch.txt"], 10_000);
+        params.env.insert(
+            "SYNAPSE_LAUNCH_SECRET".to_owned(),
+            "do-not-store".to_owned(),
+        );
+        let response = ActLaunchResponse {
+            pid: 1234,
+            hwnd: Some(5678),
+            matched_title: Some("launch.txt - Notepad".to_owned()),
+            launched_at: "2026-05-31T20:00:00Z".to_owned(),
+            reason: None,
+        };
+
+        let row = launch_process_history_row(&params, &response)
+            .unwrap_or_else(|error| panic!("process history row should encode: {error}"));
+        let value: serde_json::Value = serde_json::from_slice(&row)
+            .unwrap_or_else(|error| panic!("process history row should decode: {error}"));
+
+        assert_eq!(value["tool"], "act_launch");
+        assert_eq!(value["pid"], 1234);
+        assert_eq!(value["hwnd"], 5678);
+        assert_eq!(value["matched_title"], "launch.txt - Notepad");
+        assert_eq!(value["env_keys"], json!(["SYNAPSE_LAUNCH_SECRET"]));
+        assert!(!String::from_utf8_lossy(&row).contains("do-not-store"));
+        assert!(
+            String::from_utf8_lossy(&launch_process_history_row_key(&response)).contains("1234")
+        );
+    }
+
+    #[test]
+    fn launch_console_targets_request_real_console_windows() {
+        for target in [
+            "cmd.exe",
+            "C:\\Windows\\System32\\cmd.exe",
+            "powershell.exe",
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        ] {
+            assert!(
+                launch_target_needs_new_console(target),
+                "{target} should request CREATE_NEW_CONSOLE on Windows"
+            );
+        }
+
+        for target in ["notepad.exe", "wt.exe", "WindowsTerminal.exe"] {
+            assert!(
+                !launch_target_needs_new_console(target),
+                "{target} should use normal GUI launch stdio handling"
+            );
+        }
     }
 
     #[test]

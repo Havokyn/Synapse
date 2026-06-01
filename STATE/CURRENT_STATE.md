@@ -1,5 +1,99 @@
 # CURRENT STATE - Synapse
 
+## 2026-05-31T18:49:37-05:00
+- Active issue remains #607 `scenario(stress): act_launch fleet - all 30 profiles, foreground incl. console apps`.
+- Post-compaction wake-up was completed again:
+  - Re-read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #351, live open queue, #607 comments, git status/log/branch.
+  - Wired `mcp__synapse` client is usable: `health.ok=true`, installed stdio PID `45712`, profile_count `29`, `profile_list include_inactive=true` loads all bundled profiles, `storage_inspect` works, and `observe depth=0` read foreground `eqgame.exe` with `profile_id=everquest.live`.
+  - Live open queue remains #594 plus #595-#604 and #607-#634; #607 is still open with only the START comment.
+- Current #607 implementation patch in worktree:
+  - `act_launch` now validates timeout max, records start/result audit details, and writes successful spawn rows to `CF_PROCESS_HISTORY` without environment values.
+  - Console targets use a Win32 `CreateProcessW` path with `CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT` and `STARTUPINFOW` show-window state.
+  - Launch window selection now prefers PID+title, then title, and only accepts existing excluded windows when the process identity is compatible with the requested target or a known shell activation alias.
+  - Action audit/action preflight/reflex scope checks now use fast foreground identity instead of depth-1 UIA snapshots when only foreground identity is needed.
+  - UIA snapshot child/raw-supplement failures warn/truncate instead of aborting; empty RuntimeId uses a deterministic process-local fallback element id.
+  - `cmd.toml` and `powershell.toml` include Windows Terminal/OpenConsole/conhost title-specific matches.
+  - New profile metadata added for host-disposition gaps: WordPad removed on modern Windows, IE desktop redirecting to Edge. Minecraft already had launcher/sign-in/operator-boundary metadata.
+- #607 manual FSV evidence captured through repo-built isolated daemon PID `61024`, bind `127.0.0.1:7814`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`, isolated DB `.runs\607\launch-fleet-final8-20260531T182322\db`:
+  - MCP precondition: unauth `/health` returned 401; auth `/health` ok with `allow_launch_patterns=any`; strict Inspector `tools/list` exited 0 and showed `act_launch`, `observe`, `profile_list`, `storage_inspect`; storage baseline `CF_ACTION_LOG=0`, `CF_PROCESS_HISTORY=0`; `profile_list` showed 29 profiles.
+  - Accepted launch/profile readbacks for 26 profiles: `acrobat`, `calculator`, `chrome`, `cmd`, `everquest.live`, `excel`, `explorer`, `firefox`, `luanti.minetest`, `mstsc`, `notepad`, `onenote`, `outlook`, `paint`, `photos`, `powerpoint`, `powershell`, `settings`, `slack`, `snippingtool`, `taskmanager`, `teams`, `terminal`, `vscode`, `word`, `zoom`.
+  - Final accepted storage after EverQuest: `CF_ACTION_LOG=60`, `CF_PROCESS_HISTORY=30`; after all edge cases: `CF_ACTION_LOG=74`, `CF_PROCESS_HISTORY=35` on the permissive daemon.
+  - Console coverage passed with visible foreground/profile readbacks for cmd (`profile_id=cmd`), PowerShell (`profile_id=powershell`), and Windows Terminal (`profile_id=terminal`).
+  - Edge cases passed: already-running/single-instance Chrome and VS Code; wait-title no-match; empty target; structurally invalid wait regex; max timeout boundary `600000`; rapid Notepad relaunch; restrictive policy deny on separate PID `59732` / `127.0.0.1:7815`.
+  - Documented host gaps after local setup/readbacks: `iexplore` spawned `iexplore.exe` but foreground became Microsoft Edge (`profile_id=chrome`), WordPad/write binaries and optional capability were absent, and Minecraft Java remains launcher/sign-in/license bounded until operator-owned Java runtime/world-log SoT exists. Luanti analogue passed.
+- Cleanup/readback after final FSV:
+  - `eqgame.exe` PID `70060` and known FSV-owned heavy app PIDs were stopped to release memory.
+  - Agent-created untracked `Logs/` and `eqclient.ini` from the initial EverQuest wrong-working-dir launch were removed after verifying their absolute paths were inside `C:\code\Synapse`.
+  - Repo-built daemon PID `59732` is gone and port `7815` is closed. PID `61024` is absent from `Get-Process`, CIM, `tasklist`, and `taskkill`, but Windows still reports a stale TCP LISTEN row for `127.0.0.1:7814` owned by PID `61024`; do not reuse that port.
+- Final #607 supporting checks after metadata/clippy fixes:
+  - `cargo fmt --check`
+  - `cargo check -p synapse-a11y`
+  - `cargo check -p synapse-mcp`
+  - `cargo check -p synapse-profiles`
+  - `cargo test -p synapse-profiles --test parse_bundled -- --nocapture`
+  - `cargo clippy -p synapse-mcp --all-targets -- -D warnings`
+  - `cargo test -p synapse-mcp launch_ -- --nocapture` (16 matching tests across unit/integration targets passed)
+  - `cargo test -p synapse-mcp process_history_has_retention_class -- --nocapture`
+  - `cargo build --release -p synapse-mcp` finished successfully; release binary timestamp `2026-05-31 19:13:59`, length `46263808`.
+  - `git diff --check` exited 0 with line-ending warnings only.
+- Diff review completed. Next: commit/push with `[skip ci]`, post #607 RESOLVED evidence, close #607, refresh queue.
+
+## 2026-05-31T17:56:27-05:00
+- Active issue remains #607.
+- Post-compaction wake-up was completed again:
+  - Re-read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #351, live open queue, #607 comments, git status/log/branch.
+  - Wired `mcp__synapse` tools verified through the actual configured MCP client: `health.ok=true`, `profile_list include_inactive=true` reports 29 bundled profiles, `storage_inspect` works, and `observe depth=0` resolved the current Chrome foreground.
+  - Live open queue remains #594 plus #595-#604 and #607-#634; #607 is the active issue.
+- Final7 isolated daemon readback before the latest patch:
+  - PID `39520`, bind `127.0.0.1:7813`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`.
+  - Strict Inspector `observe` and `storage_inspect` still work; storage counts after partial profile matrix were `CF_ACTION_LOG=35`, `CF_PROCESS_HISTORY=17`.
+  - Slack did not leave a `slack.exe` process. The failed Slack `act_launch` happened before process spawn/history recording because action supported-use preflight read a depth-1 UIA snapshot and hit `cached RuntimeId had unexpected type EMPTY` while foreground was Acrobat.
+- Root cause / fix added:
+  - `ensure_supported_use_allows_action` now reads fast foreground state (`current_audit_foreground`) instead of requiring a depth-1 UIA tree for generic action launch/scope preflight.
+  - Reflex action scope checks now use the same fast foreground semantics while preserving synthetic/forced-error behavior.
+  - UIA snapshot walking now logs and truncates when a child/raw-supplement node has a bad RuntimeId instead of aborting the whole snapshot; `VT_EMPTY` RuntimeId gets a process-local fallback element id with warning. Microsoft docs confirm RuntimeId's default value is `VT_EMPTY` and its opaque identifier can change/reuse over time.
+- Supporting checks after this patch:
+  - `cargo fmt --check` passed.
+  - `cargo check -p synapse-a11y` passed.
+  - `cargo check -p synapse-mcp` passed.
+- Next: stop isolated daemon PID `39520` to unlock the release binary, rebuild `cargo build --release -p synapse-mcp`, launch a fresh isolated final daemon, rerun strict Inspector precondition, retry Slack, then continue the remaining profile matrix and #607 edge cases.
+
+## 2026-05-31T17:27:03-05:00
+- Active issue remains #607.
+- Additional final-binary FSV defect found:
+  - Chrome was already running and reused an existing top-level window. Before the latest patch, `act_launch` foregrounded Chrome but returned `reason=no_match_within_timeout` because the existing HWND was excluded from title matching.
+  - A first fallback patch accepted excluded windows by title alone, but an Explorer retry with a broad `Synapse` regex falsely matched an unrelated Windows Terminal window. That was treated as a real safety bug.
+- Current fix:
+  - `select_launch_window` still prefers a new matching PID/window, then a new matching title, but its existing-window fallback now requires the excluded window process to match the launch target or a known Windows console host alias (`wt.exe`/cmd/powershell/pwsh hosted by WindowsTerminal/OpenConsole/conhost).
+  - Added supporting tests for preferring new windows, accepting same-process single-instance windows, and rejecting unrelated existing windows with broad title regexes.
+- Checks after the latest fix:
+  - `cargo fmt --check` passed.
+  - `cargo check -p synapse-mcp` passed.
+  - `cargo test -p synapse-mcp launch_window_selection -- --nocapture` passed (3 tests).
+  - `cargo build --release -p synapse-mcp` passed.
+- Latest repo-built daemon evidence before this safety refinement:
+  - PID `51896` on `127.0.0.1:7811`, strict Inspector `tools/list` count 80, storage baseline 0/0.
+  - Final-binary console checks passed for cmd/powershell/Windows Terminal and Chrome existing-window check passed, but the subsequent Explorer false-match means these need a fresh final daemon again after the process-compatible fallback patch.
+- Next: launch fresh final daemon (suggest port `7812`), redo MCP precondition, rerun cmd/powershell/terminal, Chrome existing-window, and the profile matrix with stricter wait regexes.
+
+## 2026-05-31T16:29:23-05:00
+- Active issue remains #607 `scenario(stress): act_launch fleet - all 30 profiles, foreground incl. console apps`.
+- Post-compaction wake-up was completed again:
+  - Re-read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #351, live open queue, and #607 comments.
+  - Live queue still shows #594 plus #595-#604 and #607-#634 open; #607 has only the START comment.
+  - Wired MCP client readback: `health.ok=true`, `profile_count=29`, `storage_inspect` works and still shows installed-runtime `CF_PROCESS_HISTORY=0`, and `observe depth=0` reads the current foreground `vscode` window.
+- Current #607 compile-break fix:
+  - Replaced unstable Rust `CommandExt::show_window` usage for console launches with a Windows-only `CreateProcessW` path using `CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT` and `STARTUPINFOW { STARTF_USESHOWWINDOW, wShowWindow=SW_SHOWNORMAL }`.
+  - Console launches now build the same narrow environment policy as the std `Command` path without recording env values.
+  - Official Microsoft docs consulted for `CreateProcessW`, `STARTUPINFOW`, `SetForegroundWindow`, and WordPad removal in Windows 11 24H2.
+- Supporting checks after this fix:
+  - `cargo fmt --check` passed.
+  - `cargo check -p synapse-mcp` passed.
+  - `cargo check -p synapse-a11y` passed.
+  - `cargo test -p synapse-mcp launch_console_targets_request_real_console_windows -- --nocapture` passed.
+  - `cargo test -p synapse-mcp launch_process_history_row_records_spawn_without_env_values -- --nocapture` passed after rerunning sequentially; the first parallel attempt failed with linker `LNK1104` due concurrent cargo test/link activity, not a code failure.
+- Next: build `cargo build --release -p synapse-mcp`, stop stale isolated #607 daemon if present, launch a fresh repo-built isolated daemon on a new port, prove process/socket/auth/health/strict Inspector `tools/list`, then rerun cmd/powershell/Windows Terminal real `act_launch` MCP FSV.
+
 ## 2026-05-31T14:47:21-05:00
 - #606 `scenario(stress): act_run_shell orchestration - allowlist modes, timeout, 1MB cap, idempotency` is closed.
   - Commit: `6975d14 fix(mcp): audit and dedupe shell orchestration (#606) [skip ci]`
@@ -11,6 +105,53 @@
   - Issue acceptance requires real MCP `tools/call act_launch` triggers, separate foreground/process/profile/storage SoT readbacks, all 30 bundled-profile apps where locally available/acquirable, explicit cmd/powershell/Windows Terminal console foregrounding, and edges for already-running app, wait-title no-match, restrictive-policy deny, rapid relaunch, and invalid/empty params.
   - Next: inspect profile launch definitions and existing `act_launch` foreground/window matching/audit behavior before launching a repo-built isolated daemon for #607 manual FSV.
 - Current live open queue after closing #606: #594 parent plus #595-#604 and #607-#634.
+
+## 2026-05-31T15:21:27-05:00
+- Resumed #607 after compaction and re-read required wake context:
+  - `docs/AICodingAgentSuperPrompt.md`
+  - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`
+  - `AGENTS.md`
+  - #351 decision/context comments
+  - live open queue and #607 comments
+  - `git status`, `git log -10`, and current branch
+- Git state readback:
+  - branch `main`
+  - HEAD `a15895f docs(state): record issue 606 closure [skip ci]`
+  - worktree modified only in current #607 patch files: `m3/audit_retention.rs`, `m4.rs`, `server.rs`, `server/m4_tools.rs`, and `synapse-reflex/src/storage.rs`.
+- Wired chat Synapse MCP client readback:
+  - `health.ok=true`, stdio runtime PID reported in health, storage DB `C:\Users\hotra\AppData\Local\synapse\db`, `allow_launch_patterns=any`.
+  - `profile_list include_inactive=true` returned 29 bundled profile TOML files from `crates/synapse-profiles/profiles`; #607 says 30, so on-disk profile files plus `profile_list` are the fleet-count SoT.
+  - `storage_inspect` shows `CF_PROCESS_HISTORY=0` in the installed runtime, which is the #607 storage gap the patch addresses.
+- Current #607 patch in worktree:
+  - `act_launch` now audits request details, validates `timeout_ms` against the schema max, records successful spawns in `CF_PROCESS_HISTORY`, and registers `CF_PROCESS_HISTORY` in audit retention.
+  - `synapse-reflex` exposes `storage_put_process_history_rows`.
+  - Focused supporting checks previously passed before compaction: `cargo check -p synapse-mcp`, `cargo fmt --check`, focused launch/process-history tests, and `cargo build --release -p synapse-mcp`.
+- Next: launch an isolated repo-built #607 daemon, prove process/socket/auth/health/strict Inspector `tools/list`, then manually FSV `act_launch` with separate foreground/process/profile/storage SoT readbacks.
+
+## 2026-05-31T16:15:13-05:00
+- Active issue remains #607 `scenario(stress): act_launch fleet - all 30 profiles, foreground incl. console apps`.
+- Additional #607 defects found through real isolated MCP runtime + official MCP Inspector:
+  - Direct console launches were not creating actionable visible console windows. Patched `act_launch` so `cmd.exe`, `powershell.exe`, and `pwsh.exe` request a Windows `CREATE_NEW_CONSOLE` instead of detaching all stdio.
+  - `CF_PROCESS_HISTORY` now records whether a launch requested a new console (`windows_new_console`) and the request details omit environment values.
+  - Windows 11 console hosting can surface a cmd/powershell console as `WindowsTerminal.exe` with a cmd/powershell title. Patched `cmd.toml` and `powershell.toml` to match title-specific `WindowsTerminal.exe` / `wt.exe` hosts.
+  - `act_launch` action audit result rows could stall about 60s after console launches because audit foreground metadata used a depth-1 UIA snapshot. Patched action audit to use fast foreground metadata (`synapse_a11y::current_foreground_context`) while preserving synthetic/error behavior.
+  - Foregrounding a newly matched console window can fail under Windows foreground-lock rules. Patched `synapse-a11y::focus_window` to send a Windows-only Alt key activation nudge before the existing `AttachThreadInput` / `SetForegroundWindow` retry.
+- Supporting checks passed after these fixes:
+  - `cargo fmt --check`
+  - `cargo check -p synapse-a11y`
+  - `cargo check -p synapse-mcp`
+  - `cargo check -p synapse-profiles`
+  - `cargo test -p synapse-mcp launch_console_targets_request_real_console_windows -- --nocapture`
+  - `cargo test -p synapse-mcp launch_process_history_row_records_spawn_without_env_values -- --nocapture`
+  - `cargo test -p synapse-profiles --test parse_bundled -- --nocapture`
+  - `cargo build --release -p synapse-mcp`
+- Runtime readbacks so far:
+  - Fresh isolated daemon PID `49456` on `127.0.0.1:7807` proved strict Inspector `tools/list` count 80 and storage baseline `CF_ACTION_LOG=0`, `CF_PROCESS_HISTORY=0`.
+  - After audit fast-path patch, `cmd.exe /k echo synapse-607-cmd-final` returned through Inspector in `1788 ms` instead of timing out; `CF_PROCESS_HISTORY=1` recorded `windows_new_console=true`, pid `39160`, hwnd `11865122`, title `C:\WINDOWS\system32\cmd.exe`.
+  - That run exposed profile/foreground mismatch: foreground host was `WindowsTerminal.exe` and resolved to `terminal`, prompting the title-specific cmd/powershell profile patch.
+  - Fresh isolated daemon PID `37348` on `127.0.0.1:7808` proved strict Inspector `tools/list` count 80 and storage baseline `CF_ACTION_LOG=0`, `CF_PROCESS_HISTORY=0`.
+  - `cmd.exe /k title synapse-607-cmd-title && echo synapse-607-cmd-title` matched a visible hwnd `10551496` and wrote `CF_PROCESS_HISTORY`, but `synapse_a11y::focus_window` returned `SetForegroundWindow returned false`; this prompted the foreground activation nudge patch.
+- Next: launch a new isolated repo-built daemon from the latest release binary, repeat MCP precondition, then rerun cmd/powershell/Windows Terminal console FSV. If foreground now holds, proceed through the 29-profile launch matrix and required edge cases.
 
 ## 2026-05-31T14:26:17-05:00
 - Active issue remains #606 `scenario(stress): act_run_shell orchestration - allowlist modes, timeout, 1MB cap, idempotency`.

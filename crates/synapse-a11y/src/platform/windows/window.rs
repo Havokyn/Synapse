@@ -1,4 +1,4 @@
-use std::{ffi::c_void, path::Path};
+use std::{ffi::c_void, mem, path::Path};
 
 use synapse_core::{AccessibleSubtree, ForegroundContext, Point, Rect};
 use uiautomation::{
@@ -11,6 +11,10 @@ use windows::{
         System::Threading::{
             AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_FORMAT,
             PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        },
+        UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+            SendInput, VIRTUAL_KEY, VK_MENU,
         },
         UI::WindowsAndMessaging::{
             BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
@@ -82,6 +86,12 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
             unsafe { GetWindowThreadProcessId(foreground, None) }
         };
         let target_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        if let Err(error) = send_foreground_activation_nudge() {
+            tracing::debug!(
+                error = %error,
+                "foreground activation input nudge failed before SetForegroundWindow retry"
+            );
+        }
         let attached_foreground = foreground_thread != 0
             && foreground_thread != current_thread
             && unsafe { AttachThreadInput(current_thread, foreground_thread, true) }.as_bool();
@@ -110,6 +120,43 @@ pub fn focus_window(hwnd: i64) -> A11yResult<()> {
                 hwnd.0 as isize
             )))
         }
+    }
+}
+
+fn send_foreground_activation_nudge() -> A11yResult<()> {
+    let inputs = [
+        virtual_key_input(VK_MENU, KEYBD_EVENT_FLAGS(0)),
+        virtual_key_input(VK_MENU, KEYEVENTF_KEYUP),
+    ];
+    let cb_size = i32::try_from(mem::size_of::<INPUT>())
+        .map_err(|_err| A11yError::internal("INPUT struct size does not fit SendInput cbSize"))?;
+    // SAFETY: `inputs` contains initialized keyboard INPUT records and
+    // `cb_size` is exactly `size_of::<INPUT>()`.
+    let sent = unsafe { SendInput(&inputs, cb_size) };
+    let expected = u32::try_from(inputs.len())
+        .map_err(|_err| A11yError::internal("foreground nudge input count overflow"))?;
+    if sent == expected {
+        Ok(())
+    } else {
+        Err(A11yError::internal(format!(
+            "SendInput inserted {sent}/{} events for foreground activation nudge",
+            inputs.len()
+        )))
+    }
+}
+
+const fn virtual_key_input(vkey: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vkey,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     }
 }
 

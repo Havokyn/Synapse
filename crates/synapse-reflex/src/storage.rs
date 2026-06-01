@@ -147,6 +147,19 @@ impl ReflexRuntime {
         self.storage_put_rows(cf::CF_ACTION_LOG, rows)
     }
 
+    /// Writes process start/exit history rows and flushes them immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the write or flush fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", row_count = rows.len()))]
+    pub fn storage_put_process_history_rows(
+        &self,
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> StorageResult<()> {
+        self.storage_put_rows(cf::CF_PROCESS_HISTORY, rows)
+    }
+
     /// Writes profile-linked event rows and flushes them immediately.
     ///
     /// # Errors

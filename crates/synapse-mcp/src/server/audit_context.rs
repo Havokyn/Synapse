@@ -7,16 +7,14 @@ use chrono::Utc;
 use rmcp::ErrorData;
 use serde_json::{Value, json};
 use synapse_core::{
-    EventSource, Observation, Profile, ProfileBackends, ProfileId, SCHEMA_VERSION, SessionId,
-    StoredAppContext, StoredAuditContext, StoredBackendPolicy, StoredEvent, StoredObservation,
-    StoredProfileHistoryEntry, StoredSession, error_codes, new_session_id,
+    EventSource, ForegroundContext, Observation, Profile, ProfileBackends, ProfileId,
+    SCHEMA_VERSION, SessionId, StoredAppContext, StoredAuditContext, StoredBackendPolicy,
+    StoredEvent, StoredObservation, StoredProfileHistoryEntry, StoredSession, error_codes,
+    new_session_id,
 };
 
 use super::SynapseService;
-use crate::{
-    m1::{current_input, mcp_error},
-    m3::AuditSessionState,
-};
+use crate::{m1::mcp_error, m3::AuditSessionState};
 
 static EVENT_AUDIT_SEQ: AtomicU32 = AtomicU32::new(0);
 static OBSERVATION_AUDIT_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -247,6 +245,29 @@ impl SynapseService {
         self.set_reflex_runtime_audit_context(Some(context))
     }
 
+    pub(super) fn current_audit_foreground(&self) -> Result<ForegroundContext, ErrorData> {
+        {
+            let state = self.m1_state()?;
+            if state.force_observe_internal {
+                return Err(mcp_error(
+                    error_codes::OBSERVE_INTERNAL,
+                    "forced observe internal error",
+                ));
+            }
+            if state.force_no_perception {
+                return Err(mcp_error(
+                    error_codes::OBSERVE_NO_PERCEPTION_AVAILABLE,
+                    "no perception source is available",
+                ));
+            }
+            if let Some(input) = &state.synthetic {
+                return Ok(input.foreground.clone());
+            }
+        }
+        synapse_a11y::current_foreground_context()
+            .map_err(|error| mcp_error(error.code(), error.to_string()))
+    }
+
     fn ensure_audit_session_started(&self) -> Result<SessionId, ErrorData> {
         let mut state = self.m3_state.lock().map_err(|_err| {
             mcp_error(
@@ -319,10 +340,9 @@ impl SynapseService {
         session_id: Option<SessionId>,
     ) -> StoredAuditContext {
         let app_context = self
-            .m1_state()
+            .current_audit_foreground()
             .ok()
-            .and_then(|state| current_input(&state, 1).ok())
-            .map(|input| app_context_for_foreground(Some(&info.profile), &input.foreground))
+            .map(|foreground| app_context_for_foreground(Some(&info.profile), &foreground))
             .or_else(|| Some(app_context_from_metadata(Some(&info.profile))));
         StoredAuditContext {
             session_id,
@@ -346,10 +366,9 @@ impl SynapseService {
     }
 
     fn current_app_context(&self, profile: Option<&Profile>) -> Option<StoredAppContext> {
-        self.m1_state()
+        self.current_audit_foreground()
             .ok()
-            .and_then(|state| current_input(&state, 1).ok())
-            .map(|input| app_context_for_foreground(profile, &input.foreground))
+            .map(|foreground| app_context_for_foreground(profile, &foreground))
             .or_else(|| profile.map(|profile| app_context_from_metadata(Some(profile))))
     }
 

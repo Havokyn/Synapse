@@ -146,12 +146,7 @@ impl SynapseService {
         let active_profile_id_before = runtime
             .active_profile_id()
             .map_err(|error| mcp_error(error.code(), error.to_string()))?;
-        let initial_foreground = {
-            let state = self.m1_state()?;
-            let input = crate::m1::current_input(&state, 1)?;
-            drop(state);
-            input.foreground
-        };
+        let initial_foreground = self.current_audit_foreground()?;
         let (foreground, preflight) = self.preflight_action_foreground(
             tool,
             &runtime,
@@ -518,17 +513,7 @@ impl ReflexActionGate for ReflexScopeActionGate {
     ) -> Result<(), ReflexActionPermissionDenied> {
         const TOOL: &str = "reflex_dispatch";
         (|| {
-            let foreground = {
-                let state = self.m1_state.lock().map_err(|_err| {
-                    mcp_error(
-                        error_codes::OBSERVE_INTERNAL,
-                        "M1 service state lock poisoned while checking reflex dispatch scope",
-                    )
-                })?;
-                let input = crate::m1::current_input(&state, 1)?;
-                drop(state);
-                input.foreground
-            };
+            let foreground = current_reflex_action_foreground(&self.m1_state)?;
             let transition = self
                 .profile_runtime
                 .reevaluate_foreground(&foreground_window(&foreground))
@@ -549,6 +534,36 @@ impl ReflexActionGate for ReflexScopeActionGate {
         })()
         .map_err(|error| reflex_denial_from_error(&error))
     }
+}
+
+fn current_reflex_action_foreground(
+    m1_state: &super::SharedM1State,
+) -> Result<ForegroundContext, ErrorData> {
+    {
+        let state = m1_state.lock().map_err(|_err| {
+            mcp_error(
+                error_codes::OBSERVE_INTERNAL,
+                "M1 service state lock poisoned while checking reflex dispatch scope",
+            )
+        })?;
+        if state.force_observe_internal {
+            return Err(mcp_error(
+                error_codes::OBSERVE_INTERNAL,
+                "forced observe internal error",
+            ));
+        }
+        if state.force_no_perception {
+            return Err(mcp_error(
+                error_codes::OBSERVE_NO_PERCEPTION_AVAILABLE,
+                "no perception source is available",
+            ));
+        }
+        if let Some(input) = &state.synthetic {
+            return Ok(input.foreground.clone());
+        }
+    }
+    synapse_a11y::current_foreground_context()
+        .map_err(|error| mcp_error(error.code(), error.to_string()))
 }
 
 fn foreground_window(foreground: &ForegroundContext) -> synapse_profiles::ForegroundWindow {
