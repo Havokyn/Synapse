@@ -1,5 +1,18 @@
 # CURRENT STATE - Synapse
 
+## 2026-05-31T21:15:24-05:00
+- #608 `scenario(stress): 32-reflex saturation - priority, exclusive, starvation` is closed.
+  - Commit: `5873c37 fix(reflex): arbitrate saturated stateful reflexes (#608) [skip ci]`
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/608#issuecomment-4589052871
+  - Closure readback: `gh issue close 608` succeeded; refreshed issue readback shows state `CLOSED`, closed at `2026-06-01T02:14:57Z`.
+  - Post-close git readback: `git status --short --branch` is clean and `main...origin/main`.
+- Active issue is now #609 `scenario(stress): 1ms reflex tick jitter under system load`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/609#issuecomment-4589054448
+  - Issue requires proving 1ms reflex tick behavior or graceful 2ms degraded fallback under host load, with SoT readbacks from `reflex_history`, `CF_REFLEX_AUDIT`, health tick/sample fields, daemon log bytes, process/socket state, and host load counters.
+  - Required edges: idle baseline, sudden load spike, sustained CPU/GPU/capture churn, many concurrent subscribers competing, tick late >2ms threshold, plus empty/boundary/structurally invalid params.
+  - Next: inspect scheduler tick/degraded-mode paths and existing MCP surfaces, then launch an isolated repo-built daemon for #609 manual FSV.
+- Current live open queue after closing #608: #594 parent plus #595-#604 and #609-#634.
+
 ## 2026-05-31T21:12:06-05:00
 - Active issue remains #608 `scenario(stress): 32-reflex saturation - priority, exclusive, starvation`; implementation and final manual FSV evidence are now captured, with issue comment/closure next.
 - Post-compaction wake-up was completed again:

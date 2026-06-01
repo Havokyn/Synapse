@@ -2,22 +2,31 @@
 
 Resume by:
 1. Re-read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, #351, the open issue queue, and `STATE/*`.
-2. Treat the old all-clear state as stale. #594 remains the open parent context; #589/#590/#588/#585/#635/#605/#606/#607 are closed with RESOLVED evidence.
+2. Treat the old all-clear state as stale. #594 remains the open parent context; #589/#590/#588/#585/#635/#605/#606/#607/#608 are closed with RESOLVED evidence.
 3. #606 closed at commit `6975d14` with evidence comment https://github.com/ChrisRoyse/Synapse/issues/606#issuecomment-4587883204.
 4. #607 is closed with commit `8ce49e4` and RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/607#issuecomment-4588670440.
-5. Active issue is #608: `scenario(stress): 32-reflex saturation - priority, exclusive, starvation`.
+5. #608 is closed with commit `5873c37` and RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/608#issuecomment-4589052871.
+6. Active issue is #609: `scenario(stress): 1ms reflex tick jitter under system load`.
+   - START comment: https://github.com/ChrisRoyse/Synapse/issues/609#issuecomment-4589054448
+   - Issue body requires registering active reflexes, loading the host, monitoring `REFLEX_TICK_LATE` events and 2ms degraded fallback engagement, and reading SoTs from `reflex_history`, `CF_REFLEX_AUDIT`, health tick/sample fields, daemon logs, process/socket state, and host load counters.
+   - Edges: idle baseline, sudden load spike, sustained CPU/GPU/capture churn, many concurrent subscribers competing, tick late >2ms threshold, plus empty/boundary/structurally invalid params.
+7. Next #609 step: inspect scheduler tick/degraded-mode code and MCP surfaces, then launch an isolated repo-built daemon for manual FSV.
+
+Closed #608 reference notes:
+
+- Issue #608: `scenario(stress): 32-reflex saturation - priority, exclusive, starvation`.
    - START comment: https://github.com/ChrisRoyse/Synapse/issues/608#issuecomment-4588672100
    - Issue body requires registering 32 concurrent reflexes, 33rd fail-closed, priority/exclusive arbitration, starvation detection after `STARVATION_AFTER`, and SoT readbacks from `reflex_list`, `reflex_history`, and `CF_REFLEX_AUDIT`.
    - Edges: priority `0` and `1000` bounds, duplicate registration, cancel mid-fire, all 32 firing same tick / sample cap, empty/boundary/structurally invalid params.
-6. Current #608 implementation status:
+- Current #608 implementation status:
    - Patch is in the worktree for `synapse-reflex` exclusive same-device-class arbitration, combo conflict resources, duplicate reflex-id validation, duplicate active runtime registration rejection, and health `sample_count`/`sample_limit` readback.
    - Additional root-cause patch after the latest compaction: stateful controllers now participate in conflict arbitration before dispatch, and starvation losses are aggregated once per tick. This fixes the observed real-runtime defect where two exclusive `aim_track` reflexes both fired continuously.
    - Supporting checks already passed: `cargo fmt`, `cargo fmt --check`, `cargo check -p synapse-reflex`, `cargo check -p synapse-mcp`, `cargo check -p synapse-core`, full `cargo test -p synapse-reflex --test scheduler_behavior -- --nocapture`, focused stateful/exclusive/priority/cancel/duplicate tests, MCP `reflex_register_schema_defaults_and_edges`, schema sanitize tests, and `cargo build --release -p synapse-mcp`. Parallel scheduler test attempts that hit `LNK1104` were rerun sequentially and passed.
-7. Final #608 manual FSV status:
+- Final #608 manual FSV status:
    - Cap/invalid daemon PID `34784` on `127.0.0.1:7823` is stopped/closed. Evidence: strict Inspector `tools/list` 80; duplicate fail-closed; 32 accepted; 33rd rejected; priority 0/1000 accepted; empty/invalid edges rejected; final cleanup active 0, disabled 32, `CF_REFLEX_AUDIT=64`, `CF_ACTION_LOG=1`.
    - Starvation daemon PID `59948` on `127.0.0.1:7824` is stopped/closed. Evidence: two exclusive `aim_track` reflexes; winner fired, loser starved with `REFLEX_STARVED` and `mouse_cursor`; canceling winner let loser fire.
    - Same-tick daemon PID `70124` on `127.0.0.1:7825` was cleaned after compaction. Evidence: unauth health 401; strict Inspector `tools/list`; 32 hold_button reflexes all fired exactly once on tick 0; daemon log `dispatched_actions=32`; sample ring 4096/4096; cleanup `release_all` neutralized 3 pads; after-read active 0, disabled 32, `CF_REFLEX_AUDIT=64`, `CF_ACTION_LOG=1`; PID absent and port closed.
-8. Next #608 step: final diff/readback checks, commit with `[skip ci]`, push, post #608 RESOLVED evidence, close #608, update state for closure, then refresh the open queue.
+- #608 was committed as `5873c37`, evidence was posted, issue was closed, and `main` was pushed with `[skip ci]`.
 
 Closed #607 reference notes:
 
