@@ -58,11 +58,11 @@ pub(super) fn deny_login_screen_action(
     ErrorData::new(
         ErrorCode(-32099),
         format!(
-            "{tool} denied because the visible EverQuest UI is the login screen, not in-world gameplay"
+            "{tool} denied because the visible EverQuest UI is a login/account gate, not in-world gameplay"
         ),
         Some(json!({
             "code": error_codes::SAFETY_PROFILE_ACTION_DENIED,
-            "reason": "everquest_login_screen_visible",
+            "reason": "everquest_login_or_account_gate_visible",
             "action_preflight": preflight,
         })),
     )
@@ -85,6 +85,18 @@ fn login_signal_names(input: &ObservationInput) -> Vec<String> {
     }
     if raw.contains("login") || raw.contains("log in") {
         signals.push("login_button".to_owned());
+    }
+    if raw.contains("eula") || raw.contains("end user license agreement") {
+        signals.push("eula_agreement".to_owned());
+    }
+    if raw.contains("terms of service") || raw.contains("privacy policy") {
+        signals.push("terms_or_privacy_policy".to_owned());
+    }
+    if raw.contains("i agree") {
+        signals.push("agree_button".to_owned());
+    }
+    if raw.contains("i decline") {
+        signals.push("decline_button".to_owned());
     }
     if signals.is_empty() {
         signals.push("login_hud_match".to_owned());
@@ -219,6 +231,36 @@ mod tests {
         assert_eq!(context.status, "login_screen");
         assert!(context.login_screen_visible);
         assert!(!context.in_world);
+    }
+
+    #[test]
+    fn ui_context_detects_eula_account_gate_without_persisting_text() {
+        let mut input = base_input();
+        input.hud.by_name.insert(
+            "everquest.login_screen_text".to_owned(),
+            hud_text("Daybreak End User License Agreement I DECLINE I AGREE"),
+        );
+
+        let context = everquest_ui_context_from_input(&input);
+
+        assert_eq!(context.status, "login_screen");
+        assert!(context.login_screen_visible);
+        assert!(!context.in_world);
+        assert!(
+            context
+                .login_signal_names
+                .contains(&"eula_agreement".to_owned())
+        );
+        assert!(
+            context
+                .login_signal_names
+                .contains(&"agree_button".to_owned())
+        );
+        assert!(
+            context
+                .login_signal_names
+                .contains(&"decline_button".to_owned())
+        );
     }
 
     fn base_input() -> ObservationInput {

@@ -783,9 +783,10 @@ hunger/thirst timestamps as compact booleans/timestamps. Casting posture can be
 proven by recent physical spell-cast log signals such as
 `You begin casting ...` or `Your <spell> spell fizzles!`; those own-player
 signals are stored only as compact cast/posture summaries and timestamps.
-The UI-context guard treats the visible EverQuest login screen as not in-world
-and records only signal names such as username/password/login labels plus
-focused-field lengths; raw account text or credentials are never persisted.
+The UI-context guard treats the visible EverQuest login/account gate as not
+in-world and records only signal names such as username/password/login,
+quick-connect, EULA/terms/agreement labels, and focused-field lengths; raw
+account text, credentials, or legal text are never persisted.
 
 This row is a readiness verdict, not an action surface. It can prove current
 blockers such as `mana_below_combat_floor`, `food_drink_absent`,

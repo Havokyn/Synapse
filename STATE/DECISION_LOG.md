@@ -508,3 +508,33 @@ Evidence:
 
 Outcome:
 - User can ignore those windows if seen again; the agent should close any leaked fixture window after use and continue the active issue queue.
+
+# 2026-06-01T16:02:28-05:00 - #624 EULA/account gate is fail-closed; continue ContextGraph warm ingest
+
+Decision: Keep the EverQuest EULA/account agreement as an operator-only boundary and continue only read-only/safe #624 setup plus storage/bridge evidence until the operator personally responds to the agreement.
+
+Evidence:
+- Fresh foreground and MCP observations show EverQuest is visible at the Daybreak account/legal agreement, not in-world gameplay.
+- The #624 patch expands the login/account gate to detect EULA, terms/privacy, I Agree, and I Decline without persisting raw legal/account text.
+- Isolated repo-built daemon PID `34624` on `127.0.0.1:7853` passed strict Inspector `tools/list` with 80 tools and all #624 tools present.
+- Real MCP `act_keymap inventory` and `everquest_loc_probe` were denied with reason `everquest_login_or_account_gate_visible`; separate storage rows and unchanged EQ log bytes prove no gameplay/chat command was sent.
+- ContextGraph local prerequisite was repaired enough that strict direct tool-list works and Synapse's bridge reached `store_memory`; the remaining failure was `Embedding models are still loading`, so the next reversible local action is a warm ingest with `no_warm=false` and a longer timeout.
+
+Outcome:
+- Do not click agreement/login controls.
+- Rerun `everquest_contextgraph_ingest` warm through the real Synapse MCP daemon, then verify storage and ContextGraph file SoTs before search.
+
+# 2026-06-01T16:24:00-05:00 - #624 safe chain complete; in-world path is operator-gated
+
+Decision: Treat #624's in-world happy path as blocked by an exact operator-only account/legal action, while preserving the completed reversible evidence for the EULA guard, ContextGraph bridge, and safe storage/modeling chain.
+
+Evidence:
+- Warm wired `everquest_contextgraph_ingest` and `everquest_contextgraph_search` both succeeded through real Synapse MCP. Search row `everquest/contextgraph_search/v1/everquest.live/issue624-synth-search-wired-warm` read back from active `CF_KV` with one citation to fingerprint `d5d91675-9303-4b0f-bdd6-2f0326abffdb` and export SHA256 `7386a7f8b26cd6fc8e262813eff9167785d13610aaf8e68bbd9fcce3949dc2ef`.
+- ContextGraph storage directory changed after search with new SST/log/manifest files; `LOG` SHA256 readback is `FF68150590233C0E101CAD5D071EEC8AD08A81061429B7F95429CD85A9FAB72E`.
+- Active Synapse safe-chain tools persisted current state, map sensor, outcome rows, hazard/safe memories, planner consult, planner guard, route plan, world-model transition, and world summary; final `CF_KV=33` and direct DB-byte search found the expected `issue624-*` keys.
+- Physical EQ log SoT remained length `2464677`, SHA256 `E563074084A7F5A291AC6FBF77746B993AB086F747C6C111C39503B6BF475368`; physical map SoT `nektulos.txt` line `5974` contains `To_Neriak`.
+- Edges failed closed: account/EULA gate action denial, non-EverQuest foreground, visible unsent chat text, structurally invalid planner source ref, absent valid-shaped EQ log path, and EverQuest reality audit profile mismatch.
+
+Outcome:
+- Final supporting checks and cleanup passed; release binary SHA256 `31D62B2891F4AA17F7139BF4A5E52276521F7009E7B2C428D6FAFF15CBF5A374`.
+- Post #624 BLOCKED evidence: the remaining action is for the operator to personally review/respond to the Daybreak EULA/account agreement and put the character in-world; the agent must not click legal/account/login controls.

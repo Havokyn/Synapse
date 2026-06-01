@@ -110,12 +110,14 @@ ambiguous or contradictory XP percentage, the agent must treat the visible crop
 as the SoT, fail closed for the numeric claim, and record the OCR mismatch on
 #495/#500.
 
-`everquest.login_screen_text` is a signal-only guard for the current login
-screen failure mode. It scans visible labels such as username, password, login,
-and quick connect, but runtime rows must persist only compact signal names and
-focused-field lengths, never raw account text or credentials. If this signal is
-visible, EverQuest action preflight and survival readiness must treat the client
-as not in-world: no Inventory, hotbar, movement, combat, merchant, or chat
+`everquest.login_screen_text` is a signal-only guard for the current login and
+account-gate failure modes. It scans visible labels such as username, password,
+login, quick connect, EULA, end-user license agreement, terms of service,
+privacy policy, I Agree, and I Decline, but runtime rows must persist only
+compact signal names and focused-field lengths, never raw account text,
+credentials, or legal text. If this signal is visible, EverQuest action
+preflight and survival readiness must treat the client as not in-world: no
+Inventory, hotbar, movement, combat, merchant, agreement, login, or chat
 recovery action may be counted as gameplay mutation until a separate visible UI
 readback proves the operator-owned character is back in-world.
 

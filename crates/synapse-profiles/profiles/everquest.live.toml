@@ -65,7 +65,7 @@ confidence_threshold = 0.40
 [[hud]]
 name = "everquest.login_screen_text"
 extractor = { kind = "winrt_ocr" }
-parser = { kind = "regex", pattern = "(?is)(username|password|quick\\s+connect|login)", group = 1 }
+parser = { kind = "regex", pattern = "(?is)(username|password|quick\\s+connect|login|eula|end\\s+user\\s+license\\s+agreement|terms\\s+of\\s+service|privacy\\s+policy|i\\s+agree|i\\s+decline)", group = 1 }
 region = { kind = "fraction_of_window", x = 0.39, y = 0.31, w = 0.23, h = 0.36 }
 confidence_threshold = 0.60
 
@@ -154,7 +154,7 @@ benchmark_id = "everquest.live.level2"
 "audit.tags" = "game:everquest,server:frostreaver,goal:level2,moat:profile-audit"
 "capability.observe.foreground" = "profile_list+observe foreground profile_id"
 "capability.observe.hud" = "everquest.level_text, everquest.next_level_label, and everquest.next_level_percent from the visible Inventory character panel; everquest.map_window_text is a bounded top-left OCR crop for the saved EverQuest map UI title/search/labels layout; visible crop remains the SoT when numeric OCR is ambiguous"
-"capability.observe.login_guard" = "everquest.login_screen_text is a redacted signal-only OCR guard; if username/password/login/quick-connect labels are visible, action preflight and readiness must treat the client as not in-world"
+"capability.observe.login_guard" = "everquest.login_screen_text is a redacted signal-only OCR guard; if username/password/login/quick-connect or EULA/terms/agreement labels are visible, action preflight and readiness must treat the client as not in-world"
 "capability.world_model" = "everquest_current_state,route_plan,map_sensor,planner_guard,world_summary,world_model_record/inspect,trajectory/export,action_prior"
 "capability.reality_delta" = "reality_baseline,observe_delta,reality_audit; baseline+deltas guide context, full audits repair drift before movement/combat"
 "capability.contextgraph_memory" = "exported compact/redacted EverQuest episodes with provenance feed ContextGraph retrieval; Synapse storage remains gameplay SoT"

@@ -1,5 +1,80 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T16:24:00-05:00
+- Wake-up after compaction was completed and reconciled against live GitHub/git/MCP state.
+- User's `Issue615FanoutTarget` question was answered and rechecked:
+  - no live #615 fixture window or Synapse element is visible now;
+  - those windows are old #615 WinForms UIA fanout stress fixtures, not product UI.
+- Active issue is #624:
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/624#issuecomment-4596141027
+  - open, assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+  - live open queue: #594 plus #595-#604 and #624-#634.
+- Current git/worktree:
+  - branch `main`, HEAD `841679c docs(state): record issue 624 start [skip ci]`.
+  - modified files: `STATE/*`, `crates/synapse-mcp/src/server/everquest_ui_context.rs`, `crates/synapse-profiles/profiles/everquest.live.toml`, `docs/computergames/05_mcp_tool_surface.md`, `docs/computergames/26_everquest_live_eval.md`.
+- #624 implementation patch:
+  - EverQuest account/login gate now detects EULA, end-user license agreement, terms/privacy, `I AGREE`, and `I DECLINE`.
+  - Action denial reason is `everquest_login_or_account_gate_visible`.
+  - Docs describe account/legal gates as non-in-world and raw legal/account text as non-persisted.
+- #624 evidence already captured:
+  - Isolated repo-built daemon PID `34624`, bind `127.0.0.1:7853`, binary SHA256 `3BA384BF72EC44DC1106235A4809CEDCEBFB056353527FEA57B6D109C14E3AB7`, strict Inspector tools-list 80 tools.
+  - EULA/account-gate behavior: real MCP `observe`, `everquest_survival_readiness`, `everquest_chat_input_state`, `act_keymap inventory`, `everquest_loc_probe`, and `everquest_current_state`; denied action/log readbacks prove no gameplay/chat input was sent and EQ log bytes stayed SHA256 `E563074084A7F5A291AC6FBF77746B993AB086F747C6C111C39503B6BF475368`.
+  - Synthetic domain/trajectory/episode export already exists; episode export SHA256 `7386a7f8b26cd6fc8e262813eff9167785d13610aaf8e68bbd9fcce3949dc2ef`.
+  - ContextGraph ingest/search succeeded through real wired Synapse MCP:
+    - ingest row `everquest/contextgraph_ingest/v1/everquest.live/7386a7f8b26cd6fc8e262813eff9167785d13610aaf8e68bbd9fcce3949dc2ef/issue624-synth-trajectory.issue624-synth-consider`
+    - fingerprint `d5d91675-9303-4b0f-bdd6-2f0326abffdb`
+    - search row `everquest/contextgraph_search/v1/everquest.live/issue624-synth-search-wired-warm`
+    - search result/citation count `1`, same fingerprint and export hash.
+  - Active safe/read-only storage chain persisted current state, map sensor, four outcome rows, hazard memory, safe-area memory, planner consult, planner guard, route plan, world-model transition, and world summary. Final `storage_inspect` read `CF_KV=33`.
+  - Physical SoTs: EQ log length `2464677`, SHA256 `E563074084A7F5A291AC6FBF77746B993AB086F747C6C111C39503B6BF475368`; `maps\nektulos.txt` has `To_Neriak` at line `5974`.
+- Captured #624 edges:
+  - login/account EULA gate denial;
+  - non-EverQuest foreground;
+  - synthetic visible unsent chat text guard fail;
+  - structurally-invalid planner source ref fail-closed;
+  - absent valid-shaped EQ log path fail-closed with no `CF_KV` change;
+  - reality audit profile mismatch fail-closed.
+- Cleanup and final checks:
+  - Real Inspector `release_all` on isolated daemon `127.0.0.1:7853` returned zero held inputs.
+  - PID `34624` was stopped; process and port `7853` readbacks returned no rows.
+  - Passed: `cargo fmt --check`; focused UI-context tests; EverQuest profile parse test; schema sanitize; tools-list; `cargo check -p synapse-mcp -j 2`; `scripts\check_docs.ps1`; release build; `git diff --check`.
+  - Release binary SHA256 `31D62B2891F4AA17F7139BF4A5E52276521F7009E7B2C428D6FAFF15CBF5A374`, length `46392320`.
+- Exact next steps:
+  1. Commit with `[skip ci]`.
+  2. Post #624 evidence and mark #624 blocked on the exact operator-only action: operator must personally review/respond to the Daybreak EULA/account agreement and put the character in-world.
+  3. Refresh the queue and continue with the next open issue.
+
+## Current Resume Point - 2026-06-01T16:02:28-05:00
+- Wake-up after compaction is complete and reconciled against actual disk/GitHub/process/MCP state.
+- User's `Issue615FanoutTarget` concern was rechecked:
+  - no live Issue615/fanout process or Synapse element exists now;
+  - foreground is EverQuest;
+  - `.runs\615\target\issue615_target.ps1` confirms the buttons are only a temporary #615 WinForms UIA fixture that mutates an in-window `ItemPanel` or closes itself.
+- Active issue is #624:
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/624#issuecomment-4596141027
+  - open, assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+  - live open queue: #594 plus #595-#604 and #624-#634.
+- Git readback:
+  - branch `main`
+  - HEAD `841679c docs(state): record issue 624 start [skip ci]`
+  - modified files are the #624 EULA/account-gate patch in `everquest_ui_context.rs`, `everquest.live.toml`, and the two EverQuest docs.
+- #624 isolated daemon is still running:
+  - PID `34624`, bind `127.0.0.1:7853`
+  - binary `.runs\624\eula-guard-fsv-20260601T2034\bin\synapse-mcp-runtime.exe`
+  - binary SHA256 `3BA384BF72EC44DC1106235A4809CEDCEBFB056353527FEA57B6D109C14E3AB7`
+  - strict Inspector tools-list readback: 80 tools, missing none, all #624 tools present.
+- Verified #624 evidence directory:
+  - `.runs\624\eula-guard-fsv-20260601T2034`
+  - EULA/account-gate guard FSV shows real MCP `observe`, `everquest_survival_readiness`, `everquest_chat_input_state`, `act_keymap`, `everquest_loc_probe`, and `everquest_current_state` calls; separate storage/log readbacks prove actions were denied and EQ log bytes did not change.
+  - Synthetic domain/trajectory/episode export rows exist; exported episode file SHA256 is `7386a7f8b26cd6fc8e262813eff9167785d13610aaf8e68bbd9fcce3949dc2ef`.
+- ContextGraph next action:
+  1. Rerun `everquest_contextgraph_ingest` through the isolated daemon with `no_warm=false`, storage under the data root, wrapper `.runs\issue529\context-graph-mcp-wsl.cmd`, and a long timeout.
+  2. If it succeeds, run separate `storage_inspect` and inspect ContextGraph storage directory/file SoTs.
+  3. Then run `everquest_contextgraph_search` through real MCP and inspect returned provenance plus persisted search audit rows.
+  4. If it fails, inspect the exact child stderr/root cause and continue reversible local setup.
+- Operator-only boundary:
+  - EQ is visible at the Daybreak EULA/account agreement. Do not click I Agree, I Decline, login, character select, or chat/account fields. Full in-world #624 happy path remains unavailable until the operator personally reviews/responds to the agreement and places the character in-world.
+
 ## Current Resume Point - 2026-06-01T15:16:27-05:00
 - Wake-up after compaction is complete. Required doctrine/state/GitHub/git/MCP context was re-read and reconciled.
 - User's `Issue615FanoutTarget` concern was checked:
