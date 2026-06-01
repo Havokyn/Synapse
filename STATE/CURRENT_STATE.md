@@ -1,5 +1,18 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T09:31:17-05:00
+- #615 `scenario(stress): reality high-fanout delta coalescing + snapshot-budget-exceeded` is closed.
+  - Commit: `fad86c9 fix(mcp): harden reality fanout coalescing (#615) [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/615#issuecomment-4593549908
+  - Closure readback: issue state `CLOSED`, closed at `2026-06-01T14:30:47Z`.
+- Post-close git readback: `main...origin/main`, clean, HEAD `fad86c9`.
+- Refreshed live open queue now lists #594 plus #595-#604 and #616-#634.
+- Active issue is now #616 `scenario(stress): reality drift injection -> reality_audit rebase`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/616#issuecomment-4593554251
+  - #616 requires real MCP `reality_baseline`, `observe_delta`, and `reality_audit` triggers proving drift verdicts and persisted `CF_KV/reality/audit/*` rows match the actual physical divergence from the assumed epoch/hash.
+  - Required edges: no drift / InSync, source unavailable, minor vs major boundary, audit immediately after rebase, empty/no-change, and structurally invalid params.
+- Next: inspect `reality_audit` implementation/tests and plan an isolated repo-built daemon FSV run for drift injection.
+
 ## 2026-06-01T09:28:31-05:00
 - Active issue #615 `scenario(stress): reality high-fanout delta coalescing + snapshot-budget-exceeded` has implementation, manual MCP FSV, cleanup, final supporting checks, and diff review complete; commit/push/comment/close are next.
 - Patch in `crates/synapse-mcp/src/server/reality.rs`:

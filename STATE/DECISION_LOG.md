@@ -236,3 +236,16 @@ Outcome:
 - Added supporting regressions for incidental changes below threshold, exact threshold coalescing, and mixed structure+field churn.
 - Manual MCP FSV with repo-built daemon PID `64500` on `127.0.0.1:7843` proved Show7 per-element, Show8 coalesced, Rename8 coalesced, Mixed8 coalesced, Show80/Clear snapshot-budget rebase with no row growth, empty/no-change, invalid depth, and disappear8 behavior.
 - Final checks and release build passed; next action is commit, RESOLVED comment, and close #615.
+
+# 2026-06-01T09:31:17-05:00 - #616 follows #615 in the reality-delta campaign
+
+Decision: Take #616 next after closing #615 because it is the next open reality-delta child under #594.
+
+Evidence:
+- `gh issue view 615` read back `state=CLOSED`, `closedAt=2026-06-01T14:30:47Z`.
+- Live queue after #615 closure lists #594 plus #595-#604 and #616-#634 open.
+- #616 is open, has no prior comments, and requires `reality_audit` drift injection and rebase evidence.
+- Posted #616 START comment at https://github.com/ChrisRoyse/Synapse/issues/616#issuecomment-4593554251.
+
+Outcome:
+- Next action is code/test inspection for `reality_audit`, followed by repo-built isolated daemon setup and manual MCP FSV.

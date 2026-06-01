@@ -74,3 +74,4 @@
 - 2026-06-01T08:17:00-05:00 iteration #614-final-checks: final fmt/check/reality tests/schema sanitize/release build/diff check passed, diff review completed, and release synapse-mcp SHA256 is 18F213F8799AFA64ACCB31F3C3F07F98D40ADF3E081D3C05B256A8FC957BEED4.
 - 2026-06-01T08:19:00-05:00 iteration #614-close-615-start: pushed #614 commit 72918cd, posted RESOLVED evidence, closed #614, refreshed queue, and posted #615 START.
 - 2026-06-01T09:28:31-05:00 iteration #615-final-fsv-checks: patched UIA coalescing threshold pressure, completed manual MCP FSV for Show7/Show8/Rename8/Mixed8/budget/no-change/invalid/disappear8, stopped target PID 79124 and daemon PID 64500, and passed final checks/release build.
+- 2026-06-01T09:31:17-05:00 iteration #615-close-616-start: pushed #615 commit fad86c9, posted RESOLVED evidence, closed #615, refreshed queue to #594 plus #595-#604/#616-#634, and posted #616 START.
