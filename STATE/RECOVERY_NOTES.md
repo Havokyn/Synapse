@@ -1,5 +1,24 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T16:31:30-05:00
+- #624 has been committed and pushed:
+  - commit `9de5ee3 fix(mcp): guard EverQuest account gates (#624) [skip ci]`
+  - BLOCKED evidence: https://github.com/ChrisRoyse/Synapse/issues/624#issuecomment-4596661903
+  - #624 labels read back include `status:blocked`; worktree was clean after push.
+- Active issue is #625:
+  - title `scenario(stress): EverQuest autocombat soak + survival/predictive/surprise/scorecard`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596668371
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+- Current host state:
+  - wired Synapse MCP `health` ok;
+  - foreground is VS Code, not EverQuest;
+  - #624 proved EverQuest is blocked by the Daybreak EULA/account agreement when focused, and the agent must not click legal/account/login controls.
+- Exact next actions for #625:
+  1. Inspect autocombat/readiness/predictive/surprise/action-prior implementations and tests.
+  2. Read SoTs before triggers: active storage counts, EQ log length/hash/tail, foreground/EQ state, relevant existing trajectory/domain rows.
+  3. Trigger real safe MCP calls for readiness and synthetic predictive/surprise/action-prior storage paths where possible.
+  4. If `everquest_autocombat` is blocked by account/EULA/in-world requirements, document exact operator-only action and mark #625 blocked after all reversible safe work is complete.
+
 ## Current Resume Point - 2026-06-01T16:24:00-05:00
 - Wake-up after compaction was completed and reconciled against live GitHub/git/MCP state.
 - User's `Issue615FanoutTarget` question was answered and rechecked:

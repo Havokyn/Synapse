@@ -538,3 +538,17 @@ Evidence:
 Outcome:
 - Final supporting checks and cleanup passed; release binary SHA256 `31D62B2891F4AA17F7139BF4A5E52276521F7009E7B2C428D6FAFF15CBF5A374`.
 - Post #624 BLOCKED evidence: the remaining action is for the operator to personally review/respond to the Daybreak EULA/account agreement and put the character in-world; the agent must not click legal/account/login controls.
+
+# 2026-06-01T16:31:30-05:00 - #625 follows #624 after operator-gated block
+
+Decision: Take #625 next because #624 is blocked only on an operator-owned Daybreak account/legal action and the broader open-issue queue still has reversible work.
+
+Evidence:
+- #624 readback shows `status:blocked` and evidence comment https://github.com/ChrisRoyse/Synapse/issues/624#issuecomment-4596661903.
+- `git status --short --branch` read clean after pushing commit `9de5ee3`.
+- Live open queue still includes #625 and later issues.
+- #625 requires EverQuest readiness/autocombat/predictive/surprise/action-prior evidence.
+- Posted #625 START comment at https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596668371 and labeled it `status:in-progress`, `agent:codex`.
+
+Outcome:
+- Inspect #625 implementations and complete all safe/reversible evidence before deciding whether live autocombat is blocked by the same operator-only EULA/account action.

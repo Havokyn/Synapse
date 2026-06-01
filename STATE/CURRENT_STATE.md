@@ -1,5 +1,26 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T16:31:30-05:00
+- #624 is open with `status:blocked` on a specific operator-only action.
+  - BLOCKED evidence comment: https://github.com/ChrisRoyse/Synapse/issues/624#issuecomment-4596661903
+  - Commit pushed: `9de5ee3 fix(mcp): guard EverQuest account gates (#624) [skip ci]`.
+  - Issue labels read back include `status:blocked`; `status:in-progress` was removed.
+  - Worktree was clean after the push.
+- Active issue is now #625 `scenario(stress): EverQuest autocombat soak + survival/predictive/surprise/scorecard`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596668371
+  - #625 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - Live foreground readback is VS Code (`profile_id=vscode`), not EverQuest; active wired Synapse MCP `health` is ok.
+- #625 acceptance requires real MCP triggers and separate SoT readbacks for:
+  - `everquest_survival_readiness`;
+  - `everquest_autocombat` sustained/safe target loop;
+  - `everquest_predictive_model_fit` / `everquest_predictive_model_predict`;
+  - `everquest_surprise_detect`;
+  - `everquest_action_prior_record` / `everquest_action_prior_scorecard`;
+  - SoTs: EQ log combat/xp bytes, HUD HP/mana readback, `CF_KV/everquest/*`, and `CF_ACTION_LOG`.
+- Current working assumption for #625:
+  - Live autocombat itself is likely gated by the same Daybreak EULA/account operator-only action as #624.
+  - Continue reversible/safe work first: inspect implementations/tests/docs, verify readiness denial, and exercise predictive/surprise/action-prior storage paths with known synthetic rows if available.
+
 ## 2026-06-01T16:24:00-05:00
 - Required wake-up context was re-read after compaction:
   - `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`
