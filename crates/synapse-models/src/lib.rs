@@ -41,12 +41,14 @@ impl Default for DetectOpts {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetectionFrame {
     pub frame_seq: u64,
     pub width: u32,
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rgb: Vec<u8>,
 }
 
 impl DetectionFrame {
@@ -60,6 +62,29 @@ impl DetectionFrame {
             return Err(detection_no_frame(format!(
                 "frame {} has invalid dimensions {}x{}",
                 self.frame_seq, self.width, self.height
+            )));
+        }
+        let expected = usize::try_from(self.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(self.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| {
+                detection_no_frame(format!(
+                    "frame {} dimensions {}x{} overflow RGB byte length",
+                    self.frame_seq, self.width, self.height
+                ))
+            })?;
+        if self.rgb.len() != expected {
+            return Err(detection_no_frame(format!(
+                "frame {} has {} RGB bytes, expected {expected} for {}x{}",
+                self.frame_seq,
+                self.rgb.len(),
+                self.width,
+                self.height
             )));
         }
         Ok(self)

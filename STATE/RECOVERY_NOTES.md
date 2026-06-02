@@ -1,5 +1,116 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T05:36:10-05:00
+- Active issue #598 has implementation, accepted manual MCP/SoT FSV, cleanup, final supporting checks, release build/readback, and diff review complete.
+- Main accepted run: `.runs\598\detection-fsv-20260602T0513`.
+  - Daemon PID `28444` on `127.0.0.1:7872`, release SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`, strict Inspector `tools/list=80`, initial storage all zeroes.
+  - Covered pixel_only still detection, moving track persistence/velocity, hybrid detection, `find cat`, black empty frame, leave/re-enter reacquire, confidence floor, and structurally invalid missing `mode` params with before/after storage.
+  - Visual screenshot evidence: `06_pixel_still_screenshot.png`, SHA256 `8574EB0B4B18281FC47BCDA075F58EA7D90690BDAED48039E7D4E2633BDDB2C0`.
+- Cap accepted run: `.runs\598\detection-cap-fsv-20260602T0523`.
+  - First launch attempt rejected due correct `SHELL_PATTERN_TOO_BROAD` fail-closed setup error.
+  - Relaunched daemon PID `67068` on `127.0.0.1:7873`, strict Inspector `tools/list=80`, issue-local profile `issue598.cap` with `max_detections=2`, and storage readback persisted exactly 2 detections from the large grid.
+- Cleanup done:
+  - `release_all` zero on both daemons;
+  - stopped daemons and target;
+  - ports `7872`/`7873` closed and no `Issue598DetectionTarget` window remains.
+- Final supporting checks passed:
+  - `cargo fmt --check`;
+  - `git diff --check` with line-ending warnings only;
+  - focused tracker/class-filter/manual-mode tests;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo check -p synapse-models -p synapse-mcp -j 2`;
+  - schema sanitize and `m4_tools_list`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release binary: `target\release\synapse-mcp.exe`, length `46708736`, SHA256 `32968BB49188230EC41C2DAD5822B6B4E2A9405522DC3D4501719FBA0BEADCE6`, timestamp `2026-06-02T10:35:24.2191556Z`.
+- Exact next actions:
+  1. Commit `fix(mcp): run RT-DETR detection in observe/find (#598) [skip ci]`.
+  2. Push, post RESOLVED evidence to #598, close #598, remove stale labels, refresh queue, then take #599 unless GitHub changed.
+
+## Current Resume Point - 2026-06-02T05:28:20-05:00
+- Superseded by the 05:36 final-check checkpoint above.
+
+## Current Resume Point - 2026-06-02T05:12:31-05:00
+- Active issue remains #598.
+- Rejected first isolated run `.runs\598\detection-fsv-20260602T0458` as final acceptance evidence after it exposed two setup/product facts:
+  - isolated `LOCALAPPDATA` needed the RT-DETR model copied into `.runs\598\...\localappdata\synapse\models\rtdetr_v2_s_coco.onnx`; hash readback matched the registry;
+  - old `STALE_TRACK_MS=1500` pruned tracks between strict Inspector observations, causing moving cats to reacquire track IDs instead of producing velocity.
+- Patch now applied:
+  - `STALE_TRACK_MS=3000`;
+  - systemspec docs updated accordingly.
+- Checks after patch passed:
+  - `cargo fmt --check`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp tracker_ -- --nocapture`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Current release binary:
+  - `C:\code\Synapse\target\release\synapse-mcp.exe`;
+  - length `46708736`;
+  - SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`;
+  - `LastWriteTimeUtc=2026-06-02T10:12:23Z`.
+- Target window PID `74240` is still live and can be reused or restarted; title `Issue598DetectionTarget`.
+- Exact next actions:
+  1. Start fresh post-patch isolated daemon on a fresh port with fresh DB/log/appdata/localappdata.
+  2. Copy verified RT-DETR model into that run's isolated `LOCALAPPDATA\synapse\models` and read SHA256 before observing.
+  3. Verify process/socket/binary, unauth/auth health, strict Inspector `tools/list`.
+  4. Rerun manual #598 FSV: pixel_only still, pixel_only moving track/velocity, hybrid mode, `find` by `cat`, leave/re-enter after >3000 ms, confidence floor, max cap, black frame, structural invalid.
+
+## Current Resume Point - 2026-06-02T04:56:41-05:00
+- Active issue remains #598.
+- The #598 detection patch has passed supporting checks and release build.
+- Current release binary:
+  - `C:\code\Synapse\target\release\synapse-mcp.exe`;
+  - length `46708736`;
+  - SHA256 `696E42B2CA5B590A5605950BC47A37F5E656307F9D950D14B7AACA7E4501AE01`;
+  - `LastWriteTimeUtc=2026-06-02T09:56:34Z`.
+- Supporting checks passed after the latest edits:
+  - `cargo fmt --check`;
+  - focused tracker/class-filter/manual-mode tests;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo check -p synapse-models -p synapse-mcp -j 2`;
+  - schema sanitize and `m4_tools_list`;
+  - systemspec contradiction scans;
+  - `git diff --check` with line-ending warnings only;
+  - release build.
+- Docs now reflect live detector invocation and `DetectionFrame.rgb`; no systemspec stale detector-only-synthetic claim remains.
+- Exact next actions:
+  1. Create `.runs\598\<run-id>` with isolated `db`, `logs`, `appdata`, `localappdata`, and token.
+  2. Start `target\release\synapse-mcp.exe` in HTTP mode on the next free localhost port.
+  3. Read process table, binary path/hash, socket listener, unauth `/health=401`, auth `/health ok=true`.
+  4. Run strict MCP Inspector `tools/list`; required tools: `set_perception_mode`, `observe`, `find`, `storage_inspect`, `release_all`.
+  5. Launch deterministic moving target and proceed with #598 manual MCP/SoT FSV.
+
+## Current Resume Point - 2026-06-02T04:46:11-05:00
+- Active issue remains #598:
+  - title `scenario(stress): detection + entity tracking on fast-moving scene (pixel_only/hybrid)`;
+  - START comment https://github.com/ChrisRoyse/Synapse/issues/598#issuecomment-4600966276;
+  - assigned to `ChrisRoyse`, labels include `status:in-progress` and `agent:codex`.
+- Wake-up after compaction was rerun and reconciled:
+  - doctrine files, `STATE/*`, #351/#594/#598, live open queue, git status/log, and wired configured MCP health/storage/observe/find were read;
+  - configured MCP is alive but still an old installed stdio daemon with `detection_status=disabled`; do not use it as acceptance for #598.
+- Current #598 patch:
+  - `synapse-models` now carries RGB frame bytes through `DetectionFrame` and decodes RT-DETR ONNX output into detections;
+  - `synapse-mcp` now runs detection during `observe`/`find` for effective `pixel_only`/`hybrid`, defaults to the registered RT-DETR model, fails closed on capture/model/inference errors, and assigns tracked entities with stable `track_id` and `velocity_px_s`;
+  - explicit `set_perception_mode pixel_only/hybrid` now survives profile runtime application; `auto` clears the manual override.
+- Local prerequisite readbacks already done:
+  - pinned RT-DETR model exists at `C:\Users\hotra\AppData\Local\synapse\models\rtdetr_v2_s_coco.onnx`;
+  - SHA256 `583A236AC21C95A7FD94F284FC21485E42355BFEF82C27011BA78FBC09EE87E2`;
+  - local ONNX Runtime probe successfully decoded the official COCO cats image.
+- Supporting checks already passed:
+  - `cargo fmt`;
+  - `cargo check -p synapse-models -j 2`;
+  - `cargo check -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp tracker_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp runtime_apply -- --nocapture`.
+- Exact next actions:
+  1. Update systemspec docs that still say detectors are not invoked.
+  2. Run `cargo fmt --check`, schema sanitize, `m4_tools_list`, touched-crate checks/tests, and `cargo build --release -p synapse-mcp -j 2`.
+  3. Launch an isolated repo-built #598 HTTP daemon from the release binary on a fresh port with isolated DB/log/appdata/localappdata/token.
+  4. Verify process table, binary path/hash, socket, unauth/auth `/health`, and strict MCP Inspector `tools/list` for `set_perception_mode`, `observe`, `find`, `storage_inspect`, and `release_all`.
+  5. Create a deterministic moving visual target with real COCO-detectable objects; read target state file, process/window geometry, and frame/pixel SoTs before each trigger.
+  6. Trigger real Inspector MCP calls for `pixel_only` and `hybrid` observations and `find`; separately read target state/screens/storage/logs after each trigger.
+  7. Cover edges: leave/re-enter after tracker stale timeout, confidence threshold floor, max detections cap, black frame, empty/no-entity frame, and structurally invalid params.
+  8. Cleanup with real `release_all`, stop target/daemon, verify port/processes absent, then commit/post/close #598 if accepted.
+
 ## Current Resume Point - 2026-06-02T04:22:34-05:00
 - #597 is closed:
   - commit `d64c6a2 fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`;

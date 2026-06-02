@@ -160,6 +160,7 @@ fn verified_file_loads_and_reuses_session_id() -> TestResult {
             frame_seq: 7,
             width: 640,
             height: 640,
+            rgb: vec![0; 640 * 640 * 3],
         },
         DetectOpts::default(),
     )?;
@@ -168,6 +169,7 @@ fn verified_file_loads_and_reuses_session_id() -> TestResult {
             frame_seq: 8,
             width: 640,
             height: 640,
+            rgb: vec![0; 640 * 640 * 3],
         },
         DetectOpts::default(),
     )?;
@@ -192,6 +194,7 @@ fn detector_rejects_zero_sized_frame_before_inference() -> TestResult {
         frame_seq: 99,
         width: 0,
         height: 640,
+        rgb: Vec::new(),
     };
     record(format_args!(
         "regression_state=model_detector edge=no_frame before=frame_seq:{} width:{} height:{}",

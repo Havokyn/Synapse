@@ -4,8 +4,16 @@ use std::{
 };
 
 use chrono::Utc;
+#[cfg(feature = "ort")]
+use image::{RgbImage, imageops::FilterType};
+#[cfg(feature = "ort")]
+use ort::value::Tensor;
 use synapse_core::DetectionBatch;
+#[cfg(feature = "ort")]
+use synapse_core::{Detection, Rect};
 
+#[cfg(feature = "ort")]
+use crate::detection_infer_failed;
 use crate::{
     DetectOpts, DetectionFrame, Detector, ModelBackend, ModelDescriptor, ModelError, ModelResult,
     default_provider_order, normalize_sha256, sha256_file,
@@ -46,12 +54,232 @@ impl LoadedModel {
 impl Detector for LoadedModel {
     fn infer(&self, frame: DetectionFrame, _opts: DetectOpts) -> ModelResult<DetectionBatch> {
         let frame = frame.validate()?;
-        Ok(DetectionBatch {
-            model_id: self.descriptor.id.clone(),
-            frame_seq: frame.frame_seq,
-            inferred_at: Utc::now(),
-            items: Vec::new(),
-        })
+        match &self.session {
+            SessionHandle::Placeholder => {
+                Ok(empty_detection_batch(&self.descriptor, frame.frame_seq))
+            }
+            #[cfg(feature = "ort")]
+            SessionHandle::Ort(session) => {
+                let input = preprocess_rgb_frame(&frame, &self.descriptor)?;
+                let mut session = session.lock().map_err(|_err| {
+                    detection_infer_failed("ORT detection session lock was poisoned")
+                })?;
+                let outputs = session
+                    .run(ort::inputs! {
+                        "pixel_values" => input,
+                    })
+                    .map_err(|err| {
+                        detection_infer_failed(format!("ORT inference failed: {err}"))
+                    })?;
+                let logits = outputs
+                    .get("logits")
+                    .ok_or_else(|| detection_infer_failed("ORT output `logits` was missing"))?
+                    .try_extract_tensor::<f32>()
+                    .map_err(|err| {
+                        detection_infer_failed(format!("failed to extract `logits`: {err}"))
+                    })?
+                    .1;
+                let pred_boxes = outputs
+                    .get("pred_boxes")
+                    .ok_or_else(|| detection_infer_failed("ORT output `pred_boxes` was missing"))?
+                    .try_extract_tensor::<f32>()
+                    .map_err(|err| {
+                        detection_infer_failed(format!("failed to extract `pred_boxes`: {err}"))
+                    })?
+                    .1;
+                let items =
+                    decode_rtdetr_outputs(&frame, &self.descriptor, logits, pred_boxes, _opts)?;
+                Ok(DetectionBatch {
+                    model_id: self.descriptor.id.clone(),
+                    frame_seq: frame.frame_seq,
+                    inferred_at: Utc::now(),
+                    items,
+                })
+            }
+        }
+    }
+}
+
+fn empty_detection_batch(descriptor: &ModelDescriptor, frame_seq: u64) -> DetectionBatch {
+    DetectionBatch {
+        model_id: descriptor.id.clone(),
+        frame_seq,
+        inferred_at: Utc::now(),
+        items: Vec::new(),
+    }
+}
+
+#[cfg(feature = "ort")]
+fn preprocess_rgb_frame(
+    frame: &DetectionFrame,
+    descriptor: &ModelDescriptor,
+) -> ModelResult<Tensor<f32>> {
+    let [batch, channels, input_h, input_w] = descriptor_input_shape(descriptor)?;
+    if batch != 1 || channels != 3 {
+        return Err(detection_infer_failed(format!(
+            "unsupported detection input shape {:?}; expected [1, 3, height, width]",
+            descriptor.input_shape
+        )));
+    }
+    let input_w_u32 = u32::try_from(input_w).map_err(|_err| {
+        detection_infer_failed(format!("input width {input_w} does not fit u32"))
+    })?;
+    let input_h_u32 = u32::try_from(input_h).map_err(|_err| {
+        detection_infer_failed(format!("input height {input_h} does not fit u32"))
+    })?;
+    let source =
+        RgbImage::from_raw(frame.width, frame.height, frame.rgb.clone()).ok_or_else(|| {
+            detection_infer_failed(format!(
+                "failed to construct RGB frame {} from {} bytes",
+                frame.frame_seq,
+                frame.rgb.len()
+            ))
+        })?;
+    let resized = image::imageops::resize(&source, input_w_u32, input_h_u32, FilterType::Triangle);
+    let pixels = input_w.checked_mul(input_h).ok_or_else(|| {
+        detection_infer_failed(format!("input shape {input_w}x{input_h} overflows"))
+    })?;
+    let mut data = vec![
+        0.0_f32;
+        pixels.checked_mul(3).ok_or_else(|| {
+            detection_infer_failed(format!("input shape {input_w}x{input_h}x3 overflows"))
+        })?
+    ];
+    for (index, pixel) in resized.pixels().enumerate() {
+        data[index] = f32::from(pixel[0]) / 255.0;
+        data[pixels + index] = f32::from(pixel[1]) / 255.0;
+        data[(pixels * 2) + index] = f32::from(pixel[2]) / 255.0;
+    }
+    Tensor::from_array(([1usize, 3, input_h, input_w], data.into_boxed_slice()))
+        .map_err(|err| detection_infer_failed(format!("failed to create input tensor: {err}")))
+}
+
+#[cfg(feature = "ort")]
+fn descriptor_input_shape(descriptor: &ModelDescriptor) -> ModelResult<[usize; 4]> {
+    <[usize; 4]>::try_from(descriptor.input_shape.as_slice()).map_err(|_err| {
+        detection_infer_failed(format!(
+            "unsupported detection input shape {:?}; expected four dimensions",
+            descriptor.input_shape
+        ))
+    })
+}
+
+#[cfg(feature = "ort")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "RT-DETR post-processing converts normalized f32 model outputs into screen pixel rectangles"
+)]
+fn decode_rtdetr_outputs(
+    frame: &DetectionFrame,
+    descriptor: &ModelDescriptor,
+    logits: &[f32],
+    pred_boxes: &[f32],
+    opts: DetectOpts,
+) -> ModelResult<Vec<Detection>> {
+    let classes = descriptor.class_map.len();
+    if classes == 0 {
+        return Err(detection_infer_failed(format!(
+            "model {} has no class map",
+            descriptor.id
+        )));
+    }
+    if logits.len() % classes != 0 {
+        return Err(detection_infer_failed(format!(
+            "`logits` length {} is not divisible by class count {classes}",
+            logits.len()
+        )));
+    }
+    let queries = logits.len() / classes;
+    let expected_box_values = queries.checked_mul(4).ok_or_else(|| {
+        detection_infer_failed(format!("query count {queries} overflows box length"))
+    })?;
+    if pred_boxes.len() != expected_box_values {
+        return Err(detection_infer_failed(format!(
+            "`pred_boxes` length {} did not match query count {queries}",
+            pred_boxes.len()
+        )));
+    }
+
+    let threshold = f32::from(opts.confidence_threshold.min(100)) / 100.0;
+    let mut detections = Vec::new();
+    for query_index in 0..queries {
+        let logits_start = query_index * classes;
+        let Some((class_index, score)) =
+            best_class_score(&logits[logits_start..logits_start + classes])
+        else {
+            continue;
+        };
+        if score < threshold {
+            continue;
+        }
+        let box_start = query_index * 4;
+        let bbox = normalized_cxcywh_to_rect(
+            pred_boxes[box_start],
+            pred_boxes[box_start + 1],
+            pred_boxes[box_start + 2],
+            pred_boxes[box_start + 3],
+            frame.width,
+            frame.height,
+        );
+        if bbox.w <= 0 || bbox.h <= 0 {
+            continue;
+        }
+        detections.push(Detection {
+            class_label: descriptor.class_map[class_index].clone(),
+            bbox,
+            confidence: score,
+            track_id: None,
+        });
+    }
+    detections.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+    detections.truncate(opts.max_detections);
+    Ok(detections)
+}
+
+#[cfg(feature = "ort")]
+fn best_class_score(logits: &[f32]) -> Option<(usize, f32)> {
+    logits
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index, sigmoid(*value)))
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+}
+
+#[cfg(feature = "ort")]
+fn sigmoid(value: f32) -> f32 {
+    if value >= 0.0 {
+        1.0 / (1.0 + (-value).exp())
+    } else {
+        let exp = value.exp();
+        exp / (1.0 + exp)
+    }
+}
+
+#[cfg(feature = "ort")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "RT-DETR normalized box coordinates are f32 and must become integer screen rectangles"
+)]
+fn normalized_cxcywh_to_rect(cx: f32, cy: f32, w: f32, h: f32, width: u32, height: u32) -> Rect {
+    let width_f = width as f32;
+    let height_f = height as f32;
+    let x1 = ((cx - (w / 2.0)) * width_f).clamp(0.0, width_f);
+    let y1 = ((cy - (h / 2.0)) * height_f).clamp(0.0, height_f);
+    let x2 = ((cx + (w / 2.0)) * width_f).clamp(0.0, width_f);
+    let y2 = ((cy + (h / 2.0)) * height_f).clamp(0.0, height_f);
+    let left = x1.min(x2).round() as i32;
+    let top = y1.min(y2).round() as i32;
+    let right = x1.max(x2).round() as i32;
+    let bottom = y1.max(y2).round() as i32;
+    Rect {
+        x: left,
+        y: top,
+        w: right.saturating_sub(left),
+        h: bottom.saturating_sub(top),
     }
 }
 

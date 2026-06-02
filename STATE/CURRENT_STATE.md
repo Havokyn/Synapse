@@ -1,5 +1,155 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T05:36:10-05:00
+- Active issue #598 is ready for commit/GitHub closeout.
+- Accepted main #598 runtime evidence directory: `.runs\598\detection-fsv-20260602T0513`.
+  - Repo-built release daemon PID `28444`, bind `127.0.0.1:7872`, binary `target\release\synapse-mcp.exe`, SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`.
+  - Strict MCP Inspector `tools/list` loaded `80` tools and required `set_perception_mode`, `observe`, `find`, `storage_inspect`, and `release_all`.
+  - Initial isolated storage readback was all zeroes; verified model SHA256 in isolated `LOCALAPPDATA` was `583A236AC21C95A7FD94F284FC21485E42355BFEF82C27011BA78FBC09EE87E2`.
+  - Deterministic target PID `76292`, title `Issue598DetectionTarget`, displayed COCO image SHA256 `DEA9E7EF97386345F7CFF32F9055DA4982DA5471C48D575146C796AB4563B04E`.
+  - Pixel-only still frame: real Inspector `set_perception_mode pixel_only` then `observe` returned `mode=pixel_only`, `detection_status=healthy`, two cats plus remote, confidences `0.9118`, `0.8808`, `0.6176`, and track IDs `1/2/3`; separate storage readback persisted `CF_OBSERVATIONS=1`, `CF_EVENTS=1`.
+  - Visual SoT screenshot `06_pixel_still_screenshot.png` SHA256 `8574EB0B4B18281FC47BCDA075F58EA7D90690BDAED48039E7D4E2633BDDB2C0`; manual visual read showed reported bboxes align with the two visible cats and remote.
+  - Moving pair: target command set `scene=single`, `vx=180`; observe1 reacquired tracks `4/5/6/7`; observe2 kept cat track IDs `4` and `5` and persisted velocities `[268.11594,16.908213]` and `[267.63287,18.84058]`.
+  - Hybrid mode: `set_perception_mode hybrid` then `observe` returned `mode=hybrid`, healthy A11y/capture/detection, cats/sofa/remote with all confidences above `0.637`.
+  - `find query=cat scope=both` returned two entity results with cat bboxes matching the visible cats.
+  - Empty/black edge: target `scene=black` had empty `draw_rects`; `observe` returned healthy detection with `entity_count=0`.
+  - Leave/re-enter edge: after black frame beyond the 3000 ms stale window, restored COCO frame returned new track IDs `18..21` instead of stale IDs.
+  - Confidence-floor evidence: default-profile observations had all confidences at/above the 0.5 floor; grid min confidence was `0.5220284`.
+  - Structurally invalid edge: real Inspector `set_perception_mode` with missing `mode` failed `missing field mode`; storage counts stayed `CF_EVENTS=8`, `CF_OBSERVATIONS=8`.
+- Accepted max-detections cap evidence directory: `.runs\598\detection-cap-fsv-20260602T0523`.
+  - First cap daemon launch attempt was rejected after the daemon failed closed on intentionally over-broad `SYNAPSE_ALLOW_SHELL=.*` with `SHELL_PATTERN_TOO_BROAD`.
+  - Relaunched repo-built daemon PID `67068`, bind `127.0.0.1:7873`, same release SHA, issue-local `SYNAPSE_PROFILE_DIR`, copied model hash matched.
+  - Strict Inspector `tools/list` loaded `80` tools; unauth health returned `401 HTTP_TOKEN_INVALID`; profile_list showed only `issue598.cap`.
+  - Issue-local profile matched `Issue598DetectionTarget`, health readback showed `active_profile_id=issue598.cap`, and profile file set `max_detections=2`.
+  - Same large grid scene that produced `10` detections on the default profile returned exactly `2` detections on the cap profile; separate storage readback persisted `CF_OBSERVATIONS=1`, `CF_EVENTS=1`, profile source `profile:issue598.cap`.
+- Cleanup:
+  - real Inspector `release_all` returned zero keys/buttons/pads on both daemons;
+  - stopped daemon PIDs `28444` and `67068` plus target PID `76292`;
+  - ports `7872` and `7873` closed and no `Issue598DetectionTarget` window remained.
+- Final supporting checks passed after accepted FSV:
+  - `cargo fmt --check`;
+  - `git diff --check` with line-ending warnings only;
+  - focused tracker/class-filter/manual-mode tests;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo check -p synapse-models -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release binary readback:
+  - path `C:\code\Synapse\target\release\synapse-mcp.exe`;
+  - length `46708736`;
+  - SHA256 `32968BB49188230EC41C2DAD5822B6B4E2A9405522DC3D4501719FBA0BEADCE6`;
+  - `LastWriteTimeUtc=2026-06-02T10:35:24.2191556Z`.
+- Diff review completed for model inference, M1 detection runtime/tracker, MCP observe/find wiring, profile mode persistence, docs, and state notes.
+- Next:
+  1. Commit with `[skip ci]`.
+  2. Post #598 RESOLVED evidence, close #598, remove stale `status:in-progress`.
+  3. Refresh open queue and continue to #599 unless GitHub changed.
+
+## 2026-06-02T05:28:20-05:00
+- Superseded by the 05:36 final-check update above. Manual MCP/SoT FSV was accepted at this checkpoint; final supporting checks were still pending then.
+
+## 2026-06-02T05:12:31-05:00
+- Active issue remains #598.
+- First isolated runtime run `.runs\598\detection-fsv-20260602T0458` is rejected as final acceptance evidence but kept as defect/setup evidence:
+  - repo-built daemon PID `63716` on `127.0.0.1:7871` passed process/socket/binary, unauth/auth health, and strict Inspector `tools/list=80`;
+  - initial isolated storage read was all zeroes;
+  - deterministic WinForms target PID `74240`, title `Issue598DetectionTarget`, displayed COCO image `000000039769.jpg` with SHA256 `DEA9E7EF97386345F7CFF32F9055DA4982DA5471C48D575146C796AB4563B04E`;
+  - first real `observe` in `pixel_only` failed closed with `DETECTION_MODEL_NOT_LOADED` because isolated `LOCALAPPDATA` had no model; copied the verified RT-DETR model into `.runs\598\...\localappdata\synapse\models\rtdetr_v2_s_coco.onnx` and reread matching SHA256 `583A236AC21C95A7FD94F284FC21485E42355BFEF82C27011BA78FBC09EE87E2`;
+  - still pixel-only observe then returned healthy detections: 2 cats, sofa, remote, all confidence >= 0.633;
+  - moving pair exposed a real tracker issue: strict Inspector observations were about 1.7s apart, exceeding the old 1500 ms stale-track window, so moving cats reacquired new track IDs and no velocity was produced.
+- Patch after rejected run:
+  - `STALE_TRACK_MS` increased from 1500 to 3000 ms to tolerate strict-client/inference cadence jitter while still requiring a real loss interval before reacquire;
+  - systemspec docs updated from 1500 ms to 3000 ms.
+- Cleanup of rejected daemon:
+  - real Inspector `release_all` returned exit 0;
+  - stopped daemon PID `63716`;
+  - port `7871` closed.
+- Supporting checks after tracker stale-window patch:
+  - `cargo fmt --check`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp tracker_ -- --nocapture`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- New release binary readback:
+  - path `C:\code\Synapse\target\release\synapse-mcp.exe`;
+  - length `46708736`;
+  - SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`;
+  - `LastWriteTimeUtc=2026-06-02T10:12:23Z`.
+- Next:
+  1. Launch a fresh post-patch isolated daemon/run, copy/read the isolated model SoT before observing.
+  2. Repeat strict Inspector precondition and #598 manual MCP/SoT behavior FSV.
+
+## 2026-06-02T04:56:41-05:00
+- Active issue remains #598.
+- Additional #598 code/docs since the prior checkpoint:
+  - `m1/detection.rs` now honors `ProfileDetection.classes_of_interest` as a case-insensitive filter when the list is non-empty;
+  - systemspec docs were updated in `02_source_code_map.md`, `09_perception_and_capture.md`, `10_audio_and_models.md`, and aggregate `SYNAPSE_SYSTEMSPEC.md` so they no longer claim M1 detector invocation is absent.
+- Supporting checks now passed after the class-filter/doc patch:
+  - `cargo fmt --check`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp tracker_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp classes_of_interest_filter_is_case_insensitive_and_empty_allows_all -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp runtime_apply -- --nocapture`;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo check -p synapse-models -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - fixed-string contradiction scans found no remaining systemspec claims that M1 does not invoke detectors or that detection entities are only synthetic;
+  - `git diff --check` exited 0 with line-ending warnings only;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Release binary readback for upcoming manual #598 FSV:
+  - path `C:\code\Synapse\target\release\synapse-mcp.exe`;
+  - length `46708736`;
+  - SHA256 `696E42B2CA5B590A5605950BC47A37F5E656307F9D950D14B7AACA7E4501AE01`;
+  - `LastWriteTimeUtc=2026-06-02T09:56:34Z`.
+- Next:
+  1. Launch an isolated repo-built daemon from that binary on a fresh port with isolated DB/log/appdata/localappdata/token.
+  2. Verify process/socket/binary, unauth/auth `/health`, and strict MCP Inspector `tools/list`.
+  3. Create the deterministic moving COCO-object target and run manual MCP/SoT FSV.
+
+## 2026-06-02T04:46:11-05:00
+- Wake-up after compaction was rerun:
+  - read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #351, #594, #598, live open queue, git status/log;
+  - wired configured `mcp__synapse.health`, `storage_inspect`, `observe`, and `find` all returned through the configured client.
+- Active issue remains #598 `scenario(stress): detection + entity tracking on fast-moving scene (pixel_only/hybrid)`.
+  - #598 is open, assigned to `ChrisRoyse`, labels include `status:in-progress` and `agent:codex`;
+  - START comment remains https://github.com/ChrisRoyse/Synapse/issues/598#issuecomment-4600966276.
+- Live queue after wake-up:
+  - #594 parent remains open;
+  - #624/#625 remain `status:blocked` on the Daybreak operator-only boundary;
+  - unblocked children still open include #598-#604 and #629-#634.
+- Git reconciliation:
+  - branch `main`;
+  - `HEAD == origin/main == 74dc3b4 docs(state): record issue 598 start [skip ci]`;
+  - dirty files are #598-owned detection/runtime patch files: `Cargo.lock`, `crates/synapse-mcp/Cargo.toml`, `crates/synapse-mcp/src/m1.rs`, `crates/synapse-mcp/src/m1/detection.rs`, `crates/synapse-mcp/src/server.rs`, `crates/synapse-mcp/src/server/m1_tools.rs`, `crates/synapse-models/Cargo.toml`, `crates/synapse-models/src/lib.rs`, `crates/synapse-models/src/session.rs`, and `crates/synapse-models/tests/model_loader.rs`.
+- #598 root cause found and patched locally:
+  - M1 never invoked the detector in `pixel_only`/`hybrid`; `sources.rs` only did capture probing and synthetic Luanti entities;
+  - `synapse-models::LoadedModel::infer` returned an empty `DetectionBatch` even when the RT-DETR ONNX model loaded;
+  - profile runtime application overwrote explicit `set_perception_mode pixel_only/hybrid` with the active profile mode before `observe`.
+- Patch in progress:
+  - added real RT-DETR preprocessing/inference/decode in `synapse-models` using captured RGB frame bytes;
+  - added M1 detection runtime with fail-closed model/capture/inference errors, default RT-DETR model loading, and entity tracking with stable `track_id` plus `velocity_px_s`;
+  - `observe` and `find` now populate detection entities when effective mode is `pixel_only` or `hybrid`;
+  - explicit non-auto perception mode now persists across profile refresh; `auto` releases back to profile mode.
+- Local model/runtime prerequisite readbacks already completed:
+  - model file `C:\Users\hotra\AppData\Local\synapse\models\rtdetr_v2_s_coco.onnx`;
+  - length `81057510`;
+  - SHA256 `583A236AC21C95A7FD94F284FC21485E42355BFEF82C27011BA78FBC09EE87E2`, matching the registry descriptor;
+  - Python `onnxruntime 1.26.0` with `CPUExecutionProvider` can run the model, and a local probe decoded COCO cat/remote/sofa detections from the pinned model.
+- Supporting checks already passed after the patch:
+  - `cargo fmt`;
+  - `cargo check -p synapse-models -j 2`;
+  - `cargo check -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-models --test model_loader -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp tracker_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp runtime_apply -- --nocapture`.
+- Current configured MCP baseline is not acceptance evidence for #598:
+  - long-lived installed stdio daemon reports `ok=true`, active profile `vscode`, detection `disabled`, and `find Issue615FanoutTarget` returns no results;
+  - it is useful only as client sanity until a repo-built isolated daemon is launched from this patch.
+- Next:
+  1. Run final focused checks including schema sanitize, strict tools-list test, touched-crate checks, docs updates, and release build.
+  2. Launch isolated repo-built `synapse-mcp` for #598, verify process/socket/auth/health/strict Inspector `tools/list`.
+  3. Create deterministic fast-moving visual target using real COCO-visible objects and read target/frame/window SoTs.
+  4. Run manual MCP/SoT FSV for `pixel_only`, `hybrid`, stable track/velocity, `find` by class, leave/re-enter, threshold floor, max cap, black frame, and structurally invalid params.
+
 ## 2026-06-02T04:22:34-05:00
 - #597 is closed:
   - commit `d64c6a2 fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`;

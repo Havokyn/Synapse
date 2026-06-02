@@ -319,7 +319,7 @@ read storage/process/UI/log SoTs separately.
 `set_perception_mode_in_state(state, params)`:
 
 1. `parse_perception_mode(&params.mode)` (errors with `PERCEPTION_MODE_INVALID`).
-2. Stamp `state.perception_mode = mode`.
+2. Stamp `state.perception_mode = mode`; for non-`auto` modes also stamp `manual_perception_mode = Some(mode)`, while `auto` clears the manual override so profile mode can apply again.
 3. Return `{ previous, mode, rationale }` where rationale is one of `auto_select_by_foreground_and_a11y_density`, `manual_a11y_only`, `manual_pixel_only`, `manual_hybrid`.
 
 ### 5.7 `mcp_error` helper
@@ -340,14 +340,19 @@ The fixed JSON-RPC code `-32099` is the rmcp custom-error slot; the structured `
 
 | Edge | Direction | Details |
 |---|---|---|
-| `observe` tool → `M1State` | sync (lock) | Each call uses `current_input` to build a fresh `ObservationInput` (synthetic, forced-error, or platform-derived). |
+| `observe` tool → `M1State` | sync (lock) | Each call uses `current_input` to build a fresh `ObservationInput` (synthetic, forced-error, or platform-derived), then populates live detection entities when the effective mode is `pixel_only` or `hybrid`. |
 | `M1State.last_observed_foreground` → `act_type` | sync read | Comparison happens before any keystroke synthesis. |
 | `synapse-a11y` events → SSE bus | via `m3::a11y_events::A11yEventBridge` | The bridge subscribes via `subscribe_win_events`, coalesces, and publishes `Event { source: EventSource::A11yWinEvent / A11yUia, kind: <derived>, data: {element_id, ...} }`. Started on first `reflex_runtime()` call (`SynapseService::reflex_runtime` calls `state.ensure_a11y_event_bridge`). |
 | `synapse-capture` channel → consumer | bounded crossbeam | Downstream consumers (perception, OCR) `try_recv` and either run inference / OCR on the texture or discard. |
 
+### 6.1 CNN object detection
+
+When the effective perception mode is `pixel_only` or `hybrid`, `observe` and `find` invoke `m1/detection.rs` before assembling/searching. The runtime captures the foreground window bounds with `synapse_capture::screen_region_to_bgra_bitmap`, converts BGRA pixels to RGB, loads the configured `ProfileDetection.model_id` (or the registered default `rtdetr_v2_s_coco_onnx` when omitted), and calls `synapse-models::Detector::infer` with `ProfileDetection.confidence_threshold` and `max_detections`. Unknown explicit model IDs, missing model files, capture errors, invalid config, and inference errors fail closed by setting `detection_status = DegradedSensorFailed { reason_code }` and logging the failing stage.
+
+Returned detections are filtered by `classes_of_interest` when that profile list is non-empty, matched into an in-memory tracker by class/IoU/center distance, and emitted as `DetectedEntity` records with stable `track_id`, `entity_id`, screen-space bbox, confidence, timestamps, and `velocity_px_per_s` after the second observation. Tracks that are not seen for 3000 ms are pruned so a leave/re-enter sequence reacquires a new track after a real loss interval while still tolerating strict-client/inference cadence jitter.
+
 ## 7. What is NOT covered
 
-- **CNN object detection.** `synapse-models` ships the `Detector` trait and ONNX session loader, but `M1State` does not invoke detectors in the current build; `entities: Vec<DetectedEntity>` is populated only by synthetic fixtures.
 - **Event extension runtime wiring.** `synapse-perception` exposes the
   `event_extensions` evaluator and validator, but the current `observe()` path
   does not yet automatically feed live detection/HUD events through profile

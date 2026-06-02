@@ -925,3 +925,74 @@ Evidence:
 
 Outcome:
 - Begin #598 with code inspection of detection/entity tracking and runtime/model setup before any FSV setup.
+
+# 2026-06-02T04:46:11-05:00 - #598 root cause requires real detector invocation, not fixture entities
+
+Decision: Patch M1 to invoke the real RT-DETR runtime in `pixel_only`/`hybrid` and patch `synapse-models` to decode the pinned ONNX model output, rather than accepting synthetic entities or an empty inference batch.
+
+Evidence:
+- Existing M1 source collection only performed capture probing and synthetic Luanti entities; no detector session was called for normal `pixel_only`/`hybrid` observations.
+- `LoadedModel::infer` validated frames but returned an empty `DetectionBatch`, so a present model file still produced no entities.
+- The pinned local model exists at `C:\Users\hotra\AppData\Local\synapse\models\rtdetr_v2_s_coco.onnx` with SHA256 `583A236AC21C95A7FD94F284FC21485E42355BFEF82C27011BA78FBC09EE87E2`, matching the registry descriptor.
+- Local ONNX Runtime probing showed the model's `logits` and normalized `pred_boxes` decode correctly into COCO cats/remote/sofa detections using sigmoid class scores and normalized cx/cy/w/h boxes.
+- `set_perception_mode pixel_only/hybrid` was being overwritten by profile runtime application before `observe`, so explicit manual mode needed to persist until `auto` clears it.
+
+Outcome:
+- Continue with the local #598 patch, update docs, run final checks/release build, then accept only after isolated repo-built MCP Inspector FSV with separate physical SoT readbacks.
+
+# 2026-06-02T04:56:41-05:00 - #598 profile detection config must be honored
+
+Decision: Honor `ProfileDetection.classes_of_interest` in the live M1 detection path and update the systemspec to describe current detector behavior.
+
+Evidence:
+- The profile schema exposes `classes_of_interest`, `confidence_threshold`, and `max_detections` as detection controls.
+- The #598 patch already applied threshold and max cap, but leaving `classes_of_interest` unused would make the profile readback misleading once live detection is wired.
+- Systemspec files still claimed `M1State` did not invoke detectors and `entities` were only synthetic, which contradicted the patch.
+
+Outcome:
+- Added case-insensitive class filtering for non-empty `classes_of_interest`.
+- Updated systemspec source map, M1 perception section, model-loader section, and aggregate systemspec.
+- Supporting checks and release build passed; continue to isolated manual MCP/SoT FSV.
+
+# 2026-06-02T05:12:31-05:00 - #598 tracker stale window must tolerate strict-client cadence
+
+Decision: Increase detection track stale retention from 1500 ms to 3000 ms.
+
+Evidence:
+- Post-patch isolated daemon PID `63716` passed strict Inspector preconditions.
+- After copying the verified RT-DETR model into isolated `LOCALAPPDATA`, still pixel-only observe returned healthy COCO detections.
+- Two moving observations through the strict Inspector arrived about 1.7 seconds apart; the old 1500 ms prune window deleted active tracks before the second observation.
+- The visible object persisted and moved across the target state SoT, but cats reacquired new track IDs and had no `velocity_px_per_s`, failing #598's stable-track requirement.
+
+Outcome:
+- `STALE_TRACK_MS` is now 3000 ms; docs updated.
+- Rebuild release binary SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`.
+- Rerun isolated manual FSV from a fresh post-patch daemon.
+
+# 2026-06-02T05:28:20-05:00 - #598 detector/tracker behavior accepted by manual MCP/SoT FSV
+
+Decision: Accept the #598 implementation and runtime behavior after main and cap-edge isolated repo-built MCP runs.
+
+Evidence:
+- Main run `.runs\598\detection-fsv-20260602T0513`: repo-built daemon PID `28444`, bind `127.0.0.1:7872`, release SHA256 `F8B15ED79B3A5D4D1FF9CE2522189341614589D73348410C4F330A982E170264`, strict Inspector `tools/list=80`, initial storage all zeroes.
+- Pixel-only still frame returned healthy detections for two cats and remote; storage persisted `CF_OBSERVATIONS=1`, `CF_EVENTS=1`; screenshot readback visually matched reported bboxes.
+- Moving target kept cat track IDs `4` and `5` across consecutive strict Inspector observes and produced non-null velocity vectors.
+- Hybrid mode returned healthy detection with cats/sofa/remote; `find cat` returned two entity results with matching visible bboxes.
+- Edges covered: black frame empty/healthy, leave/re-enter reacquired new track IDs after the 3000 ms stale window, default confidence floor all >= 0.5, and missing `mode` failed closed with unchanged storage counts.
+- Cap run `.runs\598\detection-cap-fsv-20260602T0523`: issue-local profile `issue598.cap` set `max_detections=2`; health showed it active; same large grid that produced 10 detections under default profile returned exactly 2 and persisted that observation.
+- Cleanup: `release_all` zero on both daemons; ports `7872`/`7873` closed; target window absent.
+
+Outcome:
+- Proceed to final supporting checks, diff review, commit, RESOLVED evidence, and #598 closeout.
+
+# 2026-06-02T05:36:10-05:00 - #598 final checks and diff review complete
+
+Decision: Proceed to commit and close #598.
+
+Evidence:
+- Final supporting checks passed: fmt, diff check, focused M1/model tests, touched-crate check, schema sanitize, strict tool-list regression, and release build.
+- Final release binary readback: `target\release\synapse-mcp.exe`, length `46708736`, SHA256 `32968BB49188230EC41C2DAD5822B6B4E2A9405522DC3D4501719FBA0BEADCE6`, timestamp `2026-06-02T10:35:24.2191556Z`.
+- Diff review completed across `synapse-models`, `synapse-mcp` M1/server wiring, systemspec docs, and state notes.
+
+Outcome:
+- Commit with `[skip ci]`, push, post #598 RESOLVED evidence, close #598, refresh queue.

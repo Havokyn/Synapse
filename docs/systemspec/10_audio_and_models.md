@@ -158,7 +158,7 @@ cuda = ["ort", "ort/cuda"]
 directml = ["ort", "ort/directml"]
 ```
 
-`synapse-audio` enables `directml`. `synapse-mcp` does not pull in CUDA or DirectML features explicitly; the configured-host install/setup path is responsible for ensuring the ONNX runtime DLL is present. If it is missing during issue work, the agent must acquire or configure it through local reversible workflows where possible and then read the physical DLL/path/source-of-truth directly.
+`synapse-audio` enables `directml`, and `synapse-mcp` depends on `synapse-models` with the `directml` feature so live M1 detection can attempt DirectML first and fall back through the loader's provider order. The configured-host install/setup path is responsible for ensuring the ONNX runtime DLL/model file is present. If it is missing during issue work, the agent must acquire or configure it through local reversible workflows where possible and then read the physical DLL/model path/source-of-truth directly.
 
 ### 2.2 Public surface
 
@@ -168,7 +168,7 @@ directml = ["ort", "ort/directml"]
 | `RegisteredModel` | Registry metadata for default detection models: id, label, filename, SHA-256, download URL, license SPDX, source model/repo, input shape, and class map. `DEFAULT_DETECTION_MODEL_ID = "rtdetr_v2_s_coco_onnx"` per ADR-0010. |
 | `ModelBackend` | `Cuda` \| `DirectMl` \| `Cpu` (default) |
 | `DetectOpts` | `{ confidence_threshold: u16 (default 50), max_detections: usize (default 100) }` |
-| `DetectionFrame` | `{ frame_seq: u64, width: u32, height: u32 }`. `validate()` returns `DETECTION_NO_FRAME` for zero dimensions. |
+| `DetectionFrame` | `{ frame_seq: u64, width: u32, height: u32, rgb: Vec<u8> }`. `validate()` returns `DETECTION_NO_FRAME` for zero dimensions, dimension overflow, or RGB byte length mismatch. |
 | `Detector` (trait) | `fn infer(&self, frame: DetectionFrame, opts: DetectOpts) -> ModelResult<DetectionBatch>` |
 | `ModelError` | thiserror enum with variants `DownloadFailed` / `HashMismatch` / `LoadFailed` / `BackendUnavailable` / `NoFrame` / `InferenceFailed`; `.code()` → `MODEL_*` / `DETECTION_*` |
 

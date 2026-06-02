@@ -1,3 +1,4 @@
+mod detection;
 mod ocr;
 mod search;
 mod sources;
@@ -17,10 +18,12 @@ use synapse_capture::{
 use synapse_core::{
     AccessibleNode, CaptureRuntimeReadback, ElementId, FocusedElement, ForegroundContext,
     ObservationCaptureConfig, ObservationCaptureTarget, OcrBackend, PerceptionMode, Profile,
-    ProfileCapture, ProfileCaptureTarget, Rect, error_codes,
+    ProfileCapture, ProfileCaptureTarget, ProfileDetection, Rect, error_codes,
 };
 use synapse_perception::{ObservationInput, ObserveInclude, parse_perception_mode};
 
+pub use detection::populate_detection_from_state;
+use detection::{DetectionRuntime, DetectionRuntimeConfig, default_detection_config};
 #[cfg(windows)]
 pub use ocr::read_text_request_from_bgra;
 pub use ocr::{ResolvedReadTextRequest, read_text_request_uncached, resolve_read_text_request};
@@ -39,6 +42,9 @@ pub struct M1State {
     pub capture_generation: u64,
     pub active_capture_config: ObservationCaptureConfig,
     pub perception_mode: PerceptionMode,
+    pub manual_perception_mode: Option<PerceptionMode>,
+    pub detection_config: DetectionRuntimeConfig,
+    pub detection_runtime: DetectionRuntime,
     pub synthetic: Option<ObservationInput>,
     pub force_no_perception: bool,
     pub force_observe_internal: bool,
@@ -65,6 +71,9 @@ impl M1State {
             capture_generation: 0,
             active_capture_config: default_observation_capture_config(),
             perception_mode: PerceptionMode::Auto,
+            manual_perception_mode: None,
+            detection_config: default_detection_config(),
+            detection_runtime: DetectionRuntime::default(),
             synthetic,
             force_no_perception,
             force_observe_internal,
@@ -415,8 +424,8 @@ fn focused_from_accessible_node(node: &AccessibleNode) -> FocusedElement {
 /// snapshot's node-budget/deadline bounds the cost.
 const FIND_SNAPSHOT_DEPTH: u32 = 16;
 
-pub fn find_in_state(state: &M1State, params: &FindParams) -> Result<FindResponse, ErrorData> {
-    let input = if let Some(hwnd) = params.window_hwnd {
+pub fn find_in_state(state: &mut M1State, params: &FindParams) -> Result<FindResponse, ErrorData> {
+    let mut input = if let Some(hwnd) = params.window_hwnd {
         let mut input = window_input_from_hwnd(hwnd, FIND_SNAPSHOT_DEPTH, state.perception_mode)?;
         input.capture_config = Some(state.active_capture_config.clone());
         input.capture_runtime = Some(state.capture_runtime_readback());
@@ -424,6 +433,7 @@ pub fn find_in_state(state: &M1State, params: &FindParams) -> Result<FindRespons
     } else {
         current_input(state, FIND_SNAPSHOT_DEPTH)?
     };
+    populate_detection_from_state(state, &mut input);
     let limit = params.limit.unwrap_or(5).clamp(1, 20);
     let mut results = Vec::new();
     if matches!(
@@ -495,7 +505,10 @@ pub fn apply_profile_runtime_config_in_state(
     state: &mut M1State,
     profile: &Profile,
 ) -> Result<ObservationCaptureConfig, ErrorData> {
-    state.perception_mode = profile.mode;
+    if state.manual_perception_mode.is_none() {
+        state.perception_mode = profile.mode;
+    }
+    state.detection_config = detection_config_from_profile(&profile.detection);
 
     let mut config = state.capture_config.clone();
     config.min_update_interval_ms = u64::from(
@@ -537,11 +550,16 @@ pub fn set_perception_mode_in_state(
     let mode = parse_perception_mode(&params.mode)
         .map_err(|err| mcp_error(err.code(), err.to_string()))?;
     state.perception_mode = mode;
+    state.manual_perception_mode = (mode != PerceptionMode::Auto).then_some(mode);
     Ok(SetPerceptionModeResponse {
         previous,
         mode,
         rationale: mode_rationale(mode).to_owned(),
     })
+}
+
+fn detection_config_from_profile(profile: &ProfileDetection) -> DetectionRuntimeConfig {
+    DetectionRuntimeConfig::from_profile(profile)
 }
 
 pub fn mcp_error(code: &'static str, message: impl Into<String>) -> ErrorData {
@@ -724,6 +742,10 @@ const fn mode_rationale(mode: PerceptionMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use synapse_core::{
+        Backend, ProfileBackends, ProfileDetection, ProfileMatch, ProfileOcr, ProfileUseScope,
+    };
 
     #[test]
     fn capture_interval_floor_applies_to_manual_and_profile_metadata() {
@@ -817,6 +839,58 @@ mod tests {
                 Some(&json!(error_codes::CAPTURE_TARGET_INVALID))
             );
         }
+    }
+
+    #[test]
+    fn manual_perception_mode_survives_profile_runtime_apply() {
+        let mut state = M1State::default();
+        set_perception_mode_in_state(
+            &mut state,
+            &SetPerceptionModeParams {
+                mode: "pixel_only".to_owned(),
+            },
+        )
+        .expect("manual mode parses");
+
+        apply_profile_runtime_config_in_state(
+            &mut state,
+            &profile_with_mode(PerceptionMode::Hybrid),
+        )
+        .expect("profile config applies");
+
+        assert_eq!(state.perception_mode, PerceptionMode::PixelOnly);
+        assert_eq!(
+            state.manual_perception_mode,
+            Some(PerceptionMode::PixelOnly)
+        );
+    }
+
+    #[test]
+    fn auto_perception_mode_releases_profile_runtime_apply() {
+        let mut state = M1State::default();
+        set_perception_mode_in_state(
+            &mut state,
+            &SetPerceptionModeParams {
+                mode: "pixel_only".to_owned(),
+            },
+        )
+        .expect("manual mode parses");
+        set_perception_mode_in_state(
+            &mut state,
+            &SetPerceptionModeParams {
+                mode: "auto".to_owned(),
+            },
+        )
+        .expect("auto mode parses");
+
+        apply_profile_runtime_config_in_state(
+            &mut state,
+            &profile_with_mode(PerceptionMode::Hybrid),
+        )
+        .expect("profile config applies");
+
+        assert_eq!(state.perception_mode, PerceptionMode::Hybrid);
+        assert_eq!(state.manual_perception_mode, None);
     }
 
     #[test]
@@ -918,6 +992,49 @@ mod tests {
                 error.data.as_ref().and_then(|data| data.get("code")),
                 Some(&json!(error_codes::OCR_NO_TEXT))
             );
+        }
+    }
+
+    fn profile_with_mode(mode: PerceptionMode) -> Profile {
+        Profile {
+            id: "test-profile".to_owned(),
+            label: "Test Profile".to_owned(),
+            version: "2".to_owned(),
+            use_scope: ProfileUseScope::OperatorOwnedTest,
+            matches: vec![ProfileMatch {
+                exe: Some("test.exe".to_owned()),
+                title_regex: None,
+                steam_appid: None,
+                window_class: None,
+                process_args: Vec::new(),
+            }],
+            mode,
+            capture: ProfileCapture {
+                target: ProfileCaptureTarget::ForegroundWindow,
+                min_update_interval_ms: 50,
+                cursor_visible: true,
+            },
+            detection: ProfileDetection {
+                model_id: None,
+                classes_of_interest: Vec::new(),
+                confidence_threshold: 0.5,
+                max_detections: 32,
+            },
+            ocr: ProfileOcr {
+                default_backend: OcrBackend::Auto,
+                regions: Vec::new(),
+                parser_config: BTreeMap::new(),
+            },
+            hud: Vec::new(),
+            keymap: BTreeMap::new(),
+            backends: ProfileBackends {
+                default: Backend::Auto,
+                keyboard_default: Backend::Auto,
+                mouse_default: Backend::Auto,
+                pad_default: Backend::Auto,
+            },
+            metadata: BTreeMap::new(),
+            event_extensions: Vec::new(),
         }
     }
 }

@@ -3,8 +3,9 @@ use super::{
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
     SetPerceptionModeResponse, SynapseService, current_input, empty_input_schema, find_in_state,
     mcp_error, observe_include, populate_audio_summary, populate_clipboard_summary,
-    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
-    set_capture_target_in_state, set_perception_mode_in_state, tool, tool_router,
+    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
+    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state, tool,
+    tool_router,
 };
 
 #[cfg(windows)]
@@ -81,6 +82,10 @@ impl SynapseService {
         if include.events {
             self.populate_everquest_log_events(&mut input);
         }
+        {
+            let mut state = self.m1_state()?;
+            populate_detection_from_state(&mut state, &mut input);
+        }
         let observation = ObservationAssembler::new()
             .assemble(include, input)
             .map_err(|err| mcp_error(err.code(), err.to_string()))?;
@@ -102,8 +107,8 @@ impl SynapseService {
             kind = "find",
             "tool.invocation kind=find"
         );
-        let state = self.m1_state()?;
-        find_in_state(&state, &params.0).map(Json)
+        let mut state = self.m1_state()?;
+        find_in_state(&mut state, &params.0).map(Json)
     }
 
     #[tool(description = "OCR text from a screen region or visible element")]
@@ -190,12 +195,10 @@ impl SynapseService {
                                 error = %error,
                                 "profile runtime config failed for observed foreground"
                             );
-                        } else {
-                            input.mode_override = Some(profile.mode);
-                            if let Ok(state) = self.m1_state() {
-                                input.capture_config = Some(state.active_capture_config.clone());
-                                input.capture_runtime = Some(state.capture_runtime_readback());
-                            }
+                        } else if let Ok(state) = self.m1_state() {
+                            input.mode_override = Some(state.perception_mode);
+                            input.capture_config = Some(state.active_capture_config.clone());
+                            input.capture_runtime = Some(state.capture_runtime_readback());
                         }
                         if include_hud {
                             populate_profile_hud(input, &profile, runtime.profile_dir());

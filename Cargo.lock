@@ -3537,6 +3537,7 @@ dependencies = [
  "synapse-capture",
  "synapse-core",
  "synapse-everquest",
+ "synapse-models",
  "synapse-perception",
  "synapse-profiles",
  "synapse-reflex",
@@ -3559,6 +3560,7 @@ name = "synapse-models"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "image",
  "ort",
  "serde",
  "sha2 0.11.0",

@@ -618,6 +618,7 @@ crates/synapse-mcp/
     │   └── sse.rs                  # SseState: subscription map, ring buffer, Last-Event-ID resume, publish/stats
     ├── m1.rs                       # M1State + ObserveParams/FindParams/ReadTextParams/SetCapture/SetPerceptionMode
     ├── m1/
+    │   ├── detection.rs            # RT-DETR foreground capture, model loading, class filtering, entity tracking
     │   ├── ocr.rs                  # read_text request resolution/backend handling
     │   ├── search.rs               # element_match + entity_match scoring for `find`
     │   └── sources.rs              # platform_input + synthetic_notepad_input observation source
@@ -3293,7 +3294,7 @@ read storage/process/UI/log SoTs separately.
 `set_perception_mode_in_state(state, params)`:
 
 1. `parse_perception_mode(&params.mode)` (errors with `PERCEPTION_MODE_INVALID`).
-2. Stamp `state.perception_mode = mode`.
+2. Stamp `state.perception_mode = mode`; for non-`auto` modes also stamp `manual_perception_mode = Some(mode)`, while `auto` clears the manual override so profile mode can apply again.
 3. Return `{ previous, mode, rationale }` where rationale is one of `auto_select_by_foreground_and_a11y_density`, `manual_a11y_only`, `manual_pixel_only`, `manual_hybrid`.
 
 ### 5.7 `mcp_error` helper
@@ -3314,14 +3315,19 @@ The fixed JSON-RPC code `-32099` is the rmcp custom-error slot; the structured `
 
 | Edge | Direction | Details |
 |---|---|---|
-| `observe` tool → `M1State` | sync (lock) | Each call uses `current_input` to build a fresh `ObservationInput` (synthetic, forced-error, or platform-derived). |
+| `observe` tool → `M1State` | sync (lock) | Each call uses `current_input` to build a fresh `ObservationInput` (synthetic, forced-error, or platform-derived), then populates live detection entities when the effective mode is `pixel_only` or `hybrid`. |
 | `M1State.last_observed_foreground` → `act_type` | sync read | Comparison happens before any keystroke synthesis. |
 | `synapse-a11y` events → SSE bus | via `m3::a11y_events::A11yEventBridge` | The bridge subscribes via `subscribe_win_events`, coalesces, and publishes `Event { source: EventSource::A11yWinEvent / A11yUia, kind: <derived>, data: {element_id, ...} }`. Started on first `reflex_runtime()` call (`SynapseService::reflex_runtime` calls `state.ensure_a11y_event_bridge`). |
 | `synapse-capture` channel → consumer | bounded crossbeam | Downstream consumers (perception, OCR) `try_recv` and either run inference / OCR on the texture or discard. |
 
+### 6.1 CNN object detection
+
+When the effective perception mode is `pixel_only` or `hybrid`, `observe` and `find` invoke `m1/detection.rs` before assembling/searching. The runtime captures the foreground window bounds with `synapse_capture::screen_region_to_bgra_bitmap`, converts BGRA pixels to RGB, loads the configured `ProfileDetection.model_id` (or the registered default `rtdetr_v2_s_coco_onnx` when omitted), and calls `synapse-models::Detector::infer` with `ProfileDetection.confidence_threshold` and `max_detections`. Unknown explicit model IDs, missing model files, capture errors, invalid config, and inference errors fail closed by setting `detection_status = DegradedSensorFailed { reason_code }` and logging the failing stage.
+
+Returned detections are filtered by `classes_of_interest` when that profile list is non-empty, matched into an in-memory tracker by class/IoU/center distance, and emitted as `DetectedEntity` records with stable `track_id`, `entity_id`, screen-space bbox, confidence, timestamps, and `velocity_px_per_s` after the second observation. Tracks that are not seen for 3000 ms are pruned so a leave/re-enter sequence reacquires a new track after a real loss interval while still tolerating strict-client/inference cadence jitter.
+
 ## 7. What is NOT covered
 
-- **CNN object detection.** `synapse-models` ships the `Detector` trait and ONNX session loader, but `M1State` does not invoke detectors in the current build; `entities: Vec<DetectedEntity>` is populated only by synthetic fixtures.
 - **Event extension runtime wiring.** `synapse-perception` exposes the
   `event_extensions` evaluator and validator, but the current `observe()` path
   does not yet automatically feed live detection/HUD events through profile
@@ -3496,7 +3502,7 @@ cuda = ["ort", "ort/cuda"]
 directml = ["ort", "ort/directml"]
 ```
 
-`synapse-audio` enables `directml`. `synapse-mcp` does not pull in CUDA or DirectML features explicitly; the configured-host install/setup path is responsible for ensuring the ONNX runtime DLL is present. If it is missing during issue work, the agent must acquire or configure it through local reversible workflows where possible and then read the physical DLL/path/source-of-truth directly.
+`synapse-audio` enables `directml`, and `synapse-mcp` depends on `synapse-models` with the `directml` feature so live M1 detection can attempt DirectML first and fall back through the loader's provider order. The configured-host install/setup path is responsible for ensuring the ONNX runtime DLL/model file is present. If it is missing during issue work, the agent must acquire or configure it through local reversible workflows where possible and then read the physical DLL/model path/source-of-truth directly.
 
 ### 2.2 Public surface
 
@@ -3506,7 +3512,7 @@ directml = ["ort", "ort/directml"]
 | `RegisteredModel` | Registry metadata for default detection models: id, label, filename, SHA-256, download URL, license SPDX, source model/repo, input shape, and class map. `DEFAULT_DETECTION_MODEL_ID = "rtdetr_v2_s_coco_onnx"` per ADR-0010. |
 | `ModelBackend` | `Cuda` \| `DirectMl` \| `Cpu` (default) |
 | `DetectOpts` | `{ confidence_threshold: u16 (default 50), max_detections: usize (default 100) }` |
-| `DetectionFrame` | `{ frame_seq: u64, width: u32, height: u32 }`. `validate()` returns `DETECTION_NO_FRAME` for zero dimensions. |
+| `DetectionFrame` | `{ frame_seq: u64, width: u32, height: u32, rgb: Vec<u8> }`. `validate()` returns `DETECTION_NO_FRAME` for zero dimensions, dimension overflow, or RGB byte length mismatch. |
 | `Detector` (trait) | `fn infer(&self, frame: DetectionFrame, opts: DetectOpts) -> ModelResult<DetectionBatch>` |
 | `ModelError` | thiserror enum with variants `DownloadFailed` / `HashMismatch` / `LoadFailed` / `BackendUnavailable` / `NoFrame` / `InferenceFailed`; `.code()` → `MODEL_*` / `DETECTION_*` |
 
