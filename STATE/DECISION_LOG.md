@@ -1259,3 +1259,19 @@ Outcome:
 - Patched `synapse-action` Windows clipboard write/clear to create a temporary hidden owner HWND, pass it to `OpenClipboard`, keep it through `CloseClipboard`, and verify the requested format is available after `SetClipboardData`.
 - Stopped pre-fix daemon PID `9388`; patched release build SHA256 `3BB80539A49DF75CF6B17DD89D574778DEEE295AC7EB8C005E65D234302F63C5`.
 - Redo clean manual FSV next.
+
+# 2026-06-02T14:11:19-05:00 - #604 final clipboard FSV accepted
+
+Decision: Accept #604 manual runtime evidence and proceed to final supporting checks/closeout.
+
+Evidence:
+- Final run `.runs\604\clipboard-fsv-20260602T1420-final` used repo-built daemon PID `47684` on `127.0.0.1:7888`; auth health ok, unauth health `401`, strict Inspector `tools/list=80`, and `act_clipboard` present.
+- Unicode, raw CF_TEXT ASCII, Notepad paste/file bytes, and 12175-byte large payload all matched separate physical SoT readbacks by byte length and SHA256.
+- Clear/empty, non-ASCII CF_TEXT backend-unavailable, structurally invalid enum, and real clipboard contention all failed or succeeded with expected before/after clipboard/storage state.
+- Final storage sample had `CF_ACTION_LOG=28` and redacted `act_clipboard` rows with length metadata only, not raw clipboard payload text.
+- Cleanup stopped PID `47684`, closed port `7888`, and `release_all`/physical input reads were neutral.
+
+Outcome:
+- Final supporting checks and release build passed; release SHA256 `00AD2DED150557F67BB08F2E0DBDF5C414E6D4539ADB26EE123BF66B88C666F6`.
+- Tracked diff token scan found no auth/token markers.
+- Commit/push state closeout, #604 RESOLVED comment, and close remain.

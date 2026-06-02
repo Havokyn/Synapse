@@ -1,5 +1,44 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T14:11:19-05:00
+- Active issue remains #604.
+- Final accepted #604 manual MCP/SoT run is `.runs\604\clipboard-fsv-20260602T1420-final`.
+  - Repo-built daemon PID `47684`, bind `127.0.0.1:7888`, binary `target\release\synapse-mcp.exe`, length `46848512`, SHA256 `3BB80539A49DF75CF6B17DD89D574778DEEE295AC7EB8C005E65D234302F63C5`.
+  - Authenticated `/health` returned `ok=true`, action `status=ok`, `emitter_available=true`, operator hotkey intentionally `disabled_by_env`; unauthenticated `/health` returned `401`.
+  - Strict MCP Inspector 0.21.2 `tools/list` loaded `80` tools and `act_clipboard` schema properties `format,text,verb`.
+  - Initial isolated storage SoT: `CF_ACTION_LOG=0`, `CF_KV=0`, pressure `Normal`; initial clipboard redacted SoT recorded format flags, length, and SHA only.
+- Accepted #604 behavior evidence:
+  - Unicode write/read: real `act_clipboard write/read format=unicode` matched separate `Get-Clipboard` UTF-8 SHA256 `DB0DBBAB631C89133ABB450E8BA47D164E540F46B0EE7480C88190FD803D39E8`.
+  - CF_TEXT ASCII: real `act_clipboard write/read format=text` matched raw Win32 `GetClipboardData(CF_TEXT)` bytes exactly: `66` data bytes plus NUL, SHA256 `F7508A30034A08222C6BD42BEA2047AB78707D8BA15CE2BCB9DA2E303D24E221`.
+  - Notepad paste/file SoT: clipboard payload `issue604-notepad-final-*` pasted via real MCP `act_press` Ctrl+V and saved via Ctrl+S; run-local file bytes matched expected `35` bytes, SHA256 `A962EE0254C6358E775A3F661093A4250980C7EA9AA0E8ABA94E05B8BE376001`.
+  - Large payload: `12175` byte Unicode payload write/read matched separate clipboard and MCP read SHA256 `38AA591F1CDDE53D317961BE2CDE4BCB60965D31221D3917B262AF3D373AF41D`.
+  - Clear/empty: `act_clipboard clear` removed `CF_TEXT` and `CF_UNICODETEXT`; `Get-Clipboard` returned empty string and MCP read returned `text_len=0`.
+  - Non-ASCII CF_TEXT: real `act_clipboard write format=text` with non-ASCII failed closed with backend-unavailable; empty clipboard formats/hash stayed unchanged.
+  - Structurally invalid `format=rtf` failed deserialization; `CF_ACTION_LOG` stayed `26` and clipboard stayed empty.
+  - Contention: separate PowerShell holder PID `101824` opened the clipboard; real `act_clipboard write` failed closed after `26` open attempts over `257 ms` with backend-unavailable; `CF_ACTION_LOG 26 -> 28` and clipboard stayed empty.
+  - Action-log redaction: final `CF_ACTION_LOG=28`; storage samples for `act_clipboard` showed `text_len` metadata and no raw large/notepad/contention payload strings or raw `"text"` field.
+- Cleanup:
+  - `release_all` returned `released_keys=0`, `released_buttons=0`, `neutralized_pads=0`; Ctrl/Shift/Alt/LButton/RButton read false.
+  - Daemon PID `47684` stopped and port `7888` closed.
+  - Notepad reused an existing user process (`72320`) for `notepad_paste_unicode.txt`; Ctrl+W/Ctrl+F4 attempts did not close the tab, so I left the user Notepad process untouched rather than killing a reused process. Run-local file is saved and verified.
+- Final supporting checks passed:
+  - `cargo fmt --check`;
+  - `git diff --check` with CRLF warnings only on state files;
+  - `cargo test -p synapse-action cf_text_non_ascii_fails_as_backend_unavailable_before_platform_open -- --nocapture`;
+  - `cargo test -p synapse-mcp text_format_non_ascii_reaches_backend_validation -- --nocapture`;
+  - `cargo test -p synapse-mcp act_clipboard_records_redacted_action_audit_rows -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_tools_list -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo check -p synapse-action -p synapse-mcp -j 2`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release binary readback: `target\release\synapse-mcp.exe`, length `46848512`, SHA256 `00AD2DED150557F67BB08F2E0DBDF5C414E6D4539ADB26EE123BF66B88C666F6`, `LastWriteTimeUtc=2026-06-02T19:19:54.2136974Z`.
+- Tracked diff token scan found zero matches for the user-provided Inspector token prefix, `Authorization: Bearer`, `SYNAPSE_BEARER_TOKEN=`, the issue-local auth token label, or `MCP_PROXY_AUTH_TOKEN=`.
+- Live git readback shows the #604 code patch is commit `e1cd979` on `main`/`origin/main`; current remaining dirty files are state updates plus unrelated operator changes (`docs/computergames/00_vision_and_scope.md` and untracked root docs), which will not be included in the #604 closeout commit.
+- Current next:
+  1. Commit only state updates with `[skip ci]`, push.
+  2. Post #604 RESOLVED evidence, close #604, remove stale labels, refresh queue.
+
 ## 2026-06-02T13:48:15-05:00
 - Active issue remains #604.
 - First isolated FSV daemon/run:

@@ -1,5 +1,33 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T14:11:19-05:00
+- Active issue #604 has implementation patch and accepted manual MCP/SoT FSV evidence; final supporting checks, commit/push, and GitHub closeout remain.
+- Patch in worktree:
+  - `crates/synapse-mcp/src/server/m2_tools.rs` records redacted `act_clipboard` action-audit start/result rows.
+  - `crates/synapse-mcp/src/server/action_audit.rs` adds custom redacted ok/error audit helpers.
+  - `crates/synapse-mcp/src/m2/clipboard.rs` lets non-ASCII CF_TEXT reach backend classification.
+  - `crates/synapse-action/src/clipboard.rs` fixes Windows write/clear ownership by opening clipboard with a temporary hidden owner HWND and verifying the requested format after `SetClipboardData`.
+- Accepted FSV run: `.runs\604\clipboard-fsv-20260602T1420-final`.
+  - Daemon PID `47684`, bind `127.0.0.1:7888`, release SHA256 `3BB80539A49DF75CF6B17DD89D574778DEEE295AC7EB8C005E65D234302F63C5`, authenticated health ok, unauth health `401`, strict Inspector `tools/list=80`, `act_clipboard` present.
+  - Unicode SoT hash `DB0DBBAB631C89133ABB450E8BA47D164E540F46B0EE7480C88190FD803D39E8`.
+  - CF_TEXT raw Win32 byte SoT hash `F7508A30034A08222C6BD42BEA2047AB78707D8BA15CE2BCB9DA2E303D24E221`.
+  - Notepad paste/file SoT hash `A962EE0254C6358E775A3F661093A4250980C7EA9AA0E8ABA94E05B8BE376001`.
+  - Large payload SoT hash `38AA591F1CDDE53D317961BE2CDE4BCB60965D31221D3917B262AF3D373AF41D`.
+  - Edges accepted: clear/empty read, non-ASCII CF_TEXT backend-unavailable, structurally invalid `format=rtf`, and clipboard contention fail-closed after `26` attempts/`257 ms`.
+  - Storage redaction accepted: final `CF_ACTION_LOG=28`, samples show `text_len` metadata and no raw payload strings/raw `"text"` field.
+  - Cleanup accepted: release_all zero/physical inputs neutral; PID `47684` stopped; port `7888` closed.
+  - Cleanup note: Notepad reused existing user PID `72320`; the run-local tab remained open after safe close attempts, and I did not kill the reused user process.
+- Final supporting checks passed:
+  - fmt, diff check, focused action/MCP clipboard regressions, schema sanitize, M3/M4 tool-list tests, touched-crate check, and release build.
+  - Final release SHA256 `00AD2DED150557F67BB08F2E0DBDF5C414E6D4539ADB26EE123BF66B88C666F6`, length `46848512`, timestamp `2026-06-02T19:19:54.2136974Z`.
+  - Tracked diff token scan found no matches for token/auth markers.
+- Git note:
+  - #604 code patch is already on `main`/`origin/main` as `e1cd979` (`fix(mcp): clipboard owner window and audit logging (#604)`).
+  - Current dirty non-state docs/untracked files are unrelated operator changes and should not be staged for #604.
+- Exact next actions:
+  1. Commit only state updates with `[skip ci]`, push.
+  2. Post #604 RESOLVED evidence, close issue, remove labels, refresh queue.
+
 ## Current Resume Point - 2026-06-02T13:48:15-05:00
 - Active issue remains #604.
 - First #604 run `.runs\604\clipboard-fsv-20260602T1328` found and rejected a real CF_TEXT false-success:
