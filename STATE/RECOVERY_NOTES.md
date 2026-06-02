@@ -1,30 +1,40 @@
 # RECOVERY NOTES - Synapse
 
-## Current Resume Point - 2026-06-02T03:26:47-05:00
-- #596 is closed and clean:
-  - commit `6051fb3 fix(mcp): reject empty element capture targets (#596) [skip ci]`;
-  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/596#issuecomment-4600229991;
-  - closure readback `state=CLOSED`, `closedAt=2026-06-02T08:25:48Z`;
-  - stale `status:in-progress` removed;
-  - branch clean at `HEAD == origin/main == 6051fb3`.
-- Active issue is #597:
-  - title `scenario(stress): OCR torture - read_text dense/tiny/multilingual, winrt vs crnn, cache`;
-  - START comment https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600240790;
-  - assigned to `ChrisRoyse`, labels include `status:in-progress` and `agent:codex`.
-- #597 intent:
-  - real MCP `read_text` triggers for known dense code/terminal text, tiny text, multilingual text, and backend modes `winrt`/`crnn`/`auto`;
-  - separate SoT readbacks from source text bytes/UI state/window or region geometry, isolated `CF_OCR_CACHE`, daemon logs, and timing deltas for stable-region cache hits.
-- Required #597 edges:
-  - zero-size/empty region;
-  - off-screen region;
-  - occluded/stale element region;
-  - rapidly-changing region where cache must not stale;
-  - structurally invalid params.
+## Current Resume Point - 2026-06-02T04:19:35-05:00
+- #597 is ready for commit and RESOLVED posting.
+- Patch:
+  - honors `ReadTextParams.backend`;
+  - fails closed for unwired CRNN;
+  - validates OCR regions and live element bboxes;
+  - adds focused-window fallback;
+  - uses one captured BGRA bitmap for OCR recognition and pixel-hash cache keys;
+  - writes/read-validates `CF_OCR_CACHE` rows.
+- Accepted manual FSV run: `.runs\597\ocr-fsv-20260602T035659`.
+  - repo-built daemon PID `42136`, bind `127.0.0.1:7870`, strict Inspector `tools/list=80`;
+  - target PID `3408`, title `Issue597OcrTarget`, UIA text box bboxes/elements read via isolated `observe`;
+  - dense WinRT miss then hit: cache `0->1->1`, log `OCR_CACHE_MISS_RECORDED` then `OCR_CACHE_HIT`;
+  - auto backend wrote separate row, CRNN failed closed with cache unchanged;
+  - tiny/multilingual winrt+auto produced OCR and cache rows through `CF_OCR_CACHE=6`;
+  - rapid changed pixels did not return stale cached BETA; occluded element id returned overlay text and wrote a different bitmap-hash row;
+  - zero-size, off-screen, and invalid-region edges all failed closed with cache unchanged;
+  - focused-window fallback wrote final row; final `CF_OCR_CACHE=10`;
+  - release_all returned zero; target/daemon/port cleaned up.
+- Final supporting checks passed:
+  - `cargo fmt --check`;
+  - `git diff --check`;
+  - focused `read_text_`, `ocr_cache_key`, and perception upscaling tests;
+  - touched-crate check;
+  - schema sanitize and `m4_tools_list`;
+  - release build.
+- Final release binary:
+  - SHA256 `11C259BD288FC5C71B50CCB6AA025826BD40428E842E93A4D93D4A351B20F674`;
+  - length `46692864`;
+  - `LastWriteTimeUtc=2026-06-02T09:19:26Z`.
 - Exact next actions:
-  1. Inspect OCR implementation (`read_text` tool, OCR backends, cache storage, tests/docs) before editing.
-  2. Build repo `synapse-mcp` release if needed and launch isolated #597 daemon with issue-local DB/log/appdata/token.
-  3. Verify process/binary/socket, unauth/auth health, and strict Inspector `tools/list` for `read_text`, `observe`, `find`, `storage_inspect`, and `release_all`.
-  4. Create deterministic visible OCR target(s) with known source bytes and run manual MCP/SoT FSV.
+  1. Review final diff.
+  2. Stage scoped #597 files plus `STATE/*`.
+  3. Commit `fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`.
+  4. Push, post #597 RESOLVED evidence, close #597, remove `status:in-progress`, refresh queue, and continue to #598 unless GitHub changed.
 
 ## Current Resume Point - 2026-06-02T03:21:12-05:00
 - Active issue #596 is ready for commit/RESOLVED posting.

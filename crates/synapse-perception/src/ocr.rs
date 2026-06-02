@@ -83,6 +83,26 @@ pub fn read_text_from_software_bitmap(
     platform::read_text_from_software_bitmap(region, bitmap)
 }
 
+#[cfg(windows)]
+/// Runs `WinRT` OCR over caller-provided BGRA screen-region bytes.
+///
+/// # Errors
+///
+/// Returns `OCR_BACKEND_UNAVAILABLE` when the bitmap dimensions or byte length
+/// are invalid or `WinRT` cannot run, and `OCR_NO_TEXT` when OCR completes with
+/// no recognized words.
+pub fn read_text_from_bgra_bitmap(
+    region: Rect,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> PerceptionResult<Vec<TextRegion>> {
+    if is_empty_region(region) {
+        return Err(PerceptionError::OcrNoText { region });
+    }
+    platform::read_text_from_bgra_bitmap(region, width, height, bytes)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
     use std::{
@@ -297,7 +317,10 @@ mod platform {
     const OCR_MAX_UPSCALE: u32 = 6;
 
     pub fn read_text(region: Rect) -> PerceptionResult<Vec<TextRegion>> {
-        let (bitmap, scale) = capture_region_ocr_bitmap(region)?;
+        let captured = screen_region_to_bgra_bitmap(region)
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        let (bitmap, scale) =
+            ocr_bitmap_from_bgra(captured.width, captured.height, &captured.bytes)?;
         let engine = ocr_engine()?;
         let result = engine
             .RecognizeAsync(&bitmap)
@@ -318,6 +341,22 @@ mod platform {
             .join()
             .map_err(|err| backend_unavailable(err.to_string()))?;
         text_regions_from_result(region, &result, 1.0)
+    }
+
+    pub fn read_text_from_bgra_bitmap(
+        region: Rect,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> PerceptionResult<Vec<TextRegion>> {
+        let (bitmap, scale) = ocr_bitmap_from_bgra(width, height, bytes)?;
+        let engine = ocr_engine()?;
+        let result = engine
+            .RecognizeAsync(&bitmap)
+            .map_err(|err| backend_unavailable(err.to_string()))?
+            .join()
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        text_regions_from_result(region, &result, f64::from(scale))
     }
 
     fn ocr_engine() -> PerceptionResult<&'static OcrEngine> {
@@ -407,33 +446,45 @@ mod platform {
         PerceptionError::OcrBackendUnavailable { detail }
     }
 
-    fn capture_region_ocr_bitmap(region: Rect) -> PerceptionResult<(SoftwareBitmap, u32)> {
-        let captured = screen_region_to_bgra_bitmap(region)
-            .map_err(|err| backend_unavailable(err.to_string()))?;
-        let scale = recognition_upscale(captured.height);
+    fn ocr_bitmap_from_bgra(
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> PerceptionResult<(SoftwareBitmap, u32)> {
+        validate_bgra_len(width, height, bytes)?;
+        let scale = recognition_upscale(height);
         let (width, height, bytes) = if scale > 1 {
-            let width = captured.width.checked_mul(scale).ok_or_else(|| {
-                backend_unavailable(format!(
-                    "scaled OCR width overflowed: {} * {scale}",
-                    captured.width
-                ))
+            let width = width.checked_mul(scale).ok_or_else(|| {
+                backend_unavailable(format!("scaled OCR width overflowed: {width} * {scale}"))
             })?;
-            let height = captured.height.checked_mul(scale).ok_or_else(|| {
-                backend_unavailable(format!(
-                    "scaled OCR height overflowed: {} * {scale}",
-                    captured.height
-                ))
+            let height = height.checked_mul(scale).ok_or_else(|| {
+                backend_unavailable(format!("scaled OCR height overflowed: {height} * {scale}"))
             })?;
             (
                 width,
                 height,
-                upscale_bgra(&captured.bytes, captured.width, captured.height, scale)?,
+                upscale_bgra(bytes, width / scale, height / scale, scale)?,
             )
         } else {
-            (captured.width, captured.height, captured.bytes)
+            (width, height, bytes.to_vec())
         };
         let bitmap = software_bitmap_from_bgra(&bytes, width, height)?;
         Ok((bitmap, scale))
+    }
+
+    fn validate_bgra_len(width: u32, height: u32, bytes: &[u8]) -> PerceptionResult<()> {
+        let expected_len = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| backend_unavailable("OCR BGRA dimensions overflowed".to_owned()))?;
+        let actual_len = u64::try_from(bytes.len())
+            .map_err(|_err| backend_unavailable("OCR BGRA byte length was invalid".to_owned()))?;
+        if actual_len != expected_len {
+            return Err(backend_unavailable(format!(
+                "OCR BGRA buffer length mismatch: expected {expected_len} bytes, got {actual_len}"
+            )));
+        }
+        Ok(())
     }
 
     fn recognition_upscale(height: u32) -> u32 {

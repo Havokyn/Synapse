@@ -1,5 +1,115 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T04:19:35-05:00
+- Active issue #597 has implementation, manual MCP/SoT FSV, cleanup, and final supporting checks complete; commit/RESOLVED posting/closeout are next.
+- Patch accepted for #597:
+  - `read_text` honors requested backend;
+  - `backend=auto` resolves to WinRT and gets a distinct cache key from explicit `winrt`;
+  - `backend=crnn` fails closed with `OCR_BACKEND_UNAVAILABLE` until a real provider is wired;
+  - zero/non-positive OCR regions fail before capture;
+  - element-id requests re-read live UIA bboxes;
+  - omitted-target requests fall back to focused element/window bbox;
+  - Windows cache path captures BGRA once, hashes the exact pixels, runs OCR from those bytes, writes `CF_OCR_CACHE`, and validates readback.
+- Accepted manual #597 FSV directory: `.runs\597\ocr-fsv-20260602T035659`.
+- Repo-built isolated daemon evidence:
+  - PID `42136`, bind `127.0.0.1:7870`, binary `target\release\synapse-mcp.exe`;
+  - process/socket readbacks passed;
+  - unauth `/health` returned `401 HTTP_TOKEN_INVALID`;
+  - auth `/health` returned `ok=true`;
+  - strict MCP Inspector tools/list via `node ...\@modelcontextprotocol\inspector\cli\build\cli.js` returned 80 tools and required `read_text`, `observe`, `find`, `storage_inspect`, `release_all`.
+- OCR target SoTs:
+  - deterministic visible Windows Forms target PID `3408`, title `Issue597OcrTarget`, HWND `17573350`;
+  - source text file `target\issue597_source_text.json` read back known dense/tiny/multilingual/rapid/occlusion strings;
+  - isolated MCP `observe` read back foreground `Issue597OcrTarget` and UIA text boxes/bboxes: dense `237,272,1740,225`, tiny `237,519,1740,72`, multilingual `237,632,1740,203`, rapid `237,887,840,120`, occlude element id `0x1fd0a92:0000002a01fd0a92`.
+- Manual OCR/cache evidence:
+  - dense `backend=winrt`: `CF_OCR_CACHE 0->1`, OCR text `ISSUE597 DENSE BLOCK 2468fn u32) ->`, cache row readback included requested/effective `winrt`, region, bitmap SHA256, result, and `recognition_latency_ms=15`;
+  - repeat dense `backend=winrt`: same text, `CF_OCR_CACHE` stayed `1`, log `OCR_CACHE_HIT`;
+  - dense `backend=auto`: same text, `CF_OCR_CACHE 1->2`, log row key separates `auto/winrt`;
+  - dense `backend=crnn`: failed closed with `OCR_BACKEND_UNAVAILABLE`, `CF_OCR_CACHE` stayed `2`;
+  - tiny `winrt` then `auto`: OCR text `ISSUE597 TINY TEXT 7391 SHALL FONT CACHE`, `CF_OCR_CACHE 2->4`;
+  - multilingual `winrt` then `auto`: OCR text contained `ISSUE597 MULTILINGUAL 8642`, `Bonjour monde`, `Guten Tag`, `Cafe naive`, `CF_OCR_CACHE 4->6`;
+  - rapid BETA: OCR text `ISSUE597 RAPID BETA 2222`, `CF_OCR_CACHE 6->7`; after switching physical pixels to visible ALPHA, WinRT returned `OCR_NO_TEXT` instead of stale BETA and cache stayed unchanged; switching back to BETA hit the existing cache row;
+  - occluded element-id: visible element text `ISSUE597 OCCLUDE VISIBLE 13579` wrote row `7->8`; same element id under overlay returned `ISSUE597 COVER PANEL 24680` and wrote row `8->9`;
+  - focused-window fallback: omitted target used focused `Issue597OcrTarget` bbox and wrote full-window OCR row `9->10`.
+- Manual fail-closed edges:
+  - zero-width region failed with non-empty-region error, cache `9->9`;
+  - off-screen region failed with `OCR_NO_TEXT`, cache `9->9`;
+  - structurally invalid region missing `h` failed deserialization, cache `9->9`.
+- Final runtime readback:
+  - final isolated `CF_OCR_CACHE=10`, size `16130`, row samples readable;
+  - daemon log recorded `OCR_CACHE_MISS_RECORDED`, `OCR_CACHE_HIT`, CRNN unavailable, zero-region, off-screen/no-text errors;
+  - Inspector `release_all` returned zero keys/buttons/pads;
+  - cleanup removed target PID `3408`, daemon PID `42136`, and port `7870`.
+- Final supporting checks passed:
+  - `cargo fmt --check`;
+  - `git diff --check` with line-ending warnings only;
+  - `cargo test -p synapse-mcp --bin synapse-mcp read_text_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp ocr_cache_key -- --nocapture`;
+  - `cargo test -p synapse-perception small_screen_ocr_regions_are_upscaled_before_recognition -- --nocapture`;
+  - `cargo check -p synapse-perception -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release binary readback:
+  - `target\release\synapse-mcp.exe`;
+  - length `46692864`;
+  - SHA256 `11C259BD288FC5C71B50CCB6AA025826BD40428E842E93A4D93D4A351B20F674`;
+  - `LastWriteTimeUtc=2026-06-02T09:19:26Z`.
+- Next:
+  1. Final diff review.
+  2. Commit #597 patch/state/docs with `[skip ci]`.
+  3. Post #597 RESOLVED evidence, close #597, remove stale `status:in-progress`.
+  4. Refresh the live issue queue and continue to #598 unless GitHub changed.
+
+## 2026-06-02T03:54:52-05:00
+- Required wake-up after compaction was rerun:
+  - read `docs/AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #351, #594, #597, the live open queue, git status/log/branch;
+  - wired `mcp__synapse.health`, `storage_inspect`, `observe`, and `find` all returned through the configured Synapse MCP client.
+- Live GitHub queue:
+  - #597 remains open, assigned to `ChrisRoyse`, labeled `status:in-progress` and `agent:codex`;
+  - #594 parent remains open;
+  - #624/#625 remain `status:blocked` on the Daybreak operator-only boundary;
+  - unblocked children still open include #598-#604 and #629-#634.
+- Git reconciliation:
+  - branch `main`;
+  - `HEAD == origin/main == ce6f048 docs(state): record issue 597 start [skip ci]`;
+  - dirty #597-owned files: `crates/synapse-mcp/src/m1.rs`, `crates/synapse-mcp/src/m1/ocr.rs`, `crates/synapse-mcp/src/server.rs`, `crates/synapse-mcp/src/server/m1_tools.rs`, `crates/synapse-perception/src/lib.rs`, `crates/synapse-perception/src/ocr.rs`, and systemspec docs.
+- #597 patch in worktree:
+  - `read_text` backend selection is now honored instead of silently ignoring `backend`;
+  - `backend=crnn` fails closed with `OCR_BACKEND_UNAVAILABLE` until a real CRNN runtime/model is wired;
+  - omitted target falls back to focused window bounds;
+  - `element_id` targets re-read live UIA bounds and reject non-positive regions before OCR;
+  - Windows OCR can run from one captured BGRA bitmap via `read_text_from_bgra_bitmap`;
+  - `read_text` captures pixels once, hashes the captured bitmap, and keys `CF_OCR_CACHE` by requested/effective backend, lang hash, region, bitmap dimensions, and bitmap SHA256;
+  - cache hits read/validate the persisted row; cache misses write/read back `OcrCacheRow` and log miss/hit events.
+- Supporting checks already passed before this compaction:
+  - `cargo fmt`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp read_text_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp ocr_cache_key -- --nocapture`;
+  - `cargo test -p synapse-perception small_screen_ocr_regions_are_upscaled_before_recognition -- --nocapture`;
+  - `cargo check -p synapse-perception -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo fmt --check`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Release binary readback from the pre-compaction build:
+  - `target\release\synapse-mcp.exe`;
+  - SHA256 `9C9F0D85D60E5E7E3ED014E7755193EA434BBCEAABA0B71051038372BB3A6AC0`.
+- First isolated #597 daemon launch attempt is not accepted:
+  - run dir `.runs\597\ocr-fsv-20260602T035217`;
+  - intended bind `127.0.0.1:7869`;
+  - recorded process PID `77292` had already exited;
+  - stdout/stderr capture was unreliable, so use a fresh run directory/port rather than accepting anything from this attempt.
+- Current configured MCP baseline:
+  - long-lived stdio daemon reports `ok=true`, active profile `vscode`, HTTP disabled, storage path `C:\Users\hotra\AppData\Local\synapse\db`;
+  - configured `CF_OCR_CACHE` row count is `0`;
+  - foreground is VS Code `how-to-spot-ai-writing.md - Synapse - Visual Studio Code`, bounds `x=5160,y=306,w=1838,h=656`.
+- Next:
+  1. Read the #597 diff end-to-end and inspect the failed daemon run artifacts.
+  2. Launch a fresh issue-local repo-built HTTP daemon from `target\release\synapse-mcp.exe`.
+  3. Verify process/binary/socket, unauth/auth health, strict Inspector `tools/list`, and required tools.
+  4. Create deterministic visible OCR target and run manual MCP/SoT FSV for dense/tiny/multilingual/backend/cache plus zero-size, off-screen, occluded element, rapidly-changing region, and structurally invalid params.
+
 ## 2026-06-02T03:26:47-05:00
 - #596 is closed.
   - Commit: `6051fb3 fix(mcp): reject empty element capture targets (#596) [skip ci]`.

@@ -28,4 +28,4 @@ pub use template_match::{
 };
 
 #[cfg(windows)]
-pub use ocr::read_text_from_software_bitmap;
+pub use ocr::{read_text_from_bgra_bitmap, read_text_from_software_bitmap};

@@ -130,7 +130,7 @@ The crate ensures a per-thread COM apartment (`ComApartmentKind`) before any UIA
 | `is_known_game_process(process_name) -> bool` | hardcoded list of "common game / fullscreen render-only process names |
 | `parse_perception_mode(&str) -> PerceptionResult<PerceptionMode>` | string parse used by `set_perception_mode` |
 | `OcrProvider`, `SystemOcrProvider`, `TextRegion`, `is_empty_region`, `read_text`, `read_text_with_provider` | `ocr.rs` |
-| `read_text_from_software_bitmap` (Windows only) | `ocr.rs` |
+| `read_text_from_software_bitmap`, `read_text_from_bgra_bitmap` (Windows only) | `ocr.rs` |
 | `HudAnchor`, `HudAnchorRegion`, `ResolvedHudRegion`, `resolve_anchor_region`, `resolve_hud_region`, `resolve_hud_region_rect` | `hud/anchor.rs` — resolves profile/compact HUD anchors against a foreground window client rect and returns left/top/right/bottom plus `Rect` readback |
 | `ExtractionSource`, `FieldExtraction`, `FieldExtractionRequest`, `extract_field`, `parse_hud_text` | `hud/extractor.rs` — applies per-field HUD confidence thresholds, accepts high-confidence template counters, and falls back to OCR plus parser when template confidence is low |
 | `HudTemplate`, `TemplateCounterConfig`, `extract_template_counter_from_region`, `extract_template_counter_from_frame` | `template_match.rs` — slotted normalized-correlation HUD counter extraction for hearts/hunger-style icon bars |
@@ -181,6 +181,10 @@ which is the real WinRT OCR path on Windows.
 
 Windows-only `read_text_from_software_bitmap(region, bitmap)` is the lower-level
 entrypoint for code paths that already have a `SoftwareBitmap` in hand.
+`read_text_from_bgra_bitmap(region, width, height, bytes)` applies the same
+small-region upscale and WinRT recognition path to caller-provided BGRA bytes;
+the MCP cache path uses it so hashing and recognition operate on the same
+captured pixels.
 
 HUD field extraction uses `FieldExtractionRequest { field, screen_region,
 region_image, templates, ocr_provider, stale_ms }`. For `TemplateMatch`, it
@@ -282,15 +286,20 @@ read storage/process/UI/log SoTs separately.
 3. Iterate entities with `m1/search::entity_match` (matches class_label substring).
 4. Sort by `score` descending. Truncate to `limit`.
 
-### 5.4 `read_text_in_state`
+### 5.4 `read_text`
 
-`m1/ocr.rs::read_text_in_state`:
+`server/m1_tools.rs::read_text`:
 
-1. If `params.region` is `Some`, capture that region via `synapse_capture::screen_region_to_software_bitmap` and run WinRT OCR via `synapse_perception::read_text_from_software_bitmap`.
-2. If `params.element_id` is `Some`, resolve via `synapse_a11y::re_resolve`, compute its bbox, then proceed as above.
-3. Else: read the focused element's bbox.
-4. Builds an `OcrResult { full_text, words, confidence, region, lang }`.
-5. The `backend` param is currently retained for schema stability but does not branch (always WinRT in this build).
+1. Resolves the request through `m1/ocr.rs::resolve_read_text_request`.
+   - `params.region` is accepted only when `w > 0 && h > 0`.
+   - `params.element_id` is re-read through live UIA and uses the current element bounding box.
+   - If neither target is supplied, the current focused element bbox is used.
+2. Resolves backend semantics fail-closed:
+   - `winrt` and `auto` execute the WinRT OCR path on Windows.
+   - `crnn` returns `OCR_BACKEND_UNAVAILABLE` until a real CRNN runtime/model provider is wired.
+3. On Windows, captures the requested screen region once as BGRA bytes, hashes those exact pixels, and looks for an exact `CF_OCR_CACHE` row keyed by requested backend, effective backend, language hash, region, bitmap dimensions, and bitmap SHA-256.
+4. Cache hits return the persisted `OcrResult`. Cache misses run `read_text_from_bgra_bitmap`, write an OCR cache JSON row to `CF_OCR_CACHE`, and read that row back before returning.
+5. The returned `OcrResult` remains `{ full_text, words, confidence, region, lang }`; cache status is verified through storage/log SoTs rather than returned as text.
 
 ### 5.5 `set_capture_target_in_state`
 

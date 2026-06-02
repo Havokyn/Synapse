@@ -87,7 +87,7 @@ crates/synapse-mcp/
     │   └── sse.rs                  # SseState: subscription map, ring buffer, Last-Event-ID resume, publish/stats
     ├── m1.rs                       # M1State + ObserveParams/FindParams/ReadTextParams/SetCapture/SetPerceptionMode
     ├── m1/
-    │   ├── ocr.rs                  # read_text_in_state implementation
+    │   ├── ocr.rs                  # read_text request resolution/backend handling
     │   ├── search.rs               # element_match + entity_match scoring for `find`
     │   └── sources.rs              # platform_input + synthetic_notepad_input observation source
     ├── m2.rs                       # M2State (emitter actor handle + recording backend + snapshot handle)

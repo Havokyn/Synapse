@@ -878,3 +878,36 @@ Evidence:
 
 Outcome:
 - Begin #597 implementation/investigation with code inspection of OCR backend and cache paths before any FSV setup.
+
+# 2026-06-02T03:54:52-05:00 - #597 post-compaction resume reconciled to dirty OCR/cache patch
+
+Decision: Continue #597 from the existing OCR/cache patch and rerun isolated runtime setup from a fresh daemon/run directory, rather than treating the first failed daemon launch as FSV evidence.
+
+Evidence:
+- Required wake-up files, #351, #594, #597, live queue, and git status/log/branch were reread.
+- Git shows `HEAD == origin/main == ce6f048` with dirty #597-owned OCR/MCP/docs files.
+- Wired configured Synapse MCP client still loads `health`, `storage_inspect`, `observe`, and `find`; configured `CF_OCR_CACHE` row count is `0`.
+- The first #597 isolated launch attempt under `.runs\597\ocr-fsv-20260602T035217` recorded PID `77292` already exited and did not provide reliable stdout/stderr capture.
+- Supporting checks and release build were already run before compaction; the release binary hash is `9C9F0D85D60E5E7E3ED014E7755193EA434BBCEAABA0B71051038372BB3A6AC0`.
+
+Outcome:
+- Record current state, then inspect diff/run artifacts and launch a fresh repo-built HTTP daemon for real Inspector `tools/list` and `tools/call read_text` manual SoT FSV.
+
+# 2026-06-02T04:19:35-05:00 - #597 OCR backend/cache fix accepted after manual MCP FSV
+
+Decision: Accept the #597 `read_text` backend/cache implementation for commit and issue closeout.
+
+Evidence:
+- Fresh repo-built daemon PID `42136` on `127.0.0.1:7870` passed process/socket/auth health and strict Inspector `tools/list` with 80 tools.
+- Deterministic target PID `3408` / `Issue597OcrTarget` had source text bytes read from `target\issue597_source_text.json` and physical UIA bboxes read through isolated `observe`.
+- Dense WinRT OCR wrote `CF_OCR_CACHE` row `0->1`, repeat same pixels stayed `1` and daemon log recorded `OCR_CACHE_HIT`; row readback includes requested/effective backend, lang, region, bitmap SHA256, result, latency, and word count.
+- `backend=auto` wrote a separate `auto/winrt` row; `backend=crnn` failed closed with `OCR_BACKEND_UNAVAILABLE` and no cache growth.
+- Tiny and multilingual regions both OCRed through `winrt` and `auto`; cache grew to `6`.
+- Rapid changed pixels did not return stale cached BETA after switching to ALPHA; occluded element-id read returned the overlay text and wrote a different bitmap-hash row.
+- Zero-size, off-screen, and structurally invalid region edges all failed closed and left cache count unchanged.
+- Focused-window fallback wrote the final full-window row; final isolated `CF_OCR_CACHE=10`.
+- Cleanup verified `release_all` zero, target absent, daemon absent, and port `7870` closed.
+- Final supporting checks and release build passed; final release SHA256 is `11C259BD288FC5C71B50CCB6AA025826BD40428E842E93A4D93D4A351B20F674`.
+
+Outcome:
+- Commit/push with `[skip ci]`, post #597 RESOLVED evidence, close #597, refresh the queue, then continue to the next unblocked issue.

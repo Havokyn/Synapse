@@ -21,7 +21,9 @@ use synapse_core::{
 };
 use synapse_perception::{ObservationInput, ObserveInclude, parse_perception_mode};
 
-pub use ocr::read_text_in_state;
+#[cfg(windows)]
+pub use ocr::read_text_request_from_bgra;
+pub use ocr::{ResolvedReadTextRequest, read_text_request_uncached, resolve_read_text_request};
 use search::{element_match, entity_match};
 pub use sources::{FsRecentTracker, populate_clipboard_summary, populate_fs_recent};
 use sources::{platform_input, synthetic_notepad_input, window_input_from_hwnd};
@@ -246,10 +248,6 @@ pub struct ReadTextParams {
     #[serde(default)]
     pub element_id: Option<ElementId>,
     #[serde(default)]
-    #[expect(
-        dead_code,
-        reason = "backend remains part of the M1 request schema; provider selection is not branched here yet"
-    )]
     pub backend: OcrBackend,
     #[serde(default)]
     pub lang_hint: Option<String>,
@@ -817,6 +815,108 @@ mod tests {
             assert_eq!(
                 error.data.as_ref().and_then(|data| data.get("code")),
                 Some(&json!(error_codes::CAPTURE_TARGET_INVALID))
+            );
+        }
+    }
+
+    #[test]
+    fn read_text_resolves_focused_region_when_target_is_omitted() {
+        let mut state = M1State::default();
+        state.synthetic = Some(synthetic_notepad_input());
+        let focused = state
+            .synthetic
+            .as_ref()
+            .and_then(|input| input.focused.as_ref())
+            .expect("synthetic fixture has focused element")
+            .bbox;
+
+        let request = resolve_read_text_request(
+            &state,
+            &ReadTextParams {
+                backend: OcrBackend::Auto,
+                lang_hint: Some(" en-US ".to_owned()),
+                ..ReadTextParams::default()
+            },
+        )
+        .expect("focused fallback should resolve");
+
+        assert_eq!(request.region, focused);
+        assert_eq!(request.requested_backend, OcrBackend::Auto);
+        assert_eq!(request.effective_backend, OcrBackend::Winrt);
+        assert_eq!(request.lang(), "en-US");
+        assert!(request.synthetic);
+    }
+
+    #[test]
+    fn read_text_crnn_backend_fails_closed_until_provider_is_wired() {
+        let mut state = M1State::default();
+        state.synthetic = Some(synthetic_notepad_input());
+
+        let error = resolve_read_text_request(
+            &state,
+            &ReadTextParams {
+                region: Some(Rect {
+                    x: 1,
+                    y: 2,
+                    w: 80,
+                    h: 24,
+                }),
+                backend: OcrBackend::Crnn,
+                ..ReadTextParams::default()
+            },
+        )
+        .expect_err("unwired CRNN backend must not silently fall through");
+
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&json!(error_codes::OCR_BACKEND_UNAVAILABLE))
+        );
+        assert!(error.message.contains("CRNN OCR backend"));
+    }
+
+    #[test]
+    fn read_text_rejects_zero_sized_regions_before_ocr() {
+        let mut state = M1State::default();
+        state.synthetic = Some(synthetic_notepad_input());
+
+        for region in [
+            Rect {
+                x: 1,
+                y: 2,
+                w: 0,
+                h: 24,
+            },
+            Rect {
+                x: 1,
+                y: 2,
+                w: 80,
+                h: 0,
+            },
+            Rect {
+                x: 1,
+                y: 2,
+                w: -1,
+                h: 24,
+            },
+            Rect {
+                x: 1,
+                y: 2,
+                w: 80,
+                h: -1,
+            },
+        ] {
+            let error = resolve_read_text_request(
+                &state,
+                &ReadTextParams {
+                    region: Some(region),
+                    backend: OcrBackend::Winrt,
+                    ..ReadTextParams::default()
+                },
+            )
+            .expect_err("empty OCR regions must fail closed");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("code")),
+                Some(&json!(error_codes::OCR_NO_TEXT))
             );
         }
     }

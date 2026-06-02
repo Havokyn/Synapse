@@ -3,27 +3,40 @@ use super::{
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
     SetPerceptionModeResponse, SynapseService, current_input, empty_input_schema, find_in_state,
     mcp_error, observe_include, populate_audio_summary, populate_clipboard_summary,
-    populate_fs_recent, read_text_in_state, set_capture_target_in_state,
-    set_perception_mode_in_state, tool, tool_router,
+    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
+    set_capture_target_in_state, set_perception_mode_in_state, tool, tool_router,
 };
 
 #[cfg(windows)]
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
+#[cfg(windows)]
+use chrono::{DateTime, Utc};
 #[cfg(windows)]
 use image::{GrayImage, Luma};
-#[cfg(not(windows))]
-use synapse_core::error_codes;
-use synapse_core::{HudFieldError, HudReadings, Profile};
+#[cfg(windows)]
+use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use sha2::{Digest as _, Sha256};
+use synapse_core::{HudFieldError, HudReadings, OcrResult, Profile, error_codes};
 use synapse_perception::ObservationAssembler;
+#[cfg(windows)]
+use synapse_storage::{cf, decode_json, encode_json};
 
 #[cfg(windows)]
-use synapse_core::{HudExtractor, HudFieldSpec, HudReading, Point, Rect};
+use synapse_core::{
+    HudExtractor, HudFieldSpec, HudReading, OcrBackend, Point, Rect, SCHEMA_VERSION,
+};
 #[cfg(windows)]
 use synapse_perception::{
     FieldExtractionRequest, HudTemplate, OcrProvider, PerceptionError, PerceptionResult,
     SystemOcrProvider, TextRegion, extract_field, parse_hud_text, resolve_hud_region_rect,
 };
+#[cfg(windows)]
+use synapse_reflex::ReflexRuntime;
 
 #[tool_router(router = m1_tool_router, vis = "pub(super)")]
 impl SynapseService {
@@ -103,8 +116,11 @@ impl SynapseService {
             kind = "read_text",
             "tool.invocation kind=read_text"
         );
-        let state = self.m1_state()?;
-        read_text_in_state(&state, params.0).map(Json)
+        let request = {
+            let state = self.m1_state()?;
+            resolve_read_text_request(&state, &params.0)?
+        };
+        self.read_text_request_with_cache(request).map(Json)
     }
 
     #[tool(description = "Set the active capture target")]
@@ -210,6 +226,303 @@ impl SynapseService {
                 );
             }
         }
+    }
+}
+
+impl SynapseService {
+    #[cfg(windows)]
+    fn read_text_request_with_cache(
+        &self,
+        request: crate::m1::ResolvedReadTextRequest,
+    ) -> Result<OcrResult, ErrorData> {
+        if request.synthetic || request.effective_backend != OcrBackend::Winrt {
+            return read_text_request_uncached(&request);
+        }
+
+        let captured =
+            synapse_capture::screen_region_to_bgra_bitmap(request.region).map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!(
+                        "OCR screen capture failed for region {:?}: {error}",
+                        request.region
+                    ),
+                )
+            })?;
+        let bitmap_sha256 = sha256_hex(&captured.bytes);
+        let cache_key = ocr_cache_key(&request, captured.width, captured.height, &bitmap_sha256);
+        let runtime = self.reflex_runtime()?;
+
+        {
+            let runtime = lock_reflex_runtime(&runtime)?;
+            if let Some(row) = read_ocr_cache_row(
+                &runtime,
+                &cache_key,
+                &request,
+                captured.width,
+                captured.height,
+                &bitmap_sha256,
+            )? {
+                tracing::info!(
+                    code = "OCR_CACHE_HIT",
+                    cache_key = %cache_key,
+                    backend = ocr_backend_name(request.effective_backend),
+                    region_x = request.region.x,
+                    region_y = request.region.y,
+                    region_w = request.region.w,
+                    region_h = request.region.h,
+                    word_count = row.word_count,
+                    recognition_latency_ms = row.recognition_latency_ms,
+                    "OCR cache hit"
+                );
+                return Ok(row.result);
+            }
+        }
+
+        let recognition_start = Instant::now();
+        let result = crate::m1::read_text_request_from_bgra(&request, &captured)?;
+        let recognition_latency_ms = elapsed_ms_u64(recognition_start);
+        let row = OcrCacheRow {
+            schema_version: SCHEMA_VERSION,
+            cache_key: cache_key.clone(),
+            created_at: Utc::now(),
+            requested_backend: request.requested_backend,
+            effective_backend: request.effective_backend,
+            lang: request.lang(),
+            region: request.region,
+            bitmap_sha256: bitmap_sha256.clone(),
+            bitmap_width: captured.width,
+            bitmap_height: captured.height,
+            bitmap_bytes: captured.bytes.len() as u64,
+            result: result.clone(),
+            recognition_latency_ms,
+            word_count: result.words.len() as u64,
+        };
+        let encoded = encode_json(&row).map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("OCR cache row encode failed for key {cache_key}: {error}"),
+            )
+        })?;
+        {
+            let runtime = lock_reflex_runtime(&runtime)?;
+            if !runtime.storage_pressure_permits_write(cf::CF_OCR_CACHE) {
+                return Err(mcp_error(
+                    error_codes::STORAGE_WRITE_FAILED,
+                    format!(
+                        "OCR cache write refused under disk pressure: cf_name={} key={cache_key}",
+                        cf::CF_OCR_CACHE
+                    ),
+                ));
+            }
+            runtime
+                .storage_put_rows(
+                    cf::CF_OCR_CACHE,
+                    vec![(cache_key.as_bytes().to_vec(), encoded)],
+                )
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("OCR cache write failed for key {cache_key}: {error}"),
+                    )
+                })?;
+            let readback = read_ocr_cache_row(
+                &runtime,
+                &cache_key,
+                &request,
+                captured.width,
+                captured.height,
+                &bitmap_sha256,
+            )?
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::STORAGE_WRITE_FAILED,
+                    format!("OCR cache write had no readback row: key={cache_key}"),
+                )
+            })?;
+            if readback.result != result {
+                return Err(mcp_error(
+                    error_codes::STORAGE_WRITE_FAILED,
+                    format!("OCR cache readback result mismatch for key {cache_key}"),
+                ));
+            }
+        }
+
+        tracing::info!(
+            code = "OCR_CACHE_MISS_RECORDED",
+            cache_key = %cache_key,
+            backend = ocr_backend_name(request.effective_backend),
+            region_x = request.region.x,
+            region_y = request.region.y,
+            region_w = request.region.w,
+            region_h = request.region.h,
+            word_count = result.words.len(),
+            recognition_latency_ms,
+            "OCR cache miss recorded"
+        );
+        Ok(result)
+    }
+
+    #[cfg(not(windows))]
+    fn read_text_request_with_cache(
+        &self,
+        request: crate::m1::ResolvedReadTextRequest,
+    ) -> Result<OcrResult, ErrorData> {
+        read_text_request_uncached(&request)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OcrCacheRow {
+    schema_version: u32,
+    cache_key: String,
+    created_at: DateTime<Utc>,
+    requested_backend: OcrBackend,
+    effective_backend: OcrBackend,
+    lang: String,
+    region: Rect,
+    bitmap_sha256: String,
+    bitmap_width: u32,
+    bitmap_height: u32,
+    bitmap_bytes: u64,
+    result: OcrResult,
+    recognition_latency_ms: u64,
+    word_count: u64,
+}
+
+#[cfg(windows)]
+fn read_ocr_cache_row(
+    runtime: &ReflexRuntime,
+    cache_key: &str,
+    request: &crate::m1::ResolvedReadTextRequest,
+    bitmap_width: u32,
+    bitmap_height: u32,
+    bitmap_sha256: &str,
+) -> Result<Option<OcrCacheRow>, ErrorData> {
+    let rows = runtime
+        .storage_cf_prefix_rows(cf::CF_OCR_CACHE, cache_key.as_bytes(), 1)
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("OCR cache read failed for key {cache_key}: {error}"),
+            )
+        })?;
+    let Some((row_key, value)) = rows
+        .into_iter()
+        .find(|(row_key, _value)| row_key.as_slice() == cache_key.as_bytes())
+    else {
+        return Ok(None);
+    };
+    let row = decode_json::<OcrCacheRow>(&value).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("OCR cache row decode failed for key {cache_key}: {error}"),
+        )
+    })?;
+    if !valid_ocr_cache_row(
+        &row,
+        cache_key,
+        request,
+        bitmap_width,
+        bitmap_height,
+        bitmap_sha256,
+    ) {
+        tracing::warn!(
+            code = "OCR_CACHE_ROW_INVALID",
+            cache_key = %cache_key,
+            row_key = %String::from_utf8_lossy(&row_key),
+            "OCR cache row failed validation and will be ignored"
+        );
+        return Ok(None);
+    }
+    Ok(Some(row))
+}
+
+#[cfg(windows)]
+fn valid_ocr_cache_row(
+    row: &OcrCacheRow,
+    cache_key: &str,
+    request: &crate::m1::ResolvedReadTextRequest,
+    bitmap_width: u32,
+    bitmap_height: u32,
+    bitmap_sha256: &str,
+) -> bool {
+    row.schema_version == SCHEMA_VERSION
+        && row.cache_key == cache_key
+        && row.requested_backend == request.requested_backend
+        && row.effective_backend == request.effective_backend
+        && row.lang == request.lang()
+        && row.region == request.region
+        && row.bitmap_width == bitmap_width
+        && row.bitmap_height == bitmap_height
+        && row.bitmap_sha256 == bitmap_sha256
+        && row.result.region == request.region
+}
+
+#[cfg(windows)]
+fn ocr_cache_key(
+    request: &crate::m1::ResolvedReadTextRequest,
+    bitmap_width: u32,
+    bitmap_height: u32,
+    bitmap_sha256: &str,
+) -> String {
+    format!(
+        "ocr/cache/v1/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}",
+        ocr_backend_name(request.requested_backend),
+        ocr_backend_name(request.effective_backend),
+        sha256_hex(request.lang().as_bytes()),
+        request.region.x,
+        request.region.y,
+        request.region.w,
+        request.region.h,
+        bitmap_width,
+        bitmap_height,
+        bitmap_sha256
+    )
+}
+
+#[cfg(windows)]
+fn lock_reflex_runtime(
+    runtime: &std::sync::Arc<std::sync::Mutex<ReflexRuntime>>,
+) -> Result<std::sync::MutexGuard<'_, ReflexRuntime>, ErrorData> {
+    runtime.lock().map_err(|_error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            "reflex runtime lock poisoned while accessing OCR cache",
+        )
+    })
+}
+
+#[cfg(windows)]
+fn elapsed_ms_u64(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(windows)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex_encode(&digest)
+}
+
+#[cfg(windows)]
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+#[cfg(windows)]
+const fn ocr_backend_name(backend: OcrBackend) -> &'static str {
+    match backend {
+        OcrBackend::Winrt => "winrt",
+        OcrBackend::Crnn => "crnn",
+        OcrBackend::Auto => "auto",
     }
 }
 
@@ -509,7 +822,9 @@ fn template_value(field_name: &str, path: &str, index: usize) -> PerceptionResul
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::template_value;
+    use super::{ocr_cache_key, sha256_hex, template_value};
+    use crate::m1::ResolvedReadTextRequest;
+    use synapse_core::{OcrBackend, Rect};
 
     #[test]
     fn template_values_are_field_specific_for_minecraft_status_bars() -> Result<(), String> {
@@ -530,6 +845,55 @@ mod tests {
         assert_eq!(hunger_half, 1);
         assert_eq!(hunger_empty, 0);
         Ok(())
+    }
+
+    #[test]
+    fn ocr_cache_key_changes_when_pixels_change() {
+        let request = ResolvedReadTextRequest {
+            region: Rect {
+                x: 10,
+                y: 20,
+                w: 200,
+                h: 80,
+            },
+            requested_backend: OcrBackend::Winrt,
+            effective_backend: OcrBackend::Winrt,
+            lang_hint: Some("en-US".to_owned()),
+            synthetic: false,
+        };
+
+        let first_hash = sha256_hex(&[1, 2, 3, 4]);
+        let second_hash = sha256_hex(&[1, 2, 3, 5]);
+
+        let first = ocr_cache_key(&request, 200, 80, &first_hash);
+        let second = ocr_cache_key(&request, 200, 80, &second_hash);
+
+        assert_ne!(first, second);
+        assert!(first.contains("/winrt/winrt/"));
+    }
+
+    #[test]
+    fn ocr_cache_key_separates_auto_from_explicit_winrt_requests() {
+        let mut explicit = ResolvedReadTextRequest {
+            region: Rect {
+                x: 10,
+                y: 20,
+                w: 200,
+                h: 80,
+            },
+            requested_backend: OcrBackend::Winrt,
+            effective_backend: OcrBackend::Winrt,
+            lang_hint: None,
+            synthetic: false,
+        };
+        let hash = sha256_hex(&[9, 9, 9, 9]);
+        let explicit_key = ocr_cache_key(&explicit, 200, 80, &hash);
+
+        explicit.requested_backend = OcrBackend::Auto;
+        let auto_key = ocr_cache_key(&explicit, 200, 80, &hash);
+
+        assert_ne!(explicit_key, auto_key);
+        assert!(auto_key.contains("/auto/winrt/"));
     }
 }
 
