@@ -2038,6 +2038,98 @@ mod tests {
         }
     }
 
+    fn combo_press_step(at_ms: u32, key: &str) -> ActComboStep {
+        ActComboStep {
+            at_ms,
+            action: ActComboAction::ActPress,
+            params: json!({
+                "keys": [key],
+                "hold_ms": 1,
+                "backend": "software",
+            }),
+            backend: None,
+        }
+    }
+
+    fn combo_params(steps: Vec<ActComboStep>) -> ActComboParams {
+        ActComboParams {
+            steps,
+            backend: Backend::Software,
+            idempotency_key: None,
+        }
+    }
+
+    fn assert_tool_params_invalid(error: &ErrorData) {
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(|code| code.as_str()),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn combo_rejects_empty_steps() {
+        let error = match validate_combo_params(&combo_params(Vec::new())) {
+            Ok(()) => panic!("empty combo should reject"),
+            Err(error) => error,
+        };
+
+        assert_tool_params_invalid(&error);
+        assert!(
+            error
+                .message
+                .contains("steps must contain at least one step")
+        );
+    }
+
+    #[test]
+    fn combo_rejects_more_than_256_steps() {
+        let steps = (0..=MAX_COMBO_STEPS)
+            .map(|index| combo_press_step(u32::try_from(index).unwrap_or(u32::MAX), "f13"))
+            .collect::<Vec<_>>();
+        let error = match validate_combo_params(&combo_params(steps)) {
+            Ok(()) => panic!("257-step combo should reject"),
+            Err(error) => error,
+        };
+
+        assert_tool_params_invalid(&error);
+        assert!(error.message.contains("exceeds max 256"));
+    }
+
+    #[test]
+    fn combo_rejects_non_monotonic_steps() {
+        let error = match validate_combo_params(&combo_params(vec![
+            combo_press_step(10, "f14"),
+            combo_press_step(9, "f15"),
+        ])) {
+            Ok(()) => panic!("non-monotonic combo should reject"),
+            Err(error) => error,
+        };
+
+        assert_tool_params_invalid(&error);
+        assert!(error.message.contains("at_ms must be monotonic"));
+    }
+
+    #[test]
+    fn combo_rejects_non_press_action() {
+        let params = combo_params(vec![ActComboStep {
+            at_ms: 0,
+            action: ActComboAction::ActClick,
+            params: json!({"target": {"x": 0, "y": 0}}),
+            backend: None,
+        }]);
+        let error = match combo_steps_from_params(&params) {
+            Ok(steps) => panic!("non-press combo action should reject, got {steps:?}"),
+            Err(error) => error,
+        };
+
+        assert_tool_params_invalid(&error);
+        assert!(error.message.contains("supported action: act_press"));
+    }
+
     #[test]
     fn combo_rejects_nested_press_backend_mismatch() {
         let params = ActComboParams {

@@ -26,8 +26,9 @@ pub use scheduler_handle::SchedulerHandle;
 use scheduler_loop::{
     ReflexControl, RuntimeReflex, RuntimeState, aim_track_states, combo_states, hold_button_states,
     hold_move_states, lock_controls, mark_reflex_action_denied, mark_reflex_active_if_starved,
-    mark_reflex_error, mark_reflex_fired, mark_reflex_lifetime_expired, mark_reflex_starved,
-    mark_reflex_track_lost, run_scheduler_thread, status_for_reflex,
+    mark_reflex_combo_completed, mark_reflex_error, mark_reflex_fired,
+    mark_reflex_lifetime_expired, mark_reflex_starved, mark_reflex_track_lost,
+    run_scheduler_thread, status_for_reflex,
 };
 
 pub const MAX_SCHEDULED_REFLEXES: usize = 32;

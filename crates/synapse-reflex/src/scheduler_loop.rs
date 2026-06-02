@@ -8,7 +8,7 @@ use std::{
 };
 
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 use synapse_action::ActionHandle;
 use synapse_core::{
     ReflexLifetime, ReflexState, ReflexStatus, SCHEMA_VERSION, StoredAuditContext,
@@ -339,6 +339,28 @@ pub(super) fn mark_reflex_lifetime_expired(runtime: &RuntimeState, index: usize,
     }
 }
 
+pub(super) fn mark_reflex_combo_completed(
+    runtime: &RuntimeState,
+    index: usize,
+    combo_completion: Value,
+) {
+    if let Some(control) = lock_controls(&runtime.controls).get_mut(index) {
+        control.active = false;
+    }
+    let expired_status = if let Some(status) = lock_statuses(&runtime.statuses).get_mut(index) {
+        status.state = ReflexState::Expired;
+        status.last_fired_at = Some(Utc::now());
+        status.fire_count = status.fire_count.saturating_add(1);
+        status.last_error_code = Some(error_codes::REFLEX_LIFETIME_EXPIRED.to_owned());
+        Some(status.clone())
+    } else {
+        None
+    };
+    if let Some(status) = expired_status {
+        write_lifetime_expired_audit_with_combo(runtime, &status, "completed", combo_completion);
+    }
+}
+
 pub(super) fn mark_reflex_error(runtime: &RuntimeState, index: usize, code: &str) {
     if let Some(status) = lock_statuses(&runtime.statuses).get_mut(index) {
         status.last_error_code = Some(code.to_owned());
@@ -379,9 +401,36 @@ pub(super) fn mark_reflex_action_denied(runtime: &RuntimeState, index: usize) {
 }
 
 fn write_lifetime_expired_audit(runtime: &RuntimeState, status: &ReflexStatus, reason: &str) {
+    write_lifetime_expired_audit_inner(runtime, status, reason, None);
+}
+
+fn write_lifetime_expired_audit_with_combo(
+    runtime: &RuntimeState,
+    status: &ReflexStatus,
+    reason: &str,
+    combo_completion: Value,
+) {
+    write_lifetime_expired_audit_inner(runtime, status, reason, Some(combo_completion));
+}
+
+fn write_lifetime_expired_audit_inner(
+    runtime: &RuntimeState,
+    status: &ReflexStatus,
+    reason: &str,
+    combo_completion: Option<Value>,
+) {
     let Some(db) = runtime.audit_db.as_deref() else {
         return;
     };
+    let mut details = json!({
+        "kind": REFLEX_LIFETIME_EXPIRED_KIND,
+        "reason": reason,
+        "tick_index": runtime.tick_index,
+        "fire_count": status.fire_count,
+    });
+    if let Some(combo_completion) = combo_completion {
+        details["combo_completion"] = combo_completion;
+    }
     let audit = StoredReflexAudit {
         schema_version: SCHEMA_VERSION,
         audit_id: Uuid::now_v7().to_string(),
@@ -392,12 +441,7 @@ fn write_lifetime_expired_audit(runtime: &RuntimeState, status: &ReflexStatus, r
         audit_context: runtime.audit_context.clone(),
         steps: Vec::new(),
         error_code: Some(error_codes::REFLEX_LIFETIME_EXPIRED.to_owned()),
-        details: json!({
-            "kind": REFLEX_LIFETIME_EXPIRED_KIND,
-            "reason": reason,
-            "tick_index": runtime.tick_index,
-            "fire_count": status.fire_count,
-        }),
+        details,
         redacted: false,
         redactions: Vec::new(),
     };

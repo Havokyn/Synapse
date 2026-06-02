@@ -1088,3 +1088,59 @@ Evidence:
 
 Outcome:
 - Proceed to tracked diff/token scan, `[skip ci]` commit, push, #600 RESOLVED comment/closeout, then refresh queue for #601.
+
+# 2026-06-02T09:45:00-05:00 - #601 starts after #600 closure
+
+Decision: Claim #601 as the next unblocked #594 child after closing #600.
+
+Evidence:
+- #600 readback showed `state=CLOSED`, `closedAt=2026-06-02T14:39:18Z`, and stale labels removed.
+- `git status --short --branch` read `## main...origin/main`.
+- Live open queue shows #601 as the next unblocked child before #602-#604 and #629-#634; #624/#625 remain blocked.
+- #601 requires real MCP `act_combo` timing FSV for monotonic <=256-step sequences, jitter readback, and fail-closed edge validation.
+
+Outcome:
+- Posted #601 START comment and labeled/assigned the issue.
+- Inspect combo/reflex scheduling code next.
+
+# 2026-06-02T10:05:00-05:00 - #601 needs persisted combo timing readback
+
+Decision: Patch combo completion auditing before runtime FSV so #601 can verify requested vs actual timing from persistent storage.
+
+Evidence:
+- `act_combo` already lowered only `act_press` steps and rejected unsupported actions, empty lists, `>256` steps, non-monotonic `at_ms`, and backend mismatches.
+- The combo controller emitted transient `reflex_combo_completed` event data with dispatches, but the persistent `CF_REFLEX_AUDIT` completion row only contained generic lifetime completion fields.
+- #601 requires step dispatch times vs requested timing as a separate SoT read; relying on a tool return or transient stream would be weaker than a persisted audit row.
+
+Outcome:
+- Persist nested combo completion details in `CF_REFLEX_AUDIT` with due/elapsed/jitter/action details per primitive dispatch.
+- Add focused validation regressions for #601 fail-closed edges.
+- Focused combo/reflex checks pass; broader checks and manual MCP/SoT FSV remain next.
+
+# 2026-06-02T10:25:00-05:00 - #601 runtime FSV accepted
+
+Decision: Accept #601 runtime behavior after a second precise 256-step run proved timing readback without queue saturation, and after fail-closed edges left physical/storage SoTs unchanged.
+
+Evidence:
+- Repo-built release SHA256 `669191BA58F581763DB6B389979EF6545ADC458B6AAA9BDEF72DB516FCC51B6D` was exercised through strict MCP Inspector against isolated daemons on `127.0.0.1:7881` and `127.0.0.1:7882`; both loaded `tools/list=80`.
+- The first 256-step stress run wrote exactly 256 `a` characters and persisted `512/512` primitive dispatches; its 5 ms cadence showed `max_jitter_ms=205`, which is recorded as saturation evidence rather than the precision proof.
+- The accepted precision run used 256 steps at 20 ms cadence and wrote exactly 256 `b` characters; `reflex_history` persisted `scheduled_actions=512`, `dispatched_actions=512`, `elapsed_ms=5105`, `max_jitter_ms=0`, with first and last due/elapsed pairs matching exactly.
+- Single-step combo wrote exactly `z` and persisted `scheduled_actions=2`, `dispatched_actions=2`, `max_jitter_ms=0`.
+- Structurally invalid `steps` object, empty steps, non-monotonic steps, 257-step boundary, and unsupported `act_click` step all rejected through strict Inspector/MCP and left the target file plus `CF_ACTION_LOG`/`CF_REFLEX_AUDIT` counts unchanged.
+- Cleanup readback showed release_all zero, no relevant OS key/button down, no `Issue601*` windows, and issue-local ports closed.
+
+Outcome:
+- Runtime FSV complete for #601. Final supporting checks, diff/token scan, commit, push, RESOLVED comment, and closeout remain.
+
+# 2026-06-02T10:35:00-05:00 - #601 final checks passed
+
+Decision: Proceed to #601 commit/closeout.
+
+Evidence:
+- Final checks passed: `cargo fmt --check`, `git diff --check`, combo behavior tests, MCP combo tests, schema sanitizer tests, M4 tool-list test, reflex-history tool test, touched-crate check, and release build.
+- Release build readback: `target\release\synapse-mcp.exe`, length `46748160`, SHA256 `F7C089061FE2CF23B5FBEC9D7A12C55FD19A7C38117CEA637A7CA0B02F4919D5`, timestamp `2026-06-02T15:28:21Z`.
+- Tracked diff token scan found zero matches for the issue-local bearer token, raw auth header text, or bearer-token env var name.
+- Diff review found the code changes scoped to combo completion audit persistence and fail-closed validation coverage.
+
+Outcome:
+- Commit with `[skip ci]`, push, post #601 RESOLVED evidence, close #601, remove stale labels, refresh queue, and continue to #602.

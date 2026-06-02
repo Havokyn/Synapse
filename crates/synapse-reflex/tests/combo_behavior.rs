@@ -341,6 +341,18 @@ fn scheduler_combo_driver_expires_after_final_step_and_writes_audit() -> Result<
             && audit.error_code.as_deref() == Some(error_codes::REFLEX_LIFETIME_EXPIRED)
             && audit.details["kind"] == REFLEX_LIFETIME_EXPIRED_KIND
             && audit.details["reason"] == "completed"
+            && audit.details["combo_completion"]["kind"] == REFLEX_COMBO_COMPLETED_KIND
+            && audit.details["combo_completion"]["scheduled_actions"] == 2
+            && audit.details["combo_completion"]["dispatched_actions"] == 2
+            && audit.details["combo_completion"]["dispatches"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.len() == 2
+                        && items[0]["due_ms"] == 0
+                        && items[0]["elapsed_ms"] == 0
+                        && items[1]["due_ms"] == 5
+                        && items[1]["jitter_ms"].as_u64().is_some()
+                })
     }));
     Ok(())
 }

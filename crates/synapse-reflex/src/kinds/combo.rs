@@ -123,6 +123,37 @@ impl ComboController {
         &self.reflex_id
     }
 
+    #[must_use]
+    pub(crate) fn completion_audit_details(&self) -> Value {
+        let dispatches = self
+            .dispatched
+            .iter()
+            .map(|record| {
+                json!({
+                    "due_ms": record.due_ms,
+                    "sequence": record.sequence,
+                    "elapsed_ms": record.elapsed_ms,
+                    "jitter_ms": record.elapsed_ms.abs_diff(u128::from(record.due_ms)),
+                    "action": record.action,
+                })
+            })
+            .collect::<Vec<_>>();
+        let max_jitter_ms = dispatches
+            .iter()
+            .filter_map(|dispatch| dispatch.get("jitter_ms").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0);
+        json!({
+            "kind": REFLEX_COMBO_COMPLETED_KIND,
+            "status": "completed",
+            "scheduled_actions": self.scheduled.len(),
+            "dispatched_actions": self.cursor,
+            "elapsed_ms": self.elapsed.as_millis(),
+            "max_jitter_ms": max_jitter_ms,
+            "dispatches": dispatches,
+        })
+    }
+
     /// Starts a combo and dispatches all actions due at trigger offset `0`.
     ///
     /// # Errors

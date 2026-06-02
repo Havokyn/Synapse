@@ -1,5 +1,72 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T10:25:00-05:00
+- Active issue #601 is implemented and manual MCP/SoT FSV is accepted; final checks/commit/closeout remain.
+- Patch in worktree:
+  - `crates/synapse-reflex/src/kinds/combo.rs`: `completion_audit_details()` records due/elapsed/jitter/action details.
+  - `crates/synapse-reflex/src/scheduler_stateful.rs`, `scheduler_loop.rs`, and `scheduler.rs`: combo completion writes nested `details.combo_completion` in the persisted lifetime-expired audit row.
+  - `crates/synapse-reflex/tests/combo_behavior.rs`: supporting persisted-completion assertions.
+  - `crates/synapse-mcp/src/m4.rs`: supporting validation coverage for empty, >256, non-monotonic, and unsupported action steps.
+- Accepted runtime evidence:
+  - `.runs\601\combo-fsv-20260602T1010`: daemon PID `92280`, bind `127.0.0.1:7881`, release SHA256 `669191BA58F581763DB6B389979EF6545ADC458B6AAA9BDEF72DB516FCC51B6D`, strict Inspector `tools/list=80`, 256-step `a` file SoT, and `35_256_combo_reflex_summary.json` with `512/512` primitive dispatches.
+  - `.runs\601\combo-fsv-20260602T1030-edges`: daemon PID `85268`, bind `127.0.0.1:7882`, auth health/strict tools-list readbacks, target PID `84500`, single-step `z`, precise 256-step `b` run, fail-closed edges, and cleanup.
+  - Precise 256-step accepted summary: combo `019e88ea-a31d-7921-86eb-4665c3decfce`, file length 256/SHA256 `69783923010E99687C31035CF20F1394EA6BB6047396B2FAE9EA600F085C33EB`, `scheduled_actions=512`, `dispatched_actions=512`, `elapsed_ms=5105`, `max_jitter_ms=0`, zero `action queue full` log matches.
+  - Edge summaries: `16b_structural_object_steps_after_readback.json`, `24_empty_steps_edge_summary.json`, `28_nonmonotonic_edge_summary.json`, `33_257_steps_edge_summary.json`, `37_nonpress_edge_summary.json`.
+  - Cleanup summary: `48_cleanup_readback.json` shows release_all zero, physical key/button states all not down, target/daemon stopped, and port `7882` closed.
+- Final supporting checks passed after runtime FSV:
+  - `cargo fmt --check`;
+  - `git diff --check` (line-ending warnings only);
+  - `cargo test -p synapse-reflex --test combo_behavior -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp combo_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_reflex_history_tool -- --nocapture`;
+  - `cargo check -p synapse-reflex -p synapse-mcp -j 2`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release build readback: length `46748160`, SHA256 `F7C089061FE2CF23B5FBEC9D7A12C55FD19A7C38117CEA637A7CA0B02F4919D5`, timestamp `2026-06-02T15:28:21Z`.
+- Tracked diff token scan found zero matches for the issue-local bearer token, raw auth header text, or bearer-token env var name; diff review completed.
+- Rejected/setup artifacts to avoid citing as accepted:
+  - Notepad focus attempts in the first run did not write to the file and are rejected as physical-output evidence.
+  - The first edge-run cleanup attempt `04_old_run_cleanup.json` used PowerShell's read-only `$PID` loop variable and did not stop anything; accepted cleanup is `04b_old_run_cleanup.json`.
+  - `15_file_after_single_combo.json` is a structural-invalid `steps` object attempt, not the successful single-step combo. Successful single-step evidence is `18_file_after_single_combo.json` plus `20c_single_combo_reflex_summary_corrected.json`.
+- Exact next actions:
+  1. Commit with `[skip ci]`.
+  2. Push, post #601 RESOLVED evidence, close #601, remove stale labels.
+  3. Refresh queue and claim #602 unless GitHub changed.
+
+## Current Resume Point - 2026-06-02T09:45:00-05:00
+- #600 is closed with commit `5cf6e0b` and RESOLVED evidence at https://github.com/ChrisRoyse/Synapse/issues/600#issuecomment-4603513011.
+- Worktree was clean after pushing #600: `## main...origin/main`.
+- Active issue is #601 `scenario(stress): act_combo 256-step timed precision - play a song / macro`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/601#issuecomment-4603519772.
+  - Labels/assignee updated with `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+- #601 acceptance target:
+  - real MCP `tools/call act_combo` for strictly increasing timed sequences up to 256 steps;
+  - separate SoT reads for action/reflex audit rows and physical target/audio output where practical;
+  - timing/jitter comparison between requested and actual dispatch;
+  - edges for non-monotonic steps, 257 steps, unsupported combo action, single-step combo, empty/structurally invalid params, and cleanup release state.
+- Exact next actions:
+  1. Inspect `act_combo` tool params, validation, scheduling/runtime path, and existing tests.
+  2. Patch only if the real code path cannot satisfy #601.
+  3. Run supporting checks, build release `synapse-mcp`, then launch an isolated daemon for manual MCP/SoT FSV.
+
+## Current Resume Point - 2026-06-02T10:05:00-05:00
+- Active issue remains #601.
+- Patch in progress:
+  - `crates/synapse-reflex/src/kinds/combo.rs`: adds `completion_audit_details()` with per-dispatch due/elapsed/jitter/action details.
+  - `crates/synapse-reflex/src/scheduler_stateful.rs` and `src/scheduler_loop.rs`: persisted combo completion audits now include `details.combo_completion` while preserving `REFLEX_LIFETIME_EXPIRED` completion rows.
+  - `crates/synapse-reflex/tests/combo_behavior.rs`: asserts the persisted combo completion audit includes dispatch timing details.
+  - `crates/synapse-mcp/src/m4.rs`: adds supporting validation tests for empty steps, >256 steps, non-monotonic steps, and unsupported combo actions.
+- Focused checks passed:
+  - `cargo fmt`;
+  - `cargo test -p synapse-reflex --test combo_behavior -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp combo_ -- --nocapture`.
+- Exact next actions:
+  1. Run `cargo fmt --check`, `cargo check -p synapse-reflex -p synapse-mcp -j 2`, schema/tool-list tests, and any focused action/reflex tests needed.
+  2. Build release `synapse-mcp`.
+  3. Launch isolated repo-built daemon for #601, verify process/socket/auth/health/strict Inspector `tools/list`.
+  4. Manual FSV: 256-step monotonic combo, timing/jitter storage readback, single-step combo, empty steps, non-monotonic, 257 steps, unsupported action, structurally invalid params, physical target output, storage/action log deltas, and cleanup `release_all`.
+
 ## Current Resume Point - 2026-06-02T09:40:00-05:00
 - Active issue #600 has implementation, accepted manual MCP/SoT FSV, cleanup, final supporting checks, release build/readback, and diff review complete.
 - Patch:

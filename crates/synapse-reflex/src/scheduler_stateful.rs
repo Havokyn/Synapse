@@ -67,6 +67,10 @@ pub(super) fn step_stateful_controllers(
                     *dispatched_actions = dispatched_actions.saturating_add(actions);
                     super::mark_reflex_lifetime_expired(runtime, index, reason);
                 }
+                StatefulOutcome::ComboCompleted { actions, details } => {
+                    *dispatched_actions = dispatched_actions.saturating_add(actions);
+                    super::mark_reflex_combo_completed(runtime, index, details);
+                }
                 StatefulOutcome::TrackLost {
                     lost_for,
                     target_context,
@@ -295,6 +299,10 @@ enum StatefulOutcome {
         actions: usize,
         reason: &'static str,
     },
+    ComboCompleted {
+        actions: usize,
+        details: Value,
+    },
     TrackLost {
         lost_for: Duration,
         target_context: Value,
@@ -319,9 +327,9 @@ fn step_combo(
     match controller.step_dispatch_with(&context, &runtime.event_bus, |action| {
         dispatch_context.dispatch_action(&reflex_id, action)
     }) {
-        Ok(ComboOutput::Completed { actions, .. }) => Some(StatefulOutcome::Expired {
+        Ok(ComboOutput::Completed { actions, .. }) => Some(StatefulOutcome::ComboCompleted {
             actions,
-            reason: "completed",
+            details: controller.completion_audit_details(),
         }),
         Ok(output) if output.action_count() > 0 => Some(StatefulOutcome::Progressed {
             actions: output.action_count(),

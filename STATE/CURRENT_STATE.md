@@ -1,5 +1,86 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T10:25:00-05:00
+- Active issue remains #601 `scenario(stress): act_combo 256-step timed precision - play a song / macro`.
+- Implementation patch is unchanged since the #601 audit patch:
+  - combo completion rows now persist `details.combo_completion` with due/elapsed/jitter/action details;
+  - MCP validation tests cover empty, `>256`, non-monotonic, and unsupported non-`act_press` combo steps.
+- Supporting checks already passed before runtime FSV:
+  - `cargo fmt`;
+  - `cargo test -p synapse-reflex --test combo_behavior -- --nocapture` (7 passed);
+  - `cargo test -p synapse-mcp --bin synapse-mcp combo_ -- --nocapture` (8 passed);
+  - `cargo fmt --check`;
+  - `cargo check -p synapse-reflex -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_reflex_history_tool -- --nocapture`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Accepted manual MCP/SoT FSV evidence:
+  - First run `.runs\601\combo-fsv-20260602T1010` proved the repo-built daemon PID `92280`, bind `127.0.0.1:7881`, release SHA256 `669191BA58F581763DB6B389979EF6545ADC458B6AAA9BDEF72DB516FCC51B6D`, strict Inspector `tools/list=80`, and 256-step target-file output of exactly 256 `a` characters.
+  - That run's `reflex_history` readback summary is `.runs\601\combo-fsv-20260602T1010\35_256_combo_reflex_summary.json`: combo `019e88df-6cb1-74e0-a4e7-e3d4c180e5c0`, `scheduled_actions=512`, `dispatched_actions=512`, `elapsed_ms=1481`, `max_jitter_ms=205`; the 5 ms cadence intentionally saturated the normal action path but still produced all physical characters.
+  - Second run `.runs\601\combo-fsv-20260602T1030-edges` used daemon PID `85268`, bind `127.0.0.1:7882`, same release SHA256, auth health 200/unauth 401, strict Inspector `tools/list=80`, and visible target PID `84500` writing `issue601_combo_target_edges.txt`.
+  - Single-step combo `019e88e7-2f61-7640-ac02-23eb621d624a` wrote exactly `z`; storage moved `CF_ACTION_LOG=8 -> 10`, `CF_REFLEX_AUDIT=0 -> 3`; `reflex_history` recorded `scheduled_actions=2`, `dispatched_actions=2`, `max_jitter_ms=0`.
+  - Precise 256-step combo `019e88ea-a31d-7921-86eb-4665c3decfce` at 20 ms cadence wrote exactly 256 `b` characters; storage moved `CF_ACTION_LOG=14 -> 16`, `CF_REFLEX_AUDIT=3 -> 6`; `reflex_history` recorded `scheduled_actions=512`, `dispatched_actions=512`, `elapsed_ms=5105`, `max_jitter_ms=0`, and zero `action queue full` log matches.
+  - Edges accepted with before/after file + storage readbacks: structurally invalid `steps` object, empty `steps=[]`, non-monotonic `at_ms`, 257-step boundary, and unsupported nested `act_click` action. Each rejected through strict Inspector/MCP with the target file unchanged and `CF_ACTION_LOG`/`CF_REFLEX_AUDIT` counts unchanged.
+  - Cleanup: strict Inspector `release_all` returned zero keys/buttons/pads; separate `GetAsyncKeyState` read showed no relevant input down; target PID `84500` stopped; daemon PID `85268` stopped; ports `7881`/`7882` closed; no visible `Issue601*` windows remain.
+- Final supporting checks passed after runtime FSV:
+  - `cargo fmt --check`;
+  - `git diff --check` (line-ending warnings only);
+  - `cargo test -p synapse-reflex --test combo_behavior -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp combo_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_reflex_history_tool -- --nocapture`;
+  - `cargo check -p synapse-reflex -p synapse-mcp -j 2`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release build readback after cleanup: `target\release\synapse-mcp.exe`, length `46748160`, SHA256 `F7C089061FE2CF23B5FBEC9D7A12C55FD19A7C38117CEA637A7CA0B02F4919D5`, `LastWriteTimeUtc=2026-06-02T15:28:21Z`. Accepted FSV evidence is tied to the earlier release binary SHA `669191BA58F581763DB6B389979EF6545ADC458B6AAA9BDEF72DB516FCC51B6D` from the same #601 source patch.
+- Tracked diff token scan found zero matches for the issue-local bearer token, raw auth header text, or bearer-token env var name; diff review completed.
+- Current next:
+  1. Commit with `[skip ci]`, push, post #601 RESOLVED evidence, close #601, remove stale labels.
+  2. Refresh queue and continue to #602 unless GitHub changed.
+
+## 2026-06-02T09:45:00-05:00
+- #600 is closed:
+  - commit `5cf6e0b fix(action): fail closed under action queue flood (#600) [skip ci]`;
+  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/600#issuecomment-4603513011;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T14:39:18Z`;
+  - stale `status:in-progress` and `agent:codex` labels removed.
+- Git state after #600 close:
+  - branch `main`;
+  - `git status --short --branch` read `## main...origin/main`;
+  - latest commit `5cf6e0b`.
+- Live open queue after #600:
+  - #594 parent remains open;
+  - #624/#625 remain `status:blocked` on the Daybreak/operator boundary;
+  - unblocked children currently open include #601-#604 and #629-#634.
+- Active issue is #601 `scenario(stress): act_combo 256-step timed precision - play a song / macro`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/601#issuecomment-4603519772.
+  - Issue goal: prove `act_combo` schedules accurate, monotonic, <=256-step timed key sequences via the reflex runtime.
+  - Required SoTs from issue: strict real MCP precondition; real `act_combo` trigger; action/reflex audit storage rows for requested vs actual dispatch timing and/or physical audio/target output; cleanup release state.
+  - Required edges: non-monotonic steps rejected, 257 steps rejected, non-`act_press` combo step rejected with `TOOL_PARAMS_INVALID`, single-step combo, plus empty/structural invalid before/after SoTs.
+- Current next:
+  1. Inspect `act_combo` MCP params/validation/scheduling implementation and supporting tests.
+  2. Decide whether code needs a patch before runtime FSV.
+  3. Build/launch isolated repo-built daemon for #601 manual MCP/SoT FSV.
+
+## 2026-06-02T10:05:00-05:00
+- Active issue remains #601.
+- Code inspection found #601's persistent timing-evidence gap:
+  - `act_combo` already validates empty steps, `>256` steps, non-monotonic `at_ms`, backend mismatches, and unsupported non-`act_press` actions as fail-closed paths.
+  - The combo controller emitted a transient `reflex_combo_completed` event containing dispatch timing, but `CF_REFLEX_AUDIT` only persisted generic lifetime-expired completion details (`kind`, `reason`, `tick_index`, `fire_count`) and did not persist requested due times, actual dispatch elapsed times, or jitter.
+- Patch now applied:
+  - `ComboController::completion_audit_details()` builds nested completion details with `scheduled_actions`, `dispatched_actions`, `elapsed_ms`, `max_jitter_ms`, and per-dispatch `due_ms`, `elapsed_ms`, `jitter_ms`, sequence, and action summary.
+  - Stateful combo completion now writes those details into the persisted completion row under `details.combo_completion` while preserving the existing lifetime-expired audit shape.
+  - M4 combo validation tests now cover empty steps, `257` steps, non-monotonic steps, and unsupported non-`act_press` actions.
+- Focused supporting checks passed:
+  - `cargo fmt`;
+  - `cargo test -p synapse-reflex --test combo_behavior -- --nocapture` (7 passed);
+  - `cargo test -p synapse-mcp --bin synapse-mcp combo_ -- --nocapture` (8 passed).
+- Current next:
+  1. Run broader touched-crate/schema/tool-list checks.
+  2. Build release `synapse-mcp`.
+  3. Launch an isolated #601 daemon and perform manual strict-client MCP/SoT FSV against `CF_REFLEX_AUDIT`, `CF_ACTION_LOG`, a physical target file/window, and cleanup state.
+
 ## 2026-06-02T09:40:00-05:00
 - Active issue remains #600 `scenario(stress): SendInput rate-limit + action-queue overflow`; implementation, manual MCP/SoT FSV, cleanup, final supporting checks, release build, and diff review are complete. Commit/push and GitHub RESOLVED closeout are next.
 - Patch summary:
