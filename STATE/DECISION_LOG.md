@@ -863,3 +863,18 @@ Evidence:
 
 Outcome:
 - Commit scoped patch/state with `[skip ci]`, post #596 RESOLVED evidence, close #596, then continue the queue.
+
+# 2026-06-02T03:26:47-05:00 - #597 follows #596 as next unblocked child
+
+Decision: Take #597 after closing #596 because #597 is the lowest-number open unblocked child under the #594 stress campaign; #624/#625 remain blocked on the Daybreak operator-only boundary.
+
+Evidence:
+- #596 closure readback shows `state=CLOSED`, `closedAt=2026-06-02T08:25:48Z`, evidence comment https://github.com/ChrisRoyse/Synapse/issues/596#issuecomment-4600229991, and no remaining `status:in-progress` label.
+- `git log -3` shows `6051fb3 fix(mcp): reject empty element capture targets (#596) [skip ci]` at `HEAD`, `origin/main`, and `origin/HEAD`.
+- `git status --short --branch` after #596 close showed `## main...origin/main`.
+- Live open queue contains #594, #597-#604, blocked #624/#625, and #629-#634.
+- #597 has no prior comments, was open/unassigned, and requires real MCP `read_text` triggers plus separate source text/UI/storage/cache/log SoT readbacks.
+- Posted #597 START comment at https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600240790 and labeled/assigned it to this agent.
+
+Outcome:
+- Begin #597 implementation/investigation with code inspection of OCR backend and cache paths before any FSV setup.

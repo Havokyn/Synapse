@@ -1,5 +1,30 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T03:26:47-05:00
+- #596 is closed.
+  - Commit: `6051fb3 fix(mcp): reject empty element capture targets (#596) [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/596#issuecomment-4600229991
+  - Closure readback: `state=CLOSED`, `closedAt=2026-06-02T08:25:48Z`.
+  - Stale `status:in-progress` label was removed.
+  - `git status --short --branch` after close: `## main...origin/main`.
+- Live open queue after #596:
+  - #594 parent context remains open.
+  - #624/#625 remain `status:blocked` on the Daybreak operator-only boundary.
+  - Unblocked children still open include #597-#604 and #629-#634.
+- Active issue is now #597 `scenario(stress): OCR torture - read_text dense/tiny/multilingual, winrt vs crnn, cache`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600240790
+  - Assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+  - Goal: prove `read_text` through real MCP triggers on dense code/terminal text, tiny text, multilingual text, backend modes `winrt`/`crnn`/`auto`, and stable-region cache behavior.
+  - Planned SoTs: target source text bytes/state files, visible UI/window/region geometry, real MCP `read_text` output, isolated `CF_OCR_CACHE` row counts/samples, daemon log bytes, and timing deltas for unchanged-region cache hits.
+  - Required edges: zero-size/empty region, off-screen region, occluded/stale element region, rapidly-changing region/cache invalidation, and structurally invalid params.
+- Current wired MCP client sanity check:
+  - `mcp__synapse.health` ok, active profile `vscode`, action/reflex/storage healthy;
+  - `storage_inspect`, `observe`, and `find query="Visual Studio Code"` all returned through the configured Synapse MCP client.
+- Next:
+  1. Inspect `read_text`, OCR backend, and OCR cache implementation before editing.
+  2. Build/launch a repo-built isolated daemon for #597 and verify process/socket/auth/health/strict Inspector `tools/list`.
+  3. Create deterministic visible OCR targets with known source bytes and run manual MCP/SoT FSV.
+
 ## 2026-06-02T03:21:12-05:00
 - Active issue #596 has code, supporting checks, and manual MCP/SoT FSV evidence ready for commit and RESOLVED posting.
 - Patch since HEAD:

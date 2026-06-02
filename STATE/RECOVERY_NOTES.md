@@ -1,5 +1,31 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T03:26:47-05:00
+- #596 is closed and clean:
+  - commit `6051fb3 fix(mcp): reject empty element capture targets (#596) [skip ci]`;
+  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/596#issuecomment-4600229991;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T08:25:48Z`;
+  - stale `status:in-progress` removed;
+  - branch clean at `HEAD == origin/main == 6051fb3`.
+- Active issue is #597:
+  - title `scenario(stress): OCR torture - read_text dense/tiny/multilingual, winrt vs crnn, cache`;
+  - START comment https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600240790;
+  - assigned to `ChrisRoyse`, labels include `status:in-progress` and `agent:codex`.
+- #597 intent:
+  - real MCP `read_text` triggers for known dense code/terminal text, tiny text, multilingual text, and backend modes `winrt`/`crnn`/`auto`;
+  - separate SoT readbacks from source text bytes/UI state/window or region geometry, isolated `CF_OCR_CACHE`, daemon logs, and timing deltas for stable-region cache hits.
+- Required #597 edges:
+  - zero-size/empty region;
+  - off-screen region;
+  - occluded/stale element region;
+  - rapidly-changing region where cache must not stale;
+  - structurally invalid params.
+- Exact next actions:
+  1. Inspect OCR implementation (`read_text` tool, OCR backends, cache storage, tests/docs) before editing.
+  2. Build repo `synapse-mcp` release if needed and launch isolated #597 daemon with issue-local DB/log/appdata/token.
+  3. Verify process/binary/socket, unauth/auth health, and strict Inspector `tools/list` for `read_text`, `observe`, `find`, `storage_inspect`, and `release_all`.
+  4. Create deterministic visible OCR target(s) with known source bytes and run manual MCP/SoT FSV.
+
 ## Current Resume Point - 2026-06-02T03:21:12-05:00
 - Active issue #596 is ready for commit/RESOLVED posting.
 - Patch:
