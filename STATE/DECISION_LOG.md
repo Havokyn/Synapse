@@ -728,3 +728,18 @@ Evidence:
 
 Outcome:
 - Commit/push the scoped #628 patch with `[skip ci]`, post RESOLVED evidence, close #628, then refresh the queue.
+
+# 2026-06-02T00:03:13-05:00 - #595 follows #628 as next unblocked child
+
+Decision: Take #595 next after closing #628 because #594 remains the parent context, #624/#625 are still blocked on the Daybreak operator-only boundary, and #595 is the lowest-number open unblocked child in the whole-body stress campaign.
+
+Evidence:
+- #628 readback shows `state=CLOSED`, `closedAt=2026-06-02T05:02:28Z`, evidence comment https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4598863144, and no remaining `status:in-progress` label.
+- `git log -5` shows `4991efe fix(mcp): harden browser element actions (#628) [skip ci]` at `HEAD`, `origin/main`, and `origin/HEAD`.
+- `git status --short --branch` after #628 close showed `## main...origin/main` with only unrelated `README.md` dirty.
+- Live open queue contains #594, #595-#604, blocked #624/#625, and #629-#634.
+- #595 has no prior comments, is open/unassigned, and requires real MCP `observe`/`find`/`observe_delta` triggers plus separate high-fanout UIA/UI/storage/log SoT readbacks.
+- Posted #595 START comment at https://github.com/ChrisRoyse/Synapse/issues/595#issuecomment-4598866903 and labeled/assigned it to this agent.
+
+Outcome:
+- Begin #595 implementation/investigation with code inspection and deterministic high-fanout local target setup.

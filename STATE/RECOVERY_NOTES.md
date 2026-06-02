@@ -1,5 +1,25 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T00:03:13-05:00
+- #628 is closed:
+  - commit `4991efe fix(mcp): harden browser element actions (#628) [skip ci]`;
+  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4598863144;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T05:02:28Z`;
+  - `status:in-progress` label removed.
+- Active issue is #595:
+  - title `scenario(stress): UIA fanout storm - observe/find under 10k+ element trees`;
+  - START comment https://github.com/ChrisRoyse/Synapse/issues/595#issuecomment-4598866903;
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+- Current worktree after #628:
+  - `main` is at `origin/main` commit `4991efe`.
+  - only `README.md` is dirty and unrelated/user-owned.
+- Exact next actions:
+  1. Commit/push this state-only transition with `[skip ci]` while excluding `README.md`.
+  2. Inspect #595 code paths: `observe`, `find`, `observe_delta`, UIA snapshot caps/depth, storage observations/events/reality rows, and previous #615 coalescing/fanout fixes.
+  3. Create or launch deterministic high-fanout local targets, likely issue-local generated UI fixtures plus Explorer/Chrome/Excel surfaces where practical.
+  4. Build/launch an isolated repo-built `synapse-mcp`, verify process/socket/auth/health/strict Inspector `tools/list`.
+  5. Run manual #595 FSV: happy path plus `max_elements=1`, `depth=6`, large flat list, no-result/empty query, minimized-window, and structurally invalid params, with before/after physical SoT reads.
+
 ## Current Resume Point - 2026-06-02T00:00:05-05:00
 - Active issue #628 has complete implementation, manual MCP/SoT evidence, final checks, diff review, and cleanup.
 - Final #628 evidence facts to use in the RESOLVED comment:

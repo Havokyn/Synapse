@@ -1,5 +1,29 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T00:03:13-05:00
+- #628 is closed:
+  - commit `4991efe fix(mcp): harden browser element actions (#628) [skip ci]` pushed to `origin/main`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4598863144
+  - closure readback: `state=CLOSED`, `closedAt=2026-06-02T05:02:28Z`.
+  - stale `status:in-progress` label was removed from #628 after closure.
+  - #628-owned server/Playwright/target Chrome cleanup was verified; unrelated Chrome PID `30964` was preserved.
+- Git status after #628 push/close:
+  - `## main...origin/main`
+  - only `README.md` remains dirty and is unrelated/user-owned.
+- Live open queue after #628 closure:
+  - #594 parent context remains open.
+  - #624/#625 remain `status:blocked` on the Daybreak operator-only boundary.
+  - unblocked children include #595-#604 and #629-#634.
+- Active issue is now #595 `scenario(stress): UIA fanout storm - observe/find under 10k+ element trees`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/595#issuecomment-4598866903
+  - #595 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - Goal: prove `observe`, `find`, and `observe_delta` stay correct and bounded against high-fanout UIA trees through real Synapse MCP triggers and separate physical SoT readbacks.
+  - Initial SoTs: foreground/window/process state, generated high-fanout UI contents, UIA element/name/count/bbox readbacks, Synapse results, storage rows, and daemon logs.
+- Next:
+  1. Inspect #595-relevant perception/a11y/reality implementations and prior #615 high-fanout fixes.
+  2. Choose deterministic high-fanout local targets that satisfy issue intent without external flakiness.
+  3. Build/launch a repo-built isolated daemon, verify process/socket/auth/health/strict `tools/list`, then run #595 manual FSV through real MCP tools.
+
 ## 2026-06-02T00:00:05-05:00
 - #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle` has complete manual MCP/SoT evidence, final supporting checks, diff review, and cleanup. Remaining #628 actions are commit/push, RESOLVED comment, close issue, remove stale in-progress label if needed, then refresh the queue.
 - #628 patch in this worktree:
