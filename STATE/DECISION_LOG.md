@@ -1275,3 +1275,17 @@ Outcome:
 - Final supporting checks and release build passed; release SHA256 `00AD2DED150557F67BB08F2E0DBDF5C414E6D4539ADB26EE123BF66B88C666F6`.
 - Tracked diff token scan found no auth/token markers.
 - Commit/push state closeout, #604 RESOLVED comment, and close remain.
+
+# 2026-06-02T14:25:33-05:00 - #604 closes and #629 starts
+
+Decision: Close #604 after accepted manual evidence and claim #629 as the next remaining #594 child in campaign order.
+
+Evidence:
+- #604 readback shows `state=CLOSED`, `closedAt=2026-06-02T19:24:46Z`, RESOLVED evidence comment, and stale claim labels removed.
+- `dc3c507 docs(state): record issue 604 verification [skip ci]` pushed the #604 state evidence to `origin/main`.
+- Live open queue after closure contains #594 plus #629, #631, #632, #633, and #634. #624/#625/#630 are descoped/closed per #594.
+- #629 body requires Paint launch/tool selection/drawing via real MCP tools and separate SoT readbacks from observe/OCR/saved PNG bytes.
+
+Outcome:
+- Posted #629 START comment and added `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+- Next step is code/path inspection for Paint launch, act_click/act_drag, observe/read_text, image-byte verification, and cleanup.

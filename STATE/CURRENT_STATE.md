@@ -1,5 +1,25 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T14:25:33-05:00
+- #604 is closed.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/604#issuecomment-4606275946.
+  - Closure readback: `state=CLOSED`, `closedAt=2026-06-02T19:24:46Z`.
+  - Stale `status:in-progress` and `agent:codex` labels were removed.
+  - Code commit: `e1cd979`; state commit: `dc3c507 docs(state): record issue 604 verification [skip ci]`.
+- Live open queue after #604 closure:
+  - #594 parent context remains open.
+  - Remaining open child issues: #629, #631, #632, #633, #634.
+  - #624/#625/#630 are descoped/closed per #594 body update.
+- Active issue is now #629 `scenario(showcase): Paint art-bot - act_drag curves verified by observe/OCR`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/629#issuecomment-4606280728.
+  - Labels/assignee updated with `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+  - Issue goal: Synapse launches Paint, selects tools/colors, draws a recognizable picture/text using real `act_drag` curves, and verifies the result via physical Paint/window state plus saved PNG bytes and observe/OCR/readback where usable.
+  - Planned SoTs: repo-built daemon process/socket/auth/health/strict Inspector `tools/list`; real `act_launch`, `act_click`, `act_drag`, `observe`, `read_text`/OCR where applicable; Paint window/canvas state; saved PNG bytes/hash and pixel inspection; action/storage audit rows; input-neutral cleanup and daemon/socket shutdown.
+- Current next:
+  1. Inspect Paint launch/control, drag/click, observe/OCR/read_text, saved-image, and cleanup paths.
+  2. Patch only if code or manual FSV exposes a real gap.
+  3. Build/launch isolated repo-built daemon and perform manual MCP/SoT FSV for #629 happy path plus out-of-canvas/clamp, color/tool switch, near-4096px stroke, undo, empty/boundary/structurally invalid edges.
+
 ## 2026-06-02T14:11:19-05:00
 - Active issue remains #604.
 - Final accepted #604 manual MCP/SoT run is `.runs\604\clipboard-fsv-20260602T1420-final`.

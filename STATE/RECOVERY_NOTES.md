@@ -1,5 +1,21 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T14:25:33-05:00
+- #604 is closed with RESOLVED evidence at https://github.com/ChrisRoyse/Synapse/issues/604#issuecomment-4606275946; closure readback is `state=CLOSED`, `closedAt=2026-06-02T19:24:46Z`, and stale claim labels are removed.
+- Git readback after #604 state push:
+  - code commit `e1cd979` is on `main`/`origin/main`;
+  - state commit `dc3c507 docs(state): record issue 604 verification [skip ci]` is on `main`/`origin/main`;
+  - remaining dirty files are unrelated operator changes: `docs/computergames/00_vision_and_scope.md` plus untracked root docs.
+- Active issue is #629 `scenario(showcase): Paint art-bot - act_drag curves verified by observe/OCR`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/629#issuecomment-4606280728.
+  - Labels/assignee updated with `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+  - Body requires real MCP `act_launch` Paint, `act_click` tool selection, `act_drag` curves for shapes/letters, and SoT verification through `observe`/`read_text` where useful plus saved PNG bytes.
+  - Edge targets: out-of-canvas drag/clamp, color/tool switch mid-draw, very long stroke near 4096px, undo, empty/boundary/structurally invalid params.
+- Exact next actions:
+  1. Inspect existing `act_launch`, `act_click`, `act_drag`, `observe`, `read_text`/OCR, Paint save/image-byte, and cleanup code paths/tests.
+  2. Patch only if inspection or manual MCP FSV shows a real gap.
+  3. Build release `synapse-mcp`, launch isolated #629 daemon, verify process/socket/auth/health/strict Inspector `tools/list`, then run manual FSV with separate Paint/window/PNG/pixel/storage/input cleanup SoT readbacks.
+
 ## Current Resume Point - 2026-06-02T14:11:19-05:00
 - Active issue #604 has implementation patch and accepted manual MCP/SoT FSV evidence; final supporting checks, commit/push, and GitHub closeout remain.
 - Patch in worktree:
