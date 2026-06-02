@@ -49,6 +49,7 @@ impl SynapseService {
         &self,
         params: Parameters<ActTypeParams>,
     ) -> Result<Json<ActTypeResponse>, ErrorData> {
+        let params = params.0;
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
             kind = "act_type",
@@ -63,12 +64,14 @@ impl SynapseService {
         };
         self.audit_action_started_with_details("act_type", &action_preflight_details(&preflight))?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        if let Err(error) = self.ensure_act_type_foreground(recording.as_ref()) {
+        if params.into_element.is_none()
+            && let Err(error) = self.ensure_act_type_foreground(recording.as_ref())
+        {
             let result: Result<ActTypeResponse, ErrorData> = Err(error);
             self.audit_action_result("act_type", &result)?;
             return result.map(Json);
         }
-        let result = act_type_with_handle(handle, recording, params.0).await;
+        let result = act_type_with_handle(handle, recording, params).await;
         self.audit_action_result("act_type", &result)?;
         result.map(Json)
     }

@@ -683,3 +683,48 @@ Evidence:
 
 Outcome:
 - Start a fresh isolated #628 daemon with the latest binary, verify strict MCP client parity, then run real MCP FSV. Diagnostic direct Win32 calls remain investigation evidence only.
+
+# 2026-06-01T23:00:34-05:00 - #628 targeted scroll seed-HWND fix accepted for the scroll sub-behavior
+
+Decision: Accept the targeted `act_scroll.at` HWND-message path as manually verified for the #628 moved-element/scroll sub-behavior, while continuing #628 because typing, click, submit, and edges still need full SoT coverage.
+
+Evidence:
+- Fresh repo-built isolated daemon PID `34424`, bind `127.0.0.1:7862`, binary SHA256 `971EAE444FE3E72FA533C7B7FBAA41A97824A5D149C7E263F6D9FB2BBD0FC301`.
+- Fresh strict Inspector `tools/list` loaded after compaction and required #628 tools were present.
+- Before SoT: Playwright DOM `scrollY=0`; isolated storage `CF_ACTION_LOG=0`.
+- Setup readback proved the target point was on Chrome target root `0x12068a` after raising the target window.
+- Trigger: real Synapse MCP `tools/call act_scroll dy=-20 at={"x":856,"y":696}`.
+- After SoT: Playwright DOM `scrollY=1278`; moved target rect shifted upward; isolated storage `CF_ACTION_LOG=2`; daemon stderr logged `M2_ACT_SCROLL_HWND_MESSAGE` to `Chrome_RenderWidgetHostHWND` at `856,696`.
+
+Outcome:
+- Continue #628 with `act_type into_element` exactness before the full browser marathon happy path and edges.
+
+# 2026-06-01T23:06:31-05:00 - #628 browser typing exactness accepted only with external DOM SoT
+
+Decision: Continue #628 with the `act_type into_element` path for browser form fields, but record that the accepted verdict is the independent Playwright DOM readback, not the UIA immediate readback.
+
+Evidence:
+- Fresh repo-built isolated daemon PID `34424`, bind `127.0.0.1:7862`, and fresh strict Inspector `tools/list` artifact `325_patched12_tools_list_post_compaction2.txt`.
+- Before SoT: Playwright DOM `searchValue=""`, `activeId=""`, and isolated storage `CF_ACTION_LOG=2`.
+- Trigger: real Synapse MCP `tools/call act_type text=vega into_element=<search input found under HWND 1181322>`.
+- After SoT: Playwright DOM `searchValue="vega"`, `searchLength=4`, `activeId="searchInput"`; isolated storage `CF_ACTION_LOG=4`.
+- Daemon log warns `M2_ACT_TYPE_ELEMENT_VALUE_PATTERN_READBACK_MISMATCH` with UIA `after_len=0`, so the UIA readback is not used as the success verdict for Chrome DOM typing.
+
+Outcome:
+- Run the full #628 browser happy path and required edges with Playwright/server/storage SoT reads after each real MCP trigger.
+
+# 2026-06-02T00:00:05-05:00 - #628 browser marathon accepted after manual MCP/SoT evidence
+
+Decision: Accept #628 as ready for RESOLVED posting because the real Synapse MCP browser action path now has happy-path and edge evidence against independent Playwright DOM, local server state, and isolated storage SoTs.
+
+Evidence:
+- Isolated repo-built daemon PID `34424`, bind `127.0.0.1:7862`, and strict Inspector `tools/list` artifacts `431`/`432` proved the required MCP tools were present before acceptance.
+- `act_scroll.at` through real MCP moved Playwright DOM `scrollY` from `0` to `1278`, advanced isolated `CF_ACTION_LOG`, and logged `M2_ACT_SCROLL_HWND_MESSAGE`.
+- `act_type into_element` through real MCP wrote exact browser DOM values. UIA immediate readback can mismatch for Chrome, so the tool now reports target readback required and Playwright DOM/server state remains the verdict.
+- Happy path completed search, late-loaded control, modal, iframe, form fill, moved target, and submit. Playwright and server SoTs show receipt `M-1` with the expected synthetic payload and `movedClicks=1`; isolated storage reached `CF_ACTION_LOG=38`.
+- Edges passed: empty search produced `empty-search` without server mutation, 256-character search preserved the exact boundary value with zero results, and structurally invalid element id failed closed with `ACTION_ELEMENT_NOT_RESOLVED` while DOM/server state stayed unchanged.
+- Final supporting checks and release build passed; final `synapse-mcp.exe` SHA256 is `710ADCF581389D984ED613A7DE3034A623055825A8D743B7368CF1F3F6268530`.
+- Cleanup released inputs, stopped the isolated daemon and all #628-owned server/Playwright/target Chrome processes, closed ports `8763`/`8932`/`9226`, and preserved unrelated Chrome PID `30964`.
+
+Outcome:
+- Commit/push the scoped #628 patch with `[skip ci]`, post RESOLVED evidence, close #628, then refresh the queue.

@@ -22,6 +22,15 @@ pub enum ElementClickAction {
     CoordinateFallback { bbox: Rect },
 }
 
+/// Readback from setting an element's native text/value on the UIA worker.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ElementValueSetReadback {
+    pub method: String,
+    pub before_value: String,
+    pub after_value: String,
+}
+
 /// Resolves an element and reads its current bounding rectangle as plain data.
 ///
 /// # Errors
@@ -54,6 +63,17 @@ pub fn click_element_action(id: &ElementId) -> A11yResult<ElementClickAction> {
 /// non-Windows platforms.
 pub fn focus_element(id: &ElementId) -> A11yResult<()> {
     platform::focus_element(id)
+}
+
+/// Sets a re-resolved element's native `ValuePattern` text and reads it back.
+///
+/// # Errors
+///
+/// Returns `A11Y_ELEMENT_STALE` when the element id cannot be re-resolved, a
+/// structured UIA error when the element does not expose writable ValuePattern
+/// or SetValue/readback fails, and `A11Y_NOT_AVAILABLE` on non-Windows.
+pub fn set_element_value(id: &ElementId, value: &str) -> A11yResult<ElementValueSetReadback> {
+    platform::set_element_value(id, value)
 }
 
 /// Read-only mirror of `uiautomation::types::ExpandCollapseState`. Kept

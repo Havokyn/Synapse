@@ -1,5 +1,79 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T00:00:05-05:00
+- Active issue #628 has complete implementation, manual MCP/SoT evidence, final checks, diff review, and cleanup.
+- Final #628 evidence facts to use in the RESOLVED comment:
+  - isolated repo-built daemon PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`;
+  - strict Inspector `health`/`tools/list` artifacts `431`/`432` accepted required tools;
+  - final release binary SHA256 `710ADCF581389D984ED613A7DE3034A623055825A8D743B7368CF1F3F6268530`, length `46477312`;
+  - happy path final SoTs: Playwright artifact `437_happy_after_submit_playwright_corrected_post_compaction7.txt`, server artifact `435_happy_after_submit_server_post_compaction7.json`, storage artifact `436_happy_after_submit_storage_post_compaction7.txt`;
+  - final payload receipt `M-1`: `Casey Happy`, `casey.happy@example.test`, `priority=normal`, `Notes happy path via Synapse MCP`, `searchQuery=vega`, `modalCode=MOD-628-HAPPY`, `iframeCode=IFR-628-HAPPY`, `dynamicReady=true`, `movedClicks=1`;
+  - edge artifacts: empty search `440`-`447`, 256-char boundary search `448`-`462`, invalid element id `463`-`470`;
+  - cleanup: wired `release_all` zero; isolated daemon stopped; #628-owned server/Playwright/Chrome stopped; ports `8763`/`8932`/`9226` closed; unrelated Chrome PID `30964` preserved.
+- Current dirty state:
+  - #628 code/state files are dirty and should be staged.
+  - `README.md` is dirty but unrelated/user-owned and must not be staged for #628.
+- Exact next actions:
+  1. `git status --short --branch` and stage only #628-owned code/state files.
+  2. Verify `git diff --cached --stat` excludes `README.md`.
+  3. Commit `fix(mcp): harden browser element actions (#628) [skip ci]` and push.
+  4. Post #628 RESOLVED evidence, close #628, remove `status:in-progress` if still present.
+  5. Refresh the live issue queue and claim the next open unblocked issue.
+
+## Current Resume Point - 2026-06-01T23:06:31-05:00
+- Active issue is #628:
+  - title `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4597523219
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+- Current runtime:
+  - server PID `79412` on `127.0.0.1:8763`;
+  - Playwright MCP PID `39204` on `::1:8932`;
+  - target Chrome PID `63396`, CDP `127.0.0.1:9226`, HWND `0x12068a` / decimal `1181322`;
+  - isolated repo-built `synapse-mcp.exe` PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`.
+- Fresh post-compaction runtime artifacts:
+  - `322_runtime_processes_post_compaction2.json`
+  - `323_runtime_sockets_post_compaction2.json`
+  - `324_patched12_health_post_compaction2.txt`
+  - `325_patched12_tools_list_post_compaction2.txt`
+- Accepted #628 sub-evidence so far:
+  - targeted `act_scroll.at` moved Playwright DOM `scrollY` from `0` to `1278` and isolated `CF_ACTION_LOG` from `0` to `2`.
+  - `act_type into_element` on the target Chrome search input wrote exact Playwright DOM value `vega` with length `4` and isolated `CF_ACTION_LOG` moved from `2` to `4`.
+  - UIA immediate readback for the `act_type` path still warned `after_len=0`, so the verdict for browser typing is the external Playwright DOM readback, not the tool return or UIA readback.
+- Exact next actions:
+  1. Reset server and navigate Playwright to `http://127.0.0.1:8763/`.
+  2. Raise/check target Chrome HWND `0x12068a` before coordinate-dependent triggers.
+  3. Run the full #628 happy path through real Synapse MCP triggers with Playwright/server/storage SoT before/after: search, late-loaded control, modal, iframe, form fill, moved/scroll target, and submit.
+  4. Run >=3 edges: empty, boundary, and structurally invalid, with before/after SoT reads.
+  5. If any successful tool response lacks the expected SoT delta, fix the root cause before continuing.
+
+## Current Resume Point - 2026-06-01T23:00:34-05:00
+- Active issue is #628:
+  - title `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4597523219
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+- Current runtime:
+  - server PID `79412` on `127.0.0.1:8763`;
+  - Playwright MCP PID `39204` on `::1:8932`;
+  - target Chrome PID `63396`, CDP `127.0.0.1:9226`, HWND `0x12068a`;
+  - isolated repo-built `synapse-mcp.exe` PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`.
+- Release binary now in use: `target\release\synapse-mcp.exe`, length `46477312`, SHA256 `971EAE444FE3E72FA533C7B7FBAA41A97824A5D149C7E263F6D9FB2BBD0FC301`.
+- Fresh strict Inspector precondition artifacts after compaction:
+  - `298_patched12_health_post_compaction.txt`
+  - `299_patched12_tools_list_post_compaction.txt`
+  - required #628 tools present: `act_scroll`, `act_type`, `act_click`, `find`, `observe`, `storage_inspect`, `release_all`, `health`.
+- Targeted scroll fix has passed a manual SoT loop:
+  - before Playwright DOM `scrollY=0`, storage `CF_ACTION_LOG=0`;
+  - target HWND setup readback showed `WindowFromPoint(856,696)` hit target Chrome root `0x12068a`;
+  - real Synapse MCP `tools/call act_scroll dy=-20 at={"x":856,"y":696}` returned `backend_used=software_window_message`;
+  - after Playwright DOM `scrollY=1278` and moved target rect shifted from `y=2623.5417` to `y=1345.5417`;
+  - storage `CF_ACTION_LOG=2`;
+  - daemon stderr contains `M2_ACT_SCROLL_HWND_MESSAGE target_class=Chrome_RenderWidgetHostHWND screen_x=856 screen_y=696 delta=-2400`.
+- Exact next actions:
+  1. Reset server and navigate Playwright to `http://127.0.0.1:8763/`.
+  2. Raise/check target Chrome HWND `0x12068a` before coordinate-dependent triggers.
+  3. Test `act_type into_element` on the search field with known text `vega`; read Playwright DOM before/after and isolated `storage_inspect`.
+  4. If the value is exact, continue the full happy path and edge FSV. If it appends or contaminates text, fix `act_type` and rebuild/relaunch before proceeding.
+
 ## Current Resume Point - 2026-06-01T21:16:00-05:00
 - Active issue is #628:
   - title `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`

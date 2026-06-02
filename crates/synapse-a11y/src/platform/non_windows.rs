@@ -4,8 +4,8 @@ use synapse_core::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    A11yError, A11yResult, AccessibleEvent, ElementClickAction, ElementSearchScope, ExpandState,
-    UIElement, UiaWorkerReadback, WinEventHookReadback,
+    A11yError, A11yResult, AccessibleEvent, ElementClickAction, ElementSearchScope,
+    ElementValueSetReadback, ExpandState, UIElement, UiaWorkerReadback, WinEventHookReadback,
 };
 
 pub struct WinEventSubscription {
@@ -173,6 +173,12 @@ pub fn click_element_action(_id: &ElementId) -> A11yResult<ElementClickAction> {
 pub fn focus_element(_id: &ElementId) -> A11yResult<()> {
     Err(A11yError::not_available(
         "UIA element focus requires Windows",
+    ))
+}
+
+pub fn set_element_value(_id: &ElementId, _value: &str) -> A11yResult<ElementValueSetReadback> {
+    Err(A11yError::not_available(
+        "UIA element ValuePattern text entry requires Windows",
     ))
 }
 

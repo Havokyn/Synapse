@@ -11,7 +11,7 @@ pub fn uia_worker_readback() -> crate::A11yResult<crate::UiaWorkerReadback> {
 pub use events::{WinEventSubscription, subscribe_win_events};
 pub use resolve::{
     click_element_action, element_bounding_rect, expand_state_of, expand_state_of_id,
-    focus_element, re_resolve,
+    focus_element, re_resolve, set_element_value,
 };
 pub use snapshot::{
     element_node_from_point, find_by_name_and_pattern, find_by_name_and_pattern_in_window,

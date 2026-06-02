@@ -1,12 +1,11 @@
 use synapse_core::{ElementId, Rect};
 use uiautomation::{
     UIAutomation, UIElement,
-    patterns::UIExpandCollapsePattern,
-    patterns::UIInvokePattern,
+    patterns::{UIExpandCollapsePattern, UIInvokePattern, UIValuePattern},
     types::{ElementMode, ExpandCollapseState, Handle, Rect as UiaRect, TreeScope},
 };
 
-use crate::{A11yError, A11yResult, ElementClickAction, ExpandState};
+use crate::{A11yError, A11yResult, ElementClickAction, ElementValueSetReadback, ExpandState};
 
 use super::common::{
     TreeView, cached_hwnd, cached_runtime_id_hex_or_fallback, create_cache_request, map_uia_error,
@@ -91,6 +90,30 @@ pub fn focus_element(id: &ElementId) -> A11yResult<()> {
     with_automation(move |automation| {
         let element = re_resolve_on_worker(automation, &id)?;
         element.set_focus().map_err(map_uia_error)
+    })
+}
+
+pub fn set_element_value(id: &ElementId, value: &str) -> A11yResult<ElementValueSetReadback> {
+    let id = id.clone();
+    let value = value.to_owned();
+    with_automation(move |automation| {
+        let element = re_resolve_on_worker(automation, &id)?;
+        let pattern: UIValuePattern = element.get_pattern().map_err(|err| {
+            A11yError::internal(format!("ValuePattern not exposed for element {id}: {err}"))
+        })?;
+        if pattern.is_readonly().map_err(map_uia_error)? {
+            return Err(A11yError::internal(format!(
+                "ValuePattern is read-only for element {id}"
+            )));
+        }
+        let before_value = pattern.get_value().map_err(map_uia_error)?;
+        pattern.set_value(&value).map_err(map_uia_error)?;
+        let after_value = pattern.get_value().map_err(map_uia_error)?;
+        Ok(ElementValueSetReadback {
+            method: "uia_value_pattern".to_owned(),
+            before_value,
+            after_value,
+        })
     })
 }
 

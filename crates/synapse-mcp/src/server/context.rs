@@ -1089,6 +1089,7 @@ mod scope_gate_tests {
                 scope: Some(FindScope::Elements),
                 limit: Some(5),
                 in_window: None,
+                window_hwnd: None,
             }))
             .await?;
         assert!(

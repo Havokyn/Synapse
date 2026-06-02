@@ -14,6 +14,9 @@ use crate::m1::mcp_error;
 
 const MIN_SAFE_LINEAR_MS_PER_CHAR: u32 = 20;
 const TEXT_INTEGRITY_DISPATCH_ONLY: &str = "dispatch_only_requires_target_readback";
+const TEXT_INTEGRITY_UIA_VALUE_PATTERN: &str = "uia_value_pattern_readback";
+const TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY: &str =
+    "uia_value_pattern_dispatch_only_requires_target_readback";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -71,11 +74,55 @@ pub async fn act_type_with_handle(
     params: ActTypeParams,
 ) -> Result<ActTypeResponse, ErrorData> {
     let started = Instant::now();
+    validate_type_params(&params)?;
+    let emitted = emitted_text(&params);
+    let chars_typed = char_count(&emitted)?;
+
+    if let Some(element_id) = &params.into_element {
+        let readback =
+            synapse_a11y::set_element_value(element_id, &emitted).map_err(a11y_error_to_mcp)?;
+        let readback_matches = readback.after_value == emitted;
+        if !readback_matches {
+            tracing::warn!(
+                code = "M2_ACT_TYPE_ELEMENT_VALUE_PATTERN_READBACK_MISMATCH",
+                element_id = %element_id,
+                method = %readback.method,
+                before_len = readback.before_value.chars().count(),
+                after_len = readback.after_value.chars().count(),
+                expected_len = emitted.chars().count(),
+                chars_typed,
+                "act_type into_element ValuePattern SetValue returned success but immediate UIA value readback did not match; target SoT readback is required"
+            );
+        }
+        tracing::info!(
+            code = "M2_ACT_TYPE_ELEMENT_VALUE_PATTERN_READBACK",
+            element_id = %element_id,
+            method = %readback.method,
+            before_len = readback.before_value.chars().count(),
+            after_len = readback.after_value.chars().count(),
+            chars_typed,
+            "readback=act_type_into_element before_len={} after_len={} chars_typed={} method={}",
+            readback.before_value.chars().count(),
+            readback.after_value.chars().count(),
+            chars_typed,
+            readback.method
+        );
+        return Ok(ActTypeResponse {
+            ok: true,
+            chars_typed,
+            elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            target_text_integrity: if readback_matches {
+                TEXT_INTEGRITY_UIA_VALUE_PATTERN
+            } else {
+                TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY
+            }
+            .to_owned(),
+            target_readback_required: true,
+            minimum_linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
+        });
+    }
+
     let action = action_from_type_params(&params)?;
-    let chars_typed = match &action {
-        Action::TypeText { text, .. } => char_count(text)?,
-        _ => unreachable!("act_type builds only TypeText actions"),
-    };
 
     if let Some(recording) = recording {
         execute_recording(&recording, &action)?;
@@ -98,6 +145,13 @@ pub async fn act_type_with_handle(
 
 pub fn action_from_type_params(params: &ActTypeParams) -> Result<Action, ErrorData> {
     validate_type_params(params)?;
+    if let Some(element_id) = &params.into_element {
+        return Err(action_error_to_mcp(&ActionError::BackendUnavailable {
+            detail: format!(
+                "act_type into_element target {element_id} requires live UIA ValuePattern dispatch, not action-only conversion"
+            ),
+        }));
+    }
     Ok(Action::TypeText {
         text: emitted_text(params),
         dynamics: params
@@ -132,13 +186,6 @@ impl TypeBackend {
 }
 
 fn validate_type_params(params: &ActTypeParams) -> Result<(), ErrorData> {
-    if let Some(element_id) = &params.into_element {
-        return Err(action_error_to_mcp(&ActionError::BackendUnavailable {
-            detail: format!(
-                "act_type into_element target {element_id} requires the dedicated focus and clear wiring issue"
-            ),
-        }));
-    }
     if params.use_scancodes {
         return Err(action_error_to_mcp(&ActionError::BackendUnavailable {
             detail: "act_type use_scancodes=true is not wired for the M2 unicode typing path"
@@ -215,6 +262,10 @@ fn action_error_to_mcp(error: &ActionError) -> ErrorData {
     mcp_error(error.code(), error.to_string())
 }
 
+fn a11y_error_to_mcp(error: synapse_a11y::A11yError) -> ErrorData {
+    mcp_error(error.code(), error.to_string())
+}
+
 fn type_params_error(requested_linear_ms_per_char: u32, message: impl Into<String>) -> ErrorData {
     ErrorData::new(
         ErrorCode(-32099),
@@ -255,7 +306,7 @@ mod tests {
     use std::sync::Arc;
 
     use synapse_action::{ActionEmitter, RecordedInput, sample_typing_schedule};
-    use synapse_core::KeystrokeNaturalParams;
+    use synapse_core::{ElementId, KeystrokeNaturalParams};
 
     use super::{
         ActTypeParams, MIN_SAFE_LINEAR_MS_PER_CHAR, TEXT_INTEGRITY_DISPATCH_ONLY, TypeBackend,
@@ -398,6 +449,32 @@ mod tests {
                 },
                 backend: synapse_core::Backend::Software,
             }
+        );
+    }
+
+    #[test]
+    fn action_only_conversion_rejects_into_element() {
+        let params = ActTypeParams {
+            text: "targeted".to_owned(),
+            into_element: Some(
+                ElementId::parse("0x1000:0000002a00000001")
+                    .expect("synthetic element id should parse"),
+            ),
+            dynamics: TypeDynamics::Linear,
+            linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
+            use_scancodes: false,
+            press_enter_after: false,
+            backend: TypeBackend::Software,
+        };
+
+        let error = match action_from_type_params(&params) {
+            Ok(action) => panic!("element-targeted act_type converted unexpectedly: {action:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message
+                .contains("requires live UIA ValuePattern dispatch")
         );
     }
 }

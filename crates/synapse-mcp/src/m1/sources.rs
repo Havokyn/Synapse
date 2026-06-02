@@ -858,7 +858,7 @@ mod linux_x11 {
 
 #[cfg(windows)]
 pub fn platform_input(depth: u32, mode: PerceptionMode) -> Result<ObservationInput, ErrorData> {
-    let mut tree = synapse_a11y::snapshot_focused_window(depth).map_err(|err| a11y_error(&err))?;
+    let tree = synapse_a11y::snapshot_focused_window(depth).map_err(|err| a11y_error(&err))?;
     let hwnd = tree
         .root
         .parts()
@@ -876,7 +876,8 @@ pub fn window_input_from_hwnd(
     depth: u32,
     mode: PerceptionMode,
 ) -> Result<ObservationInput, ErrorData> {
-    let tree = synapse_a11y::snapshot_window_from_hwnd(hwnd, depth).map_err(|err| a11y_error(&err))?;
+    let tree =
+        synapse_a11y::snapshot_window_from_hwnd(hwnd, depth).map_err(|err| a11y_error(&err))?;
     let foreground = windows_foreground_context(hwnd)?;
     input_from_tree_and_foreground(tree, foreground, mode)
 }

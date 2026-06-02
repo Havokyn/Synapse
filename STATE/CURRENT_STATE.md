@@ -1,5 +1,106 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T00:00:05-05:00
+- #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle` has complete manual MCP/SoT evidence, final supporting checks, diff review, and cleanup. Remaining #628 actions are commit/push, RESOLVED comment, close issue, remove stale in-progress label if needed, then refresh the queue.
+- #628 patch in this worktree:
+  - `crates/synapse-mcp/src/m2/scroll.rs`: `act_scroll.at` now uses a Windows targeted HWND wheel-message path when no recording backend is active. It hit-tests the screen point, verifies the window/root rectangle, chunks signed wheel deltas into `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL`, and logs `M2_ACT_SCROLL_HWND_MESSAGE`. Non-Windows targeted scroll fails closed as backend unavailable.
+  - `crates/synapse-a11y/src/re_resolve.rs`, `platform/windows/resolve.rs`, `platform/windows/mod.rs`, and `platform/non_windows.rs`: added re-resolved UIA `ValuePattern` `SetValue` plus before/after readback for element-targeted typing; non-Windows fails closed.
+  - `crates/synapse-mcp/src/m2/type_text.rs` and `server/m2_tools.rs`: `act_type into_element` dispatches through live UIA ValuePattern instead of action-only conversion; immediate UIA mismatch is surfaced with `target_text_integrity=uia_value_pattern_dispatch_only_requires_target_readback`; non-targeted typing still uses normal action preflight.
+  - `crates/synapse-mcp/src/server/context.rs`: test struct update for existing `FindParams.window_hwnd`.
+  - `README.md` is dirty but unrelated/user-owned and must not be staged for #628.
+- Manual #628 FSV precondition:
+  - isolated repo-built daemon PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`.
+  - strict Inspector artifacts `431_patched12_health_post_compaction7.txt` and `432_patched12_tools_list_post_compaction7.txt` accepted required tools `act_scroll`, `act_type`, `act_click`, `find`, `observe`, `storage_inspect`, `release_all`, and `health`.
+  - final release binary after cleanup/build: `target\release\synapse-mcp.exe`, length `46477312`, LastWriteTimeUtc `2026-06-02T04:55:49.4779223Z`, SHA256 `710ADCF581389D984ED613A7DE3034A623055825A8D743B7368CF1F3F6268530`.
+- Manual #628 happy-path evidence:
+  - targeted scroll seed evidence moved Playwright DOM `scrollY` `0 -> 1278`; isolated `CF_ACTION_LOG` `0 -> 2`; daemon log emitted `M2_ACT_SCROLL_HWND_MESSAGE`.
+  - `act_type into_element` wrote exact Playwright DOM `searchValue="vega"`; isolated `CF_ACTION_LOG` `2 -> 4`; UIA immediate readback mismatch was recorded, so Playwright DOM was the accepted browser typing SoT.
+  - full browser marathon artifacts `347` through `437` drove search, late-loaded control, modal save, iframe entry/postMessage, form fill, moved target after scroll, and final submit through real Synapse MCP triggers.
+  - final browser/server SoT: `437_happy_after_submit_playwright_corrected_post_compaction7.txt` and `435_happy_after_submit_server_post_compaction7.json` show receipt `M-1` with payload `fullName=Casey Happy`, `email=casey.happy@example.test`, `priority=normal`, `notes=Notes happy path via Synapse MCP`, `searchQuery=vega`, `modalCode=MOD-628-HAPPY`, `iframeCode=IFR-628-HAPPY`, `dynamicReady=true`, and `movedClicks=1`.
+  - isolated storage after happy submit: `436_happy_after_submit_storage_post_compaction7.txt` shows `CF_ACTION_LOG=38`.
+- Manual #628 edge evidence:
+  - empty search: before `440`, server `441`, storage `442` (`CF_ACTION_LOG=38`); trigger `444` clicked app search button; after `445` has `searchStatus="Search term required"` and `errors=["empty-search"]`; server `446` unchanged; storage `447` `CF_ACTION_LOG=40`.
+  - boundary search: 256-character synthetic query in `448`; before `451`/`452`/`453`; real type `456` and click `459`; after `460` preserves exact length/value and reports 0 results with no errors; server `461` unchanged; storage `462` `CF_ACTION_LOG=44`.
+  - structurally invalid element: before `463`/`464`/`465`; trigger `466` attempted `act_click element_id="0x12068a:bad"` and failed closed with `ACTION_ELEMENT_NOT_RESOLVED`; after `467` DOM unchanged, server `468` unchanged, storage `469` `CF_ACTION_LOG=46` with an error row; excerpt `470`.
+- Supporting #628 checks passed:
+  - `cargo fmt --check`
+  - `git diff --check` (line-ending warnings only)
+  - `cargo check -p synapse-a11y -j 2`
+  - `cargo check -p synapse-mcp -j 2`
+  - `cargo test -p synapse-mcp targeted_wheel_chunks -- --nocapture`
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`
+  - `cargo build --release -p synapse-mcp -j 2`
+- Cleanup:
+  - wired `release_all` returned `released_keys=0`, `released_buttons=0`, `neutralized_pads=0`.
+  - isolated daemon PID `34424` was stopped earlier; `474_cleanup_daemon_port_readback_post_compaction7.json` shows process/socket absent.
+  - #628-owned Node server PID `79412`, Playwright MCP PID `39204`, and target Chrome PID `63396` were stopped; ports `8763`, `8932`, and `9226` read no listeners. Unrelated Chrome PID `30964` remains alive.
+- Next:
+  1. Stage only #628 code/state files, excluding unrelated `README.md`.
+  2. Commit with `[skip ci]`, push, post #628 RESOLVED evidence, close #628, and remove `status:in-progress` if still present.
+  3. Refresh open queue and take the next unblocked issue.
+
+## 2026-06-01T23:06:31-05:00
+- Active issue remains #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`.
+- Required wake-up after compaction was re-run again:
+  - read `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #628 comments, #351 decision/context, live GitHub open queue, and git status/log/branch.
+  - wired Synapse MCP tools returned through the real client: `health`, `storage_inspect`, `observe`, and `find`.
+  - live queue still has #628 in progress, #624/#625 blocked on Daybreak operator-only state, and #594/#595-#604/#629-#634 open.
+- Current #628 runtime was re-read:
+  - local server PID `79412`, `127.0.0.1:8763`.
+  - Playwright MCP PID `39204`, `::1:8932`.
+  - target Chrome PID `63396`, CDP `127.0.0.1:9226`, main HWND `0x12068a` / decimal `1181322`.
+  - unrelated user Chrome PID `30964` is still alive; avoid it and do not close it.
+  - isolated repo-built Synapse daemon PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`.
+  - fresh process/socket artifacts: `322_runtime_processes_post_compaction2.json` and `323_runtime_sockets_post_compaction2.json`.
+  - fresh strict Inspector artifacts: `324_patched12_health_post_compaction2.txt` and `325_patched12_tools_list_post_compaction2.txt`; required #628 tools remain present.
+- Manual SoT evidence for `act_type into_element` exactness has been captured:
+  - reset/navigate artifacts: `312_type_exact_reset_server.json`, `313_type_exact_playwright_navigate.txt`, and target-window setup `314_type_exact_raise_target_window.json`.
+  - before Playwright DOM `315_type_exact_before_playwright.txt`: `searchValue=""`, `activeId=""`, `results=[]`; before isolated storage `316_type_exact_before_storage.txt`: `CF_ACTION_LOG=2`.
+  - real Synapse MCP `find` artifact `317_type_exact_find_search_input.txt` found the target search input in HWND `1181322`.
+  - real Synapse MCP trigger `318_type_exact_synapse_act_type_search_vega.txt`: `act_type text=vega into_element=<search input>`.
+  - after Playwright DOM `319_type_exact_after_playwright.txt`: `searchValue="vega"`, `searchLength=4`, `activeId="searchInput"`, `results=[]`.
+  - after isolated storage `320_type_exact_after_storage.txt`: `CF_ACTION_LOG=4`, with started/ok rows for `act_type`.
+  - daemon log `321_type_exact_daemon_log_tail.txt` records a UIA immediate readback mismatch (`after_len=0`, expected `4`), so external Playwright DOM is the accepted SoT for exactness.
+- Next:
+  1. Reset/reload the #628 page again for a clean full happy path.
+  2. Use real Synapse MCP `find`, `act_type`, `act_click`, and `act_scroll` against target HWND `1181322`.
+  3. Read Playwright DOM, server `/api/state`, and isolated storage before/after each happy-path segment and edge.
+  4. If any click or field action returns success without a matching SoT delta, stop, root-cause, fix, rebuild/relaunch, and rerun the manual SoT loop.
+
+## 2026-06-01T23:00:34-05:00
+- Active issue remains #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`.
+- Required wake-up after compaction was re-run:
+  - read `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`, `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`, `AGENTS.md`, `STATE/*`, #628 comments, #351 decision/context, live GitHub open queue, and git status/log.
+  - wired Synapse MCP tools returned through the real client: `health`, `storage_inspect`, `observe`, and `find`.
+  - live queue still has #628 in progress, #624/#625 blocked on Daybreak operator-only state, and #594/#595-#604/#629-#634 open.
+- Current #628 runtime:
+  - local server PID `79412`, `127.0.0.1:8763`, server SoT after reset has `submissions=[]` and `iframeMessages=[]`.
+  - Playwright MCP PID `39204`, `::1:8932`, target page `http://127.0.0.1:8763/`.
+  - target Chrome PID `63396`, CDP `127.0.0.1:9226`, main HWND `0x12068a`, title `Issue628 Browser Marathon Target - Google Chrome`.
+  - unrelated user Chrome PID `30964` is still alive; avoid it and do not close it.
+  - isolated repo-built Synapse daemon PID `34424`, bind `127.0.0.1:7862`, DB `.runs\628\browser-marathon-fsv-20260601T1915\db12_scroll_hit_test_clean`.
+  - release binary `target\release\synapse-mcp.exe`: length `46477312`, SHA256 `971EAE444FE3E72FA533C7B7FBAA41A97824A5D149C7E263F6D9FB2BBD0FC301`, `LastWriteTimeUtc=2026-06-02T03:52:19.8116278Z`.
+  - fresh strict Inspector artifacts: `298_patched12_health_post_compaction.txt` and `299_patched12_tools_list_post_compaction.txt`; required tools `act_scroll`, `act_type`, `act_click`, `find`, `observe`, `storage_inspect`, `release_all`, and `health` are present.
+- #628 current patch state:
+  - `crates/synapse-mcp/src/m2/scroll.rs` now targets wheel delivery to the actual HWND hit by `WindowFromPoint` when `act_scroll.at` is provided, with chunked signed wheel deltas and structured `M2_ACT_SCROLL_HWND_MESSAGE` logging.
+  - `act_type into_element` and related A11Y/UIA value-pattern code is still dirty and must be manually checked against Playwright DOM exactness before acceptance.
+  - `README.md` is modified but unrelated/user-owned; do not stage it unless a later issue requires it.
+- Fresh manual SoT evidence for the targeted scroll defect:
+  - before reset/read artifacts: `300_scroll_seedfix_reset_server.json`, `301_scroll_seedfix_playwright_navigate.txt`, `302_scroll_seedfix_before_playwright.txt`, and `303_scroll_seedfix_before_storage.txt`.
+  - before Playwright DOM showed `scrollY=0`, `bodyHeight=3111`, element at viewport point `(846,686)` was `dynamicStatus`, and moved target rect `y=2623.5417`.
+  - before isolated storage showed `CF_ACTION_LOG=0`.
+  - initial point read showed the coordinate was under VS Code's Electron renderer, so target Chrome HWND `0x12068a` was raised as setup; post-raise read `307_scroll_seedfix_window_from_point_after_raise.json` showed point `856,696` hit `Chrome_RenderWidgetHostHWND` with root `0x12068a`.
+  - real Synapse MCP trigger `308_scroll_seedfix_synapse_act_scroll.txt`: `act_scroll` with `dy=-20`, `at={"x":856,"y":696}`, response `backend_used=software_window_message`, `wheel_event_count=1`.
+  - after Playwright DOM `309_scroll_seedfix_after_playwright.txt`: `scrollY=1278`, moved target rect `y=1345.5417`.
+  - after isolated storage `310_scroll_seedfix_after_storage.txt`: `CF_ACTION_LOG=2`, with started/ok rows for `act_scroll`.
+  - daemon log `311_scroll_seedfix_daemon_log_tail.txt`: `M2_ACT_SCROLL_HWND_MESSAGE` targeted `Chrome_RenderWidgetHostHWND` at `screen_x=856`, `screen_y=696`, `delta=-2400`.
+- Next:
+  1. Reset/reload the #628 page again.
+  2. Re-check `act_type into_element` exactness on the target Chrome page using a known value such as `vega` and Playwright DOM readback.
+  3. If exact, run the full #628 happy path plus empty/boundary/structurally-invalid edges through real Synapse MCP triggers and separate server/Playwright/storage SoT reads.
+  4. If `act_type` contaminates or appends unexpected text, fix it fail-closed and repeat the manual SoT loop.
+
 ## 2026-06-01T21:16:00-05:00
 - Active issue remains #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`.
 - User's `Issue615FanoutTarget` concern was rechecked after compaction from persisted state and live reality:

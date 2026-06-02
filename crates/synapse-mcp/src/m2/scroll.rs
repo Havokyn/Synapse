@@ -13,8 +13,25 @@ use synapse_core::{Action, Backend, Point};
 
 use crate::m1::mcp_error;
 
+#[cfg(windows)]
+use std::ffi::c_void;
+#[cfg(windows)]
+use windows::{
+    Win32::{
+        Foundation::{HWND, LPARAM, POINT as WinPoint, RECT, WPARAM},
+        UI::WindowsAndMessaging::{
+            EnumChildWindows, GA_ROOT, GetAncestor, GetClassNameW, GetWindowRect, IsWindow,
+            IsWindowVisible, PostMessageW, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WindowFromPoint,
+        },
+    },
+    core::BOOL,
+};
+
 const SMOOTH_SCROLL_INTERVAL_MS: u32 = 30;
 const MAX_SMOOTH_SCROLL_STEPS: u32 = 120;
+const WHEEL_DELTA: i32 = 120;
+#[cfg(windows)]
+const MAX_TARGETED_WHEEL_MESSAGES: usize = 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -68,10 +85,15 @@ pub async fn act_scroll_with_handle(
     }
 
     let actions = scroll_actions(&params)?;
-    let wheel_event_count = actions.len();
+    let mut wheel_event_count = actions.len();
+    let mut backend_used = "software";
 
     if let Some(recording) = recording {
         execute_recording(&recording, &actions, &params).await?;
+    } else if let Some(point) = params.at.map(Into::into) {
+        let dispatch = execute_targeted_scroll_actions(&params, point).await?;
+        wheel_event_count = dispatch.wheel_event_count;
+        backend_used = dispatch.backend_used;
     } else {
         execute_scroll_actions(&handle, actions, params.smooth).await?;
     }
@@ -80,7 +102,7 @@ pub async fn act_scroll_with_handle(
         &params,
         true,
         wheel_event_count,
-        "software",
+        backend_used,
         started,
     ))
 }
@@ -168,6 +190,75 @@ fn take_tick(value: &mut i32) -> i32 {
             1
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ScrollDispatchResult {
+    backend_used: &'static str,
+    wheel_event_count: usize,
+}
+
+async fn execute_targeted_scroll_actions(
+    params: &ActScrollParams,
+    point: Point,
+) -> Result<ScrollDispatchResult, ErrorData> {
+    execute_targeted_scroll_actions_platform(params, point).await
+}
+
+#[cfg(windows)]
+async fn execute_targeted_scroll_actions_platform(
+    params: &ActScrollParams,
+    point: Point,
+) -> Result<ScrollDispatchResult, ErrorData> {
+    let readback =
+        windows_hwnd_message_scroll_readback(point).map_err(|error| action_error_to_mcp(&error))?;
+    let mut wheel_event_count = 0_usize;
+    for delta in wheel_delta_chunks(params.dy).map_err(|error| action_error_to_mcp(&error))? {
+        post_wheel_message(readback.hwnd, WM_MOUSEWHEEL, delta, point)
+            .map_err(|error| action_error_to_mcp(&error))?;
+        wheel_event_count = wheel_event_count.saturating_add(1);
+        tracing::info!(
+            code = "M2_ACT_SCROLL_HWND_MESSAGE",
+            kind = "act_scroll",
+            target_hwnd = readback.hwnd,
+            target_class = %readback.class_name,
+            screen_x = point.x,
+            screen_y = point.y,
+            delta = i32::from(delta),
+            axis = "vertical",
+            "readback=window_message tool=act_scroll targeted_scroll_after"
+        );
+    }
+    for delta in wheel_delta_chunks(params.dx).map_err(|error| action_error_to_mcp(&error))? {
+        post_wheel_message(readback.hwnd, WM_MOUSEHWHEEL, delta, point)
+            .map_err(|error| action_error_to_mcp(&error))?;
+        wheel_event_count = wheel_event_count.saturating_add(1);
+        tracing::info!(
+            code = "M2_ACT_SCROLL_HWND_MESSAGE",
+            kind = "act_scroll",
+            target_hwnd = readback.hwnd,
+            target_class = %readback.class_name,
+            screen_x = point.x,
+            screen_y = point.y,
+            delta = i32::from(delta),
+            axis = "horizontal",
+            "readback=window_message tool=act_scroll targeted_scroll_after"
+        );
+    }
+    Ok(ScrollDispatchResult {
+        backend_used: "software_window_message",
+        wheel_event_count,
+    })
+}
+
+#[cfg(not(windows))]
+async fn execute_targeted_scroll_actions_platform(
+    _params: &ActScrollParams,
+    point: Point,
+) -> Result<ScrollDispatchResult, ErrorData> {
+    Err(action_error_to_mcp(&ActionError::BackendUnavailable {
+        detail: format!("act_scroll at={point:?} targeted window-message path requires Windows"),
+    }))
 }
 
 async fn execute_scroll_actions(
@@ -310,4 +401,306 @@ fn at_label(at: Option<Point>) -> String {
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
     mcp_error(error.code(), error.to_string())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct HwndMessageScrollReadback {
+    hwnd: i64,
+    class_name: String,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct WindowCandidate {
+    hwnd: HWND,
+    rect: RECT,
+    class_name: String,
+}
+
+#[cfg(windows)]
+struct ChildEnumContext {
+    point: Point,
+    candidates: Vec<WindowCandidate>,
+}
+
+#[cfg(windows)]
+fn windows_hwnd_message_scroll_readback(
+    point: Point,
+) -> Result<HwndMessageScrollReadback, ActionError> {
+    let seed = unsafe {
+        WindowFromPoint(WinPoint {
+            x: point.x,
+            y: point.y,
+        })
+    };
+    if seed.0.is_null() {
+        return Err(ActionError::TargetInvalid {
+            detail: format!("act_scroll at point {point:?} is not over a live window"),
+        });
+    }
+    let root = unsafe { GetAncestor(seed, GA_ROOT) };
+    let root = if root.0.is_null() { seed } else { root };
+    if !unsafe { IsWindow(Some(root)) }.as_bool() {
+        return Err(ActionError::TargetInvalid {
+            detail: format!(
+                "act_scroll root hwnd 0x{:x} for point {point:?} is not a live window",
+                hwnd_to_i64(root)
+            ),
+        });
+    }
+
+    let target = hit_test_hwnd_for_screen_point(seed, root, point)?;
+    let _ = screen_lparam(point)?;
+    Ok(HwndMessageScrollReadback {
+        hwnd: hwnd_to_i64(target.hwnd),
+        class_name: target.class_name,
+    })
+}
+
+#[cfg(windows)]
+fn hit_test_hwnd_for_screen_point(
+    seed: HWND,
+    root: HWND,
+    point: Point,
+) -> Result<WindowCandidate, ActionError> {
+    let root_rect = window_rect(root)?;
+    if !rect_contains_point(&root_rect, point) {
+        return Err(ActionError::TargetInvalid {
+            detail: format!(
+                "act_scroll point {point:?} is outside root hwnd 0x{:x} rect {:?}",
+                hwnd_to_i64(root),
+                rect_tuple(&root_rect)
+            ),
+        });
+    }
+
+    if let Ok(seed_rect) = window_rect(seed)
+        && unsafe { IsWindowVisible(seed) }.as_bool()
+        && rect_contains_point(&seed_rect, point)
+        && rect_area(&seed_rect) > 0
+    {
+        return Ok(WindowCandidate {
+            hwnd: seed,
+            rect: seed_rect,
+            class_name: window_class_name(seed),
+        });
+    }
+
+    best_child_hwnd_for_screen_point(root, root_rect, point)
+}
+
+#[cfg(windows)]
+fn best_child_hwnd_for_screen_point(
+    root: HWND,
+    root_rect: RECT,
+    point: Point,
+) -> Result<WindowCandidate, ActionError> {
+    let mut context = ChildEnumContext {
+        point,
+        candidates: Vec::new(),
+    };
+    let context_ptr = (&raw mut context).cast::<c_void>();
+    let _ = unsafe {
+        EnumChildWindows(
+            Some(root),
+            Some(enum_child_containing_point),
+            LPARAM(context_ptr as isize),
+        )
+    };
+
+    Ok(context
+        .candidates
+        .into_iter()
+        .min_by_key(|candidate| rect_area(&candidate.rect))
+        .unwrap_or_else(|| WindowCandidate {
+            hwnd: root,
+            rect: root_rect,
+            class_name: window_class_name(root),
+        }))
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_child_containing_point(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let context = unsafe { &mut *(lparam.0 as *mut ChildEnumContext) };
+    if unsafe { IsWindowVisible(hwnd) }.as_bool()
+        && let Ok(rect) = window_rect(hwnd)
+        && rect_contains_point(&rect, context.point)
+        && rect_area(&rect) > 0
+    {
+        context.candidates.push(WindowCandidate {
+            hwnd,
+            rect,
+            class_name: window_class_name(hwnd),
+        });
+    }
+    BOOL(1)
+}
+
+#[cfg(windows)]
+fn post_wheel_message(
+    hwnd: i64,
+    message: u32,
+    delta: i16,
+    screen_point: Point,
+) -> Result<(), ActionError> {
+    let hwnd = hwnd_from_i64(hwnd)?;
+    let wparam = wheel_wparam(delta)?;
+    let lparam = screen_lparam(screen_point)?;
+    unsafe { PostMessageW(Some(hwnd), message, wparam, lparam) }.map_err(|error| {
+        ActionError::BackendUnavailable {
+            detail: format!(
+                "PostMessageW act_scroll wheel message 0x{message:x} failed for hwnd 0x{:x} screen_point={screen_point:?} delta={delta}: {error}",
+                hwnd_to_i64(hwnd)
+            ),
+        }
+    })
+}
+
+#[cfg(windows)]
+fn wheel_delta_chunks(ticks: i32) -> Result<Vec<i16>, ActionError> {
+    if ticks == 0 {
+        return Ok(Vec::new());
+    }
+    let max_ticks_per_message = i32::from(i16::MAX) / WHEEL_DELTA;
+    let mut remaining = ticks;
+    let mut chunks = Vec::new();
+    while remaining != 0 {
+        if chunks.len() >= MAX_TARGETED_WHEEL_MESSAGES {
+            return Err(ActionError::TargetInvalid {
+                detail: format!(
+                    "act_scroll targeted wheel message count exceeds {MAX_TARGETED_WHEEL_MESSAGES} for ticks={ticks}"
+                ),
+            });
+        }
+        let step_ticks = remaining.clamp(-max_ticks_per_message, max_ticks_per_message);
+        let delta = step_ticks.saturating_mul(WHEEL_DELTA);
+        chunks.push(
+            i16::try_from(delta).map_err(|error| ActionError::TargetInvalid {
+                detail: format!(
+                    "act_scroll wheel delta {delta} cannot fit WM_MOUSE*WHEEL i16: {error}"
+                ),
+            })?,
+        );
+        remaining = remaining.saturating_sub(step_ticks);
+    }
+    Ok(chunks)
+}
+
+#[cfg(windows)]
+fn wheel_wparam(delta: i16) -> Result<WPARAM, ActionError> {
+    let high_word = u32::from(u16::from_ne_bytes(delta.to_ne_bytes())) << 16;
+    Ok(WPARAM(usize::try_from(high_word).map_err(|error| {
+        ActionError::TargetInvalid {
+            detail: format!("act_scroll wheel wParam overflowed usize: {error}"),
+        }
+    })?))
+}
+
+#[cfg(windows)]
+fn screen_lparam(point: Point) -> Result<LPARAM, ActionError> {
+    let x = i16::try_from(point.x).map_err(|error| ActionError::TargetInvalid {
+        detail: format!(
+            "act_scroll screen x {} cannot fit a WM_MOUSE*WHEEL lParam i16: {error}",
+            point.x
+        ),
+    })?;
+    let y = i16::try_from(point.y).map_err(|error| ActionError::TargetInvalid {
+        detail: format!(
+            "act_scroll screen y {} cannot fit a WM_MOUSE*WHEEL lParam i16: {error}",
+            point.y
+        ),
+    })?;
+    let packed = (u32::from(u16::from_ne_bytes(y.to_ne_bytes())) << 16)
+        | u32::from(u16::from_ne_bytes(x.to_ne_bytes()));
+    Ok(LPARAM(isize::try_from(packed).unwrap_or(isize::MAX)))
+}
+
+#[cfg(windows)]
+fn window_rect(hwnd: HWND) -> Result<RECT, ActionError> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_err(|error| {
+        ActionError::ElementNotResolved {
+            detail: format!(
+                "GetWindowRect failed for act_scroll hwnd 0x{:x}: {error}",
+                hwnd_to_i64(hwnd)
+            ),
+        }
+    })?;
+    Ok(rect)
+}
+
+#[cfg(windows)]
+fn rect_contains_point(rect: &RECT, point: Point) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+#[cfg(windows)]
+fn rect_area(rect: &RECT) -> i64 {
+    let width = i64::from(rect.right.saturating_sub(rect.left).max(0));
+    let height = i64::from(rect.bottom.saturating_sub(rect.top).max(0));
+    width.saturating_mul(height)
+}
+
+#[cfg(windows)]
+fn rect_tuple(rect: &RECT) -> (i32, i32, i32, i32) {
+    (rect.left, rect.top, rect.right, rect.bottom)
+}
+
+#[cfg(windows)]
+fn window_class_name(hwnd: HWND) -> String {
+    let mut buffer = vec![0_u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    String::from_utf16_lossy(&buffer[..usize::try_from(len).unwrap_or(0)])
+}
+
+#[cfg(windows)]
+fn hwnd_from_i64(hwnd: i64) -> Result<HWND, ActionError> {
+    if hwnd == 0 {
+        return Err(ActionError::TargetInvalid {
+            detail: "act_scroll target hwnd is null".to_owned(),
+        });
+    }
+    Ok(HWND(hwnd as isize as *mut c_void))
+}
+
+#[cfg(windows)]
+fn hwnd_to_i64(hwnd: HWND) -> i64 {
+    hwnd.0 as isize as i64
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn targeted_wheel_chunks_fit_signed_message_delta() {
+        let before_ticks = 2400;
+        let after = wheel_delta_chunks(before_ticks)
+            .unwrap_or_else(|error| panic!("targeted scroll chunking should fit: {error}"));
+
+        println!(
+            "readback=act_scroll_targeted_chunks before_ticks={before_ticks} after_chunks={after:?}"
+        );
+        assert_eq!(
+            after.iter().map(|delta| i32::from(*delta)).sum::<i32>(),
+            before_ticks * 120
+        );
+        assert!(after.iter().all(|delta| delta.unsigned_abs() <= 32_760));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn targeted_wheel_chunks_preserve_negative_direction() {
+        let before_ticks = -20;
+        let after = wheel_delta_chunks(before_ticks)
+            .unwrap_or_else(|error| panic!("negative targeted scroll should fit: {error}"));
+
+        println!(
+            "readback=act_scroll_targeted_chunks edge=negative before_ticks={before_ticks} after_chunks={after:?}"
+        );
+        assert_eq!(after, [-2400]);
+    }
 }

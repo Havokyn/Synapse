@@ -21,7 +21,7 @@ use synapse_perception::{ObservationInput, ObserveInclude, parse_perception_mode
 pub use ocr::read_text_in_state;
 use search::{element_match, entity_match};
 pub use sources::{FsRecentTracker, populate_clipboard_summary, populate_fs_recent};
-use sources::{platform_input, window_input_from_hwnd, synthetic_notepad_input};
+use sources::{platform_input, synthetic_notepad_input, window_input_from_hwnd};
 
 pub type SharedM1State = Arc<Mutex<M1State>>;
 
