@@ -186,6 +186,7 @@ const fn action_backend_class(action: &Action) -> ActionBackendClass {
         | Action::MouseMoveRelative { .. }
         | Action::MouseButton { .. }
         | Action::MouseDrag { .. }
+        | Action::MouseStroke { .. }
         | Action::MouseScroll { .. }
         | Action::AimAt { .. } => ActionBackendClass::Mouse,
         Action::ReleaseAll => ActionBackendClass::ReleaseAll,

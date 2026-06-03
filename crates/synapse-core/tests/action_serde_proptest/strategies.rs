@@ -1,8 +1,9 @@
 use proptest::{collection::vec, prelude::*};
 use synapse_core::{
     AimCurve, AimNaturalParams, AimStyle, AimTarget, Backend, ButtonAction, ComboInput, ComboStep,
-    ElementId, GamepadReport, Key, KeyCode, KeystrokeDynamics, KeystrokeNaturalParams, MouseButton,
-    MouseTarget, PadButton, Point, Stick, Trigger,
+    ElementId, GamepadReport, HumanizeParams, Key, KeyCode, KeystrokeDynamics,
+    KeystrokeNaturalParams, MouseButton, MouseTarget, PadButton, PathPoint, PathSpec, Point, Stick,
+    StrokeTiming, Trigger, VelocityProfile,
 };
 
 pub fn backend_strategy() -> impl Strategy<Value = Backend> {
@@ -61,6 +62,11 @@ pub fn dynamics_strategy() -> impl Strategy<Value = KeystrokeDynamics> {
 
 pub fn point_strategy() -> impl Strategy<Value = Point> {
     (-16_384i32..=16_384, -16_384i32..=16_384).prop_map(|(x, y)| Point { x, y })
+}
+
+pub fn path_point_strategy() -> impl Strategy<Value = PathPoint> {
+    (-16_384i32..=16_384, -16_384i32..=16_384)
+        .prop_map(|(x, y)| PathPoint::new(f64::from(x), f64::from(y)))
 }
 
 pub fn coord_strategy() -> impl Strategy<Value = f32> {
@@ -135,6 +141,96 @@ pub fn aim_curve_strategy() -> impl Strategy<Value = AimCurve> {
                 },
             ),
     ]
+}
+
+pub fn path_spec_strategy() -> impl Strategy<Value = PathSpec> {
+    let line = (path_point_strategy(), path_point_strategy())
+        .prop_map(|(from, to)| PathSpec::Line { from, to });
+    let arc = (path_point_strategy(), 1u32..=2048, -6i32..=6, -6i32..=6).prop_map(
+        |(center, radius, start_angle_rad, sweep_angle_rad)| PathSpec::Arc {
+            center,
+            radius: f64::from(radius),
+            start_angle_rad: f64::from(start_angle_rad),
+            sweep_angle_rad: f64::from(sweep_angle_rad),
+        },
+    );
+    let circle =
+        (path_point_strategy(), 1u32..=2048).prop_map(|(center, radius)| PathSpec::Circle {
+            center,
+            radius: f64::from(radius),
+        });
+    let cubic = (
+        path_point_strategy(),
+        path_point_strategy(),
+        path_point_strategy(),
+        path_point_strategy(),
+    )
+        .prop_map(|(p0, p1, p2, p3)| PathSpec::CubicBezier { p0, p1, p2, p3 });
+    let polyline = (vec(path_point_strategy(), 2..=6), any::<bool>())
+        .prop_map(|(points, closed)| PathSpec::Polyline { points, closed });
+    let catmull = (
+        vec(path_point_strategy(), 4..=7),
+        prop_oneof![Just(0.0), Just(0.5), Just(1.0)],
+        prop_oneof![Just(0.0), Just(0.5), Just(1.0)],
+        any::<bool>(),
+    )
+        .prop_map(|(waypoints, alpha, tension, closed)| PathSpec::CatmullRom {
+            waypoints,
+            alpha,
+            tension,
+            closed,
+        });
+
+    prop_oneof![line, arc, circle, cubic, polyline, catmull]
+}
+
+pub fn velocity_profile_strategy() -> impl Strategy<Value = VelocityProfile> {
+    prop_oneof![
+        Just(VelocityProfile::Constant),
+        Just(VelocityProfile::Linear),
+        Just(VelocityProfile::EaseInOut),
+        Just(VelocityProfile::MinimumJerk),
+    ]
+}
+
+pub fn stroke_timing_strategy() -> impl Strategy<Value = StrokeTiming> {
+    prop_oneof![
+        (1u32..=30_000).prop_map(|duration_ms| StrokeTiming::DurationMs { duration_ms }),
+        (1u32..=10_000).prop_map(|px_per_sec| StrokeTiming::SpeedPxPerSec {
+            px_per_sec: f64::from(px_per_sec),
+        }),
+    ]
+}
+
+pub fn humanize_params_strategy() -> impl Strategy<Value = HumanizeParams> {
+    (
+        0.0f32..=4.0,
+        0.0f32..=4.0,
+        0.0f32..=1.0,
+        (1.0f32..=1.1, 1.1f32..=1.3),
+        0.0f32..=1.0,
+        (0u32..=10, 11u32..=50),
+        prop::option::of(any::<u64>()),
+    )
+        .prop_map(
+            |(
+                tremor_base_stddev_px,
+                tremor_velocity_scale,
+                overshoot_prob,
+                overshoot_factor_range,
+                micro_pause_prob,
+                micro_pause_ms_range,
+                seed,
+            )| HumanizeParams {
+                tremor_base_stddev_px,
+                tremor_velocity_scale,
+                overshoot_prob,
+                overshoot_factor_range,
+                micro_pause_prob,
+                micro_pause_ms_range,
+                seed,
+            },
+        )
 }
 
 pub fn mouse_button_strategy() -> impl Strategy<Value = MouseButton> {

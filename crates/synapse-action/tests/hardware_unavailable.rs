@@ -5,7 +5,8 @@ use synapse_action::{
 use synapse_core::{
     Action, AimCurve, AimStyle, AimTarget, Backend, ButtonAction, ComboInput, ComboStep,
     GamepadReport, Key, KeyCode, KeystrokeDynamics, KeystrokeNaturalParams, MouseButton,
-    MouseTarget, PadButton, Point, Stick, Trigger, error_codes,
+    MouseTarget, PadButton, PathPoint, PathSpec, Point, Stick, StrokeTiming, Trigger,
+    VelocityProfile, error_codes,
 };
 
 #[test]
@@ -151,6 +152,20 @@ fn mouse_actions() -> Vec<(&'static str, Action)> {
             },
         ),
         (
+            "mouse_stroke",
+            Action::MouseStroke {
+                path: PathSpec::Line {
+                    from: PathPoint::new(1.0, 2.0),
+                    to: PathPoint::new(3.0, 4.0),
+                },
+                button: Some(MouseButton::Left),
+                profile: VelocityProfile::Linear,
+                timing: StrokeTiming::DurationMs { duration_ms: 1 },
+                humanize: None,
+                backend: Backend::Hardware,
+            },
+        ),
+        (
             "mouse_scroll",
             Action::MouseScroll {
                 dy: 1,
@@ -257,6 +272,7 @@ const fn action_kind(action: &Action) -> &'static str {
         Action::MouseMoveRelative { .. } => "mouse_move_relative",
         Action::MouseButton { .. } => "mouse_button",
         Action::MouseDrag { .. } => "mouse_drag",
+        Action::MouseStroke { .. } => "mouse_stroke",
         Action::MouseScroll { .. } => "mouse_scroll",
         Action::PadButton { .. } => "pad_button",
         Action::PadStick { .. } => "pad_stick",

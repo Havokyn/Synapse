@@ -4,8 +4,9 @@ use std::{
 };
 
 use synapse_core::{
-    Action, AimCurve, AimStyle, AimTarget, GamepadReport, Key, KeyCode, MouseButton, MouseTarget,
-    PadButton, PadId, Point, Stick, Trigger,
+    Action, AimCurve, AimStyle, AimTarget, GamepadReport, HumanizeParams, Key, KeyCode,
+    MouseButton, MouseTarget, PadButton, PadId, PathSpec, Point, Stick, StrokeTiming, Trigger,
+    VelocityProfile,
 };
 
 use crate::{ActionBackend, ActionError, EmitState};
@@ -49,6 +50,13 @@ pub enum RecordedInput {
     },
     MouseButtonUp {
         button: MouseButton,
+    },
+    MouseStroke {
+        path: PathSpec,
+        button: Option<MouseButton>,
+        profile: VelocityProfile,
+        timing: StrokeTiming,
+        humanize: Option<HumanizeParams>,
     },
     MouseScroll {
         dy: i32,

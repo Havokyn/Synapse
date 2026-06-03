@@ -10,9 +10,10 @@ use helpers::run_action_round_trip;
 use strategies::{
     aim_curve_strategy, aim_style_strategy, aim_target_strategy, backend_strategy,
     button_action_strategy, combo_step_strategy, coord_strategy, dynamics_strategy,
-    gamepad_report_strategy, key_strategy, mouse_button_strategy, mouse_target_strategy,
-    normalized_axis_strategy, pad_button_strategy, point_strategy, stick_strategy, text_strategy,
-    trigger_strategy, trigger_value_strategy,
+    gamepad_report_strategy, humanize_params_strategy, key_strategy, mouse_button_strategy,
+    mouse_target_strategy, normalized_axis_strategy, pad_button_strategy, path_spec_strategy,
+    point_strategy, stick_strategy, stroke_timing_strategy, text_strategy, trigger_strategy,
+    trigger_value_strategy, velocity_profile_strategy,
 };
 
 #[test]
@@ -144,6 +145,31 @@ fn action_mouse_drag_round_trips_1000_cases() -> Result<(), Box<dyn std::error::
                     button,
                     curve,
                     duration_ms,
+                    backend,
+                }
+            }),
+    )
+}
+
+#[test]
+fn action_mouse_stroke_round_trips_1000_cases() -> Result<(), Box<dyn std::error::Error>> {
+    run_action_round_trip(
+        "mouse_stroke",
+        (
+            path_spec_strategy(),
+            prop::option::of(mouse_button_strategy()),
+            velocity_profile_strategy(),
+            stroke_timing_strategy(),
+            prop::option::of(humanize_params_strategy()),
+            backend_strategy(),
+        )
+            .prop_map(|(path, button, profile, timing, humanize, backend)| {
+                Action::MouseStroke {
+                    path,
+                    button,
+                    profile,
+                    timing,
+                    humanize,
                     backend,
                 }
             }),

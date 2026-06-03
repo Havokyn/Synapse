@@ -37,6 +37,7 @@ const fn action_kind(action: &Action) -> &'static str {
         Action::MouseMoveRelative { .. } => "mouse_move_relative",
         Action::MouseButton { .. } => "mouse_button",
         Action::MouseDrag { .. } => "mouse_drag",
+        Action::MouseStroke { .. } => "mouse_stroke",
         Action::MouseScroll { .. } => "mouse_scroll",
         Action::PadButton { .. } => "pad_button",
         Action::PadStick { .. } => "pad_stick",

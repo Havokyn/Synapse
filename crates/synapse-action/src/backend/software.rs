@@ -60,6 +60,10 @@ impl ActionBackend for SoftwareBackend {
                 duration_ms,
                 ..
             } => mouse::mouse_drag(*from, *to, *button, curve, *duration_ms, state),
+            Action::MouseStroke { .. } => Err(ActionError::BackendUnavailable {
+                detail: "software backend cannot execute mouse_stroke until stroke streaming is implemented (#644)"
+                    .to_owned(),
+            }),
             Action::MouseScroll { dy, dx, at, .. } => mouse::mouse_scroll(*dy, *dx, *at),
             Action::AimAt { target, style, .. } => mouse::aim_at(target, *style),
             Action::Combo { steps, .. } => combo(steps, state),

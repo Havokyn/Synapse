@@ -50,6 +50,20 @@ impl RecordingState {
                 duration_ms,
                 ..
             } => self.mouse_drag(*to, *button, curve, *duration_ms, state),
+            Action::MouseStroke {
+                path,
+                button,
+                profile,
+                timing,
+                humanize,
+                ..
+            } => self.events.push(RecordedInput::MouseStroke {
+                path: path.clone(),
+                button: *button,
+                profile: *profile,
+                timing: timing.clone(),
+                humanize: *humanize,
+            }),
             Action::MouseScroll { dy, dx, at, .. } => {
                 self.events.push(RecordedInput::MouseScroll {
                     dy: *dy,

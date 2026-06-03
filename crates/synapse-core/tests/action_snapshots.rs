@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use synapse_core::{
     Action, AimCurve, AimNaturalParams, AimStyle, AimTarget, Backend, ButtonAction, ComboInput,
-    ComboStep, ElementId, GamepadReport, Key, KeyCode, KeystrokeDynamics, KeystrokeNaturalParams,
-    MouseButton, MouseTarget, PadButton, Point, Stick, Trigger,
+    ComboStep, ElementId, GamepadReport, HumanizeParams, Key, KeyCode, KeystrokeDynamics,
+    KeystrokeNaturalParams, MouseButton, MouseTarget, PadButton, PathPoint, PathSpec, Point, Stick,
+    StrokeTiming, Trigger, VelocityProfile,
 };
 
 #[test]
@@ -127,6 +128,28 @@ fn mouse_actions() -> BTreeMap<&'static str, Action> {
                 button: MouseButton::Left,
                 curve: AimCurve::EaseInOut,
                 duration_ms: 200,
+                backend: Backend::Software,
+            },
+        ),
+        (
+            "mouse_stroke",
+            Action::MouseStroke {
+                path: PathSpec::Circle {
+                    center: PathPoint::new(200.0, 150.0),
+                    radius: 32.0,
+                },
+                button: Some(MouseButton::Left),
+                profile: VelocityProfile::MinimumJerk,
+                timing: StrokeTiming::DurationMs { duration_ms: 750 },
+                humanize: Some(HumanizeParams {
+                    tremor_base_stddev_px: 0.2,
+                    tremor_velocity_scale: 0.5,
+                    overshoot_prob: 0.1,
+                    overshoot_factor_range: (1.02, 1.05),
+                    micro_pause_prob: 0.05,
+                    micro_pause_ms_range: (2, 8),
+                    seed: Some(42),
+                }),
                 backend: Backend::Software,
             },
         ),

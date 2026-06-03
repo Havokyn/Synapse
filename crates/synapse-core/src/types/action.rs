@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{Backend, ElementId, Point};
+use super::{Backend, ElementId, PathSpec, Point};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -52,6 +52,14 @@ pub enum Action {
         button: MouseButton,
         curve: AimCurve,
         duration_ms: u32,
+        backend: Backend,
+    },
+    MouseStroke {
+        path: PathSpec,
+        button: Option<MouseButton>,
+        profile: VelocityProfile,
+        timing: StrokeTiming,
+        humanize: Option<HumanizeParams>,
         backend: Backend,
     },
     MouseScroll {
@@ -111,6 +119,26 @@ pub enum VelocityProfile {
     Linear,
     EaseInOut,
     MinimumJerk,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StrokeTiming {
+    DurationMs { duration_ms: u32 },
+    SpeedPxPerSec { px_per_sec: f64 },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanizeParams {
+    pub tremor_base_stddev_px: f32,
+    pub tremor_velocity_scale: f32,
+    pub overshoot_prob: f32,
+    pub overshoot_factor_range: (f32, f32),
+    pub micro_pause_prob: f32,
+    pub micro_pause_ms_range: (u32, u32),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

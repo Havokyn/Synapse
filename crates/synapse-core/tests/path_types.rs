@@ -45,6 +45,72 @@ fn path_spec_json_round_trips_and_defaults_catmull_alpha() -> Result<(), Box<dyn
 }
 
 #[test]
+fn every_path_spec_variant_round_trips_known_json() -> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        json!({
+            "kind": "line",
+            "from": {"x": 0.0, "y": 0.0},
+            "to": {"x": 10.0, "y": 20.0}
+        }),
+        json!({
+            "kind": "arc",
+            "center": {"x": 0.0, "y": 0.0},
+            "radius": 100.0,
+            "start_angle_rad": 0.0,
+            "sweep_angle_rad": 1.5707963267948966
+        }),
+        json!({
+            "kind": "circle",
+            "center": {"x": 5.0, "y": -5.0},
+            "radius": 20.0
+        }),
+        json!({
+            "kind": "cubic_bezier",
+            "p0": {"x": 0.0, "y": 0.0},
+            "p1": {"x": 0.0, "y": 100.0},
+            "p2": {"x": 100.0, "y": 100.0},
+            "p3": {"x": 100.0, "y": 0.0}
+        }),
+        json!({
+            "kind": "polyline",
+            "points": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 10.0, "y": 0.0},
+                {"x": 10.0, "y": 10.0}
+            ],
+            "closed": true
+        }),
+        json!({
+            "kind": "catmull_rom",
+            "waypoints": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 10.0, "y": 0.0},
+                {"x": 10.0, "y": 10.0},
+                {"x": 20.0, "y": 10.0}
+            ],
+            "alpha": 0.5,
+            "tension": 0.25,
+            "closed": false
+        }),
+    ];
+
+    for input in cases {
+        let parsed = serde_json::from_value::<PathSpec>(input.clone())?;
+        let output = serde_json::to_value(&parsed)?;
+        println!("readback=path_types edge=path_spec_variant before={input} after={output}");
+        assert_eq!(output, input);
+    }
+
+    let invalid_variant = json!({"kind": "quadratic_bezier"});
+    assert!(serde_json::from_value::<PathSpec>(invalid_variant.clone()).is_err());
+    println!(
+        "readback=path_types edge=invalid_path_variant before={invalid_variant} after=rejected"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn velocity_profile_json_round_trips() -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
         VelocityProfile::Constant,
