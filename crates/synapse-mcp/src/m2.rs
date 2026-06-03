@@ -38,7 +38,9 @@ pub use press::{
 };
 pub use release_all::{ReleaseAllParams, ReleaseAllResponse, release_all_with_handles};
 pub use scroll::{ActScrollParams, ActScrollResponse, act_scroll_with_handle};
-pub use stroke::{ActStrokeParams, ActStrokeResponse, act_stroke_with_handle};
+pub use stroke::{
+    ActStrokeParams, ActStrokeResponse, act_stroke_with_handle, validate_act_stroke_params,
+};
 pub use type_text::action_from_type_params;
 pub use type_text::{ActTypeParams, ActTypeResponse, act_type_with_handle};
 

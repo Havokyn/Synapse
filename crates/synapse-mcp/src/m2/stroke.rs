@@ -4,15 +4,17 @@ use std::{
 };
 
 use rmcp::ErrorData;
+use rmcp::model::ErrorCode;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use synapse_action::{
-    ActionBackend, ActionError, ActionHandle, ArcLengthPath, EmitState, RecordedInput,
-    RecordingBackend, StrokeError, StrokePlan, plan_timed_stroke,
+    ActionBackend, ActionError, ActionHandle, ArcLengthPath, EmitState, PathError, RecordedInput,
+    RecordingBackend, StrokeError, StrokePlan, plan_timed_stroke, screen_point_from_path_point,
 };
 use synapse_core::{
-    Action, Backend, HumanizeParams, MouseButton, PathSpec, StrokeTiming, VelocityProfile,
-    error_codes,
+    Action, Backend, HumanizeParams, MouseButton, PathPoint, PathSpec, Point, Rect, StrokeTiming,
+    VelocityProfile, error_codes,
 };
 
 use crate::m1::mcp_error;
@@ -21,6 +23,18 @@ pub const MAX_STROKE_PATH_POINTS: usize = 4096;
 pub const MAX_STROKE_SAMPLES: usize = 60_001;
 const MAX_STROKE_DURATION_MS: f64 = 60_000.0;
 const MODIFIER_RELEASE_SETTLE_MS: u64 = 200;
+const STROKE_DETAIL_COORD_NONFINITE: &str = "STROKE_COORD_NONFINITE";
+const STROKE_DETAIL_COORD_OUT_OF_I32_RANGE: &str = "STROKE_COORD_OUT_OF_I32_RANGE";
+const STROKE_DETAIL_POINT_OUT_OF_VIRTUAL_SCREEN: &str = "STROKE_POINT_OUT_OF_VIRTUAL_SCREEN";
+const STROKE_DETAIL_PATH_DEGENERATE: &str = "STROKE_PATH_DEGENERATE";
+const STROKE_DETAIL_PATH_POINT_CAP_EXCEEDED: &str = "STROKE_PATH_POINT_CAP_EXCEEDED";
+const STROKE_DETAIL_SAMPLE_CAP_EXCEEDED: &str = "STROKE_SAMPLE_CAP_EXCEEDED";
+const STROKE_DETAIL_DURATION_INVALID: &str = "STROKE_DURATION_INVALID";
+const STROKE_DETAIL_DURATION_CAP_EXCEEDED: &str = "STROKE_DURATION_CAP_EXCEEDED";
+const STROKE_DETAIL_SPEED_INVALID: &str = "STROKE_SPEED_INVALID";
+const STROKE_DETAIL_PATH_PARAMETER_INVALID: &str = "STROKE_PATH_PARAMETER_INVALID";
+const STROKE_DETAIL_VELOCITY_INVALID: &str = "STROKE_VELOCITY_INVALID";
+const STROKE_DETAIL_HUMANIZE_INVALID: &str = "STROKE_HUMANIZE_INVALID";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -83,10 +97,10 @@ pub async fn act_stroke_with_handle(
     handle: ActionHandle,
     recording: Option<Arc<RecordingBackend>>,
     params: ActStrokeParams,
+    plan: StrokePlan,
 ) -> Result<ActStrokeResponse, ErrorData> {
     let started = Instant::now();
     let backend = params.backend.to_backend();
-    let plan = validate_and_plan(&params)?;
     let action = Action::MouseStroke {
         path: params.path.clone(),
         button: params.button,
@@ -108,6 +122,10 @@ pub async fn act_stroke_with_handle(
     }
 
     Ok(response(&params, &plan, started, backend))
+}
+
+pub fn validate_act_stroke_params(params: &ActStrokeParams) -> Result<StrokePlan, ErrorData> {
+    validate_and_plan(params)
 }
 
 impl StrokeBackend {
@@ -138,7 +156,15 @@ impl StrokeModifier {
 }
 
 fn validate_and_plan(params: &ActStrokeParams) -> Result<StrokePlan, ErrorData> {
+    validate_and_plan_with_screen_bounds(params, current_virtual_screen_bounds()?)
+}
+
+fn validate_and_plan_with_screen_bounds(
+    params: &ActStrokeParams,
+    screen_bounds: Option<StrokeScreenBounds>,
+) -> Result<StrokePlan, ErrorData> {
     validate_control_point_cap(&params.path)?;
+    validate_path_points(&params.path, screen_bounds)?;
     validate_duration_cap(params)?;
     let plan = plan_timed_stroke(
         &params.path,
@@ -148,50 +174,213 @@ fn validate_and_plan(params: &ActStrokeParams) -> Result<StrokePlan, ErrorData> 
     )
     .map_err(|error| stroke_error_to_mcp(&error))?;
     if plan.samples.len() > MAX_STROKE_SAMPLES {
-        return Err(params_invalid(format!(
-            "act_stroke planned point stream count {} exceeds max {MAX_STROKE_SAMPLES}",
-            plan.samples.len()
-        )));
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_SAMPLE_CAP_EXCEEDED,
+            format!(
+                "act_stroke planned point stream count {} exceeds max {MAX_STROKE_SAMPLES}",
+                plan.samples.len()
+            ),
+        ));
     }
+    validate_plan_points(&plan, screen_bounds)?;
     Ok(plan)
 }
 
 fn validate_control_point_cap(path: &PathSpec) -> Result<(), ErrorData> {
     let count = control_point_count(path);
     if count > MAX_STROKE_PATH_POINTS {
-        return Err(params_invalid(format!(
-            "act_stroke path control point count {count} exceeds max {MAX_STROKE_PATH_POINTS}"
-        )));
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_PATH_POINT_CAP_EXCEEDED,
+            format!(
+                "act_stroke path control point count {count} exceeds max {MAX_STROKE_PATH_POINTS}"
+            ),
+        ));
     }
     Ok(())
 }
 
 fn validate_duration_cap(params: &ActStrokeParams) -> Result<(), ErrorData> {
     let path_length_px = ArcLengthPath::new(&params.path)
-        .map_err(|error| params_invalid(format!("act_stroke path invalid: {error}")))?
+        .map_err(|error| path_error_to_mcp(&error))?
         .length();
     let duration_ms = match &params.duration_or_speed {
         StrokeTiming::DurationMs { duration_ms } => f64::from(*duration_ms),
         StrokeTiming::SpeedPxPerSec { px_per_sec } => {
             if !px_per_sec.is_finite() || *px_per_sec <= 0.0 {
-                return Err(params_invalid(format!(
-                    "act_stroke speed px_per_sec must be finite and greater than zero, got {px_per_sec}"
-                )));
+                return Err(params_invalid_detail(
+                    STROKE_DETAIL_SPEED_INVALID,
+                    format!(
+                        "act_stroke speed px_per_sec must be finite and greater than zero, got {px_per_sec}"
+                    ),
+                ));
             }
             path_length_px / px_per_sec * 1000.0
         }
     };
     if !duration_ms.is_finite() || duration_ms <= 0.0 {
-        return Err(params_invalid(format!(
-            "act_stroke duration_ms must be finite and greater than zero, got {duration_ms}"
-        )));
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_DURATION_INVALID,
+            format!(
+                "act_stroke duration_ms must be finite and greater than zero, got {duration_ms}"
+            ),
+        ));
     }
     if duration_ms > MAX_STROKE_DURATION_MS {
-        return Err(params_invalid(format!(
-            "act_stroke planned duration_ms {duration_ms:.3} exceeds max {MAX_STROKE_DURATION_MS:.0}"
-        )));
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_DURATION_CAP_EXCEEDED,
+            format!(
+                "act_stroke planned duration_ms {duration_ms:.3} exceeds max {MAX_STROKE_DURATION_MS:.0}"
+            ),
+        ));
     }
     Ok(())
+}
+
+fn validate_path_points(
+    path: &PathSpec,
+    screen_bounds: Option<StrokeScreenBounds>,
+) -> Result<(), ErrorData> {
+    match path {
+        PathSpec::Line { from, to } => {
+            validate_path_point(*from, "path.line.from", screen_bounds)?;
+            validate_path_point(*to, "path.line.to", screen_bounds)?;
+        }
+        PathSpec::Arc { center, .. } => {
+            validate_path_point(*center, "path.arc.center", screen_bounds)?;
+        }
+        PathSpec::Circle { center, .. } => {
+            validate_path_point(*center, "path.circle.center", screen_bounds)?;
+        }
+        PathSpec::CubicBezier { p0, p1, p2, p3 } => {
+            validate_path_point(*p0, "path.cubic_bezier.p0", screen_bounds)?;
+            validate_path_point(*p1, "path.cubic_bezier.p1", screen_bounds)?;
+            validate_path_point(*p2, "path.cubic_bezier.p2", screen_bounds)?;
+            validate_path_point(*p3, "path.cubic_bezier.p3", screen_bounds)?;
+        }
+        PathSpec::Polyline { points, .. } => {
+            for (index, point) in points.iter().enumerate() {
+                validate_path_point(
+                    *point,
+                    &format!("path.polyline.points[{index}]"),
+                    screen_bounds,
+                )?;
+            }
+        }
+        PathSpec::CatmullRom { waypoints, .. } => {
+            for (index, point) in waypoints.iter().enumerate() {
+                validate_path_point(
+                    *point,
+                    &format!("path.catmull_rom.waypoints[{index}]"),
+                    screen_bounds,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_points(
+    plan: &StrokePlan,
+    screen_bounds: Option<StrokeScreenBounds>,
+) -> Result<(), ErrorData> {
+    for (index, sample) in plan.samples.iter().enumerate() {
+        validate_path_point(
+            sample.point,
+            &format!("planned_samples[{index}]"),
+            screen_bounds,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_path_point(
+    point: PathPoint,
+    label: &str,
+    screen_bounds: Option<StrokeScreenBounds>,
+) -> Result<Point, ErrorData> {
+    if !point.is_finite() {
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_COORD_NONFINITE,
+            format!(
+                "act_stroke {label} must have finite coordinates, got x={} y={}",
+                point.x, point.y
+            ),
+        ));
+    }
+    let screen_point = screen_point_from_path_point(point, 0).map_err(|error| match error {
+        StrokeError::ScreenPointOutOfRange { x, y, .. } => params_invalid_detail(
+            STROKE_DETAIL_COORD_OUT_OF_I32_RANGE,
+            format!("act_stroke {label} is outside i32 screen coordinate range: x={x} y={y}"),
+        ),
+        other => stroke_error_to_mcp(&other),
+    })?;
+    if let Some(bounds) = screen_bounds
+        && !bounds.rect.contains(screen_point)
+    {
+        let right = bounds.rect.x.saturating_add(bounds.rect.w);
+        let bottom = bounds.rect.y.saturating_add(bounds.rect.h);
+        return Err(params_invalid_detail(
+            STROKE_DETAIL_POINT_OUT_OF_VIRTUAL_SCREEN,
+            format!(
+                "act_stroke {label} is outside the virtual screen bounds: point=({}, {}) bounds=left:{} top:{} right_exclusive:{} bottom_exclusive:{} source:{}",
+                screen_point.x,
+                screen_point.y,
+                bounds.rect.x,
+                bounds.rect.y,
+                right,
+                bottom,
+                bounds.source
+            ),
+        ));
+    }
+    Ok(screen_point)
+}
+
+#[derive(Copy, Clone, Debug)]
+struct StrokeScreenBounds {
+    rect: Rect,
+    source: &'static str,
+}
+
+fn current_virtual_screen_bounds() -> Result<Option<StrokeScreenBounds>, ErrorData> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
+        };
+
+        // SAFETY: GetSystemMetrics is read-only for these process desktop metrics.
+        let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        // SAFETY: GetSystemMetrics is read-only for these process desktop metrics.
+        let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        // SAFETY: GetSystemMetrics is read-only for these process desktop metrics.
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        // SAFETY: GetSystemMetrics is read-only for these process desktop metrics.
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        if width <= 0 || height <= 0 {
+            return Err(mcp_error(
+                error_codes::ACTION_BACKEND_UNAVAILABLE,
+                format!(
+                    "act_stroke could not read a valid virtual screen before validation: left={left} top={top} width={width} height={height}"
+                ),
+            ));
+        }
+        return Ok(Some(StrokeScreenBounds {
+            rect: Rect {
+                x: left,
+                y: top,
+                w: width,
+                h: height,
+            },
+            source: "GetSystemMetrics(SM_*VIRTUALSCREEN)",
+        }));
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
 }
 
 async fn execute_with_modifiers(
@@ -384,15 +573,74 @@ fn path_kind(path: &PathSpec) -> &'static str {
 }
 
 fn stroke_error_to_mcp(error: &StrokeError) -> ErrorData {
-    params_invalid(format!("act_stroke params invalid: {error}"))
+    match error {
+        StrokeError::Path(error) => path_error_to_mcp(error),
+        StrokeError::Velocity(error) => params_invalid_detail(
+            STROKE_DETAIL_VELOCITY_INVALID,
+            format!("act_stroke velocity profile invalid: {error}"),
+        ),
+        StrokeError::Humanize(error) => params_invalid_detail(
+            STROKE_DETAIL_HUMANIZE_INVALID,
+            format!("act_stroke humanize params invalid: {error}"),
+        ),
+        StrokeError::InvalidDuration { duration_ms } => params_invalid_detail(
+            STROKE_DETAIL_DURATION_INVALID,
+            format!(
+                "act_stroke duration_ms must be finite and greater than zero, got {duration_ms}"
+            ),
+        ),
+        StrokeError::InvalidSpeed { px_per_sec } => params_invalid_detail(
+            STROKE_DETAIL_SPEED_INVALID,
+            format!(
+                "act_stroke speed px_per_sec must be finite and greater than zero, got {px_per_sec}"
+            ),
+        ),
+        StrokeError::SampleCountOverflow { duration_ms } => params_invalid_detail(
+            STROKE_DETAIL_SAMPLE_CAP_EXCEEDED,
+            format!("act_stroke sample count overflow for duration_ms={duration_ms}"),
+        ),
+        StrokeError::ScreenPointOutOfRange { index, x, y } => params_invalid_detail(
+            STROKE_DETAIL_COORD_OUT_OF_I32_RANGE,
+            format!(
+                "act_stroke planned point {index} is outside i32 screen coordinate range: x={x} y={y}"
+            ),
+        ),
+    }
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
     mcp_error(error.code(), error.to_string())
 }
 
-fn params_invalid(message: impl Into<String>) -> ErrorData {
-    mcp_error(error_codes::TOOL_PARAMS_INVALID, message)
+fn path_error_to_mcp(error: &PathError) -> ErrorData {
+    let detail_code = match error {
+        PathError::NotEnoughPoints { .. }
+        | PathError::DegenerateSegment { .. }
+        | PathError::DegenerateCurve { .. }
+        | PathError::ZeroLengthPath
+        | PathError::InvalidSampleCount { .. } => STROKE_DETAIL_PATH_DEGENERATE,
+        PathError::NonFinitePoint { .. } | PathError::InvalidT { .. } => {
+            STROKE_DETAIL_COORD_NONFINITE
+        }
+        PathError::NonFiniteParameter { .. }
+        | PathError::NonPositiveParameter { .. }
+        | PathError::InvalidCatmullRomAlpha { .. }
+        | PathError::InvalidCatmullRomTension { .. }
+        | PathError::InvalidArcLengthSegments { .. }
+        | PathError::InvalidArcLength { .. } => STROKE_DETAIL_PATH_PARAMETER_INVALID,
+    };
+    params_invalid_detail(detail_code, format!("act_stroke path invalid: {error}"))
+}
+
+fn params_invalid_detail(detail_code: &'static str, message: impl Into<String>) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.into(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "detail_code": detail_code,
+        })),
+    )
 }
 
 const fn default_stroke_velocity_profile() -> VelocityProfile {
@@ -408,5 +656,171 @@ const fn backend_used_name(backend: Backend) -> &'static str {
         Backend::Auto | Backend::Software => "software",
         Backend::Hardware => "hardware",
         Backend::Vigem => "vigem",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stroke_validation_accepts_valid_line_inside_bounds() {
+        let params = line_params(
+            PathPoint::new(1.0, 1.0),
+            PathPoint::new(5.0, 1.0),
+            StrokeTiming::DurationMs { duration_ms: 4 },
+        );
+
+        let plan = match validate_and_plan_with_screen_bounds(&params, test_bounds()) {
+            Ok(plan) => plan,
+            Err(error) => panic!("valid stroke rejected: {error:?}"),
+        };
+
+        assert_eq!(plan.samples.len(), 5);
+        assert_eq!(plan.path_length_px, 4.0);
+        assert_eq!(plan.duration_ms, 4.0);
+    }
+
+    #[test]
+    fn stroke_validation_rejects_nonfinite_coordinate() {
+        let params = line_params(
+            PathPoint::new(f64::NAN, 1.0),
+            PathPoint::new(5.0, 1.0),
+            StrokeTiming::DurationMs { duration_ms: 4 },
+        );
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_COORD_NONFINITE);
+        assert!(error.message.contains("finite coordinates"));
+    }
+
+    #[test]
+    fn stroke_validation_rejects_one_point_path() {
+        let params = params_for_path(PathSpec::Polyline {
+            points: vec![PathPoint::new(1.0, 1.0)],
+            closed: false,
+        });
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_PATH_DEGENERATE);
+        assert!(error.message.contains("requires at least 2 points"));
+    }
+
+    #[test]
+    fn stroke_validation_rejects_waypoint_count_over_cap() {
+        let points = vec![PathPoint::new(1.0, 1.0); MAX_STROKE_PATH_POINTS + 1];
+        let params = params_for_path(PathSpec::Polyline {
+            points,
+            closed: false,
+        });
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_PATH_POINT_CAP_EXCEEDED);
+        assert!(error.message.contains("control point count"));
+    }
+
+    #[test]
+    fn stroke_validation_rejects_out_of_virtual_screen_bounds() {
+        let params = line_params(
+            PathPoint::new(1.0, 1.0),
+            PathPoint::new(200.0, 1.0),
+            StrokeTiming::DurationMs { duration_ms: 4 },
+        );
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_POINT_OUT_OF_VIRTUAL_SCREEN);
+        assert!(error.message.contains("virtual screen bounds"));
+    }
+
+    #[test]
+    fn stroke_validation_rejects_zero_duration() {
+        let params = line_params(
+            PathPoint::new(1.0, 1.0),
+            PathPoint::new(5.0, 1.0),
+            StrokeTiming::DurationMs { duration_ms: 0 },
+        );
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_DURATION_INVALID);
+        assert!(error.message.contains("greater than zero"));
+    }
+
+    #[test]
+    fn stroke_validation_rejects_infinite_speed() {
+        let params = line_params(
+            PathPoint::new(1.0, 1.0),
+            PathPoint::new(5.0, 1.0),
+            StrokeTiming::SpeedPxPerSec {
+                px_per_sec: f64::INFINITY,
+            },
+        );
+
+        let error = validation_error(&params);
+
+        assert_tool_params_invalid_detail(&error, STROKE_DETAIL_SPEED_INVALID);
+        assert!(error.message.contains("px_per_sec"));
+    }
+
+    fn validation_error(params: &ActStrokeParams) -> ErrorData {
+        match validate_and_plan_with_screen_bounds(params, test_bounds()) {
+            Ok(plan) => panic!("invalid stroke was accepted with plan: {plan:?}"),
+            Err(error) => error,
+        }
+    }
+
+    fn line_params(from: PathPoint, to: PathPoint, timing: StrokeTiming) -> ActStrokeParams {
+        params_for_path_with_timing(PathSpec::Line { from, to }, timing)
+    }
+
+    fn params_for_path(path: PathSpec) -> ActStrokeParams {
+        params_for_path_with_timing(path, StrokeTiming::DurationMs { duration_ms: 4 })
+    }
+
+    fn params_for_path_with_timing(path: PathSpec, timing: StrokeTiming) -> ActStrokeParams {
+        ActStrokeParams {
+            path,
+            button: None,
+            velocity_profile: VelocityProfile::Constant,
+            duration_or_speed: timing,
+            humanize: None,
+            backend: StrokeBackend::Software,
+            modifiers: Vec::new(),
+        }
+    }
+
+    fn test_bounds() -> Option<StrokeScreenBounds> {
+        Some(StrokeScreenBounds {
+            rect: Rect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            source: "test",
+        })
+    }
+
+    fn assert_tool_params_invalid_detail(error: &ErrorData, expected_detail_code: &str) {
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(|code| code.as_str()),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("detail_code"))
+                .and_then(|code| code.as_str()),
+            Some(expected_detail_code)
+        );
     }
 }
