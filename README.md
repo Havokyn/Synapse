@@ -378,3 +378,7 @@ Copyright © 2026 Chris Royse. See [LICENSE.md](LICENSE.md) for full terms.
   <em>Your AI has a brain. Now give it a body.</em><br>
   <strong>⭐ Star the repo if Synapse is useful to you.</strong>
 </p>
+
+<p align="center">
+  📫 <strong>Contact me:</strong> <a href="mailto:chrisroyseai@gmail.com">chrisroyseai@gmail.com</a>
+</p>
