@@ -1,5 +1,12 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T21:55:00-05:00 — ALL ISSUES CLOSED
+- chrisroyse/synapse open-issue count = **0**. Goal complete.
+- This session closed: #631 (J6), #632 (J7), #634 (K2), #633 (K1), and the umbrella #594 (all in-scope children done; EverQuest group I + J5 stay descoped/not-planned).
+- #633 soak verdict: 2 h continuous mixed load on isolated release daemon (port 7893, own DB) — memory/handles/threads bounded (handles 634 & threads 71 flat across back 90 min; RSS 270–521 MB; private plateaued ~1 GB; recursion_clamps 0), GC keeps CFs near soft caps, pressure ladder Normal↔L4↔L2, subscriber reconnect, profile switch, clean daemon-restart recovery. The one mid-run death (~57 min) was external (operator GPU AI model exhausted system RAM — confirmed: 26 MB alloc failed with 125 GB box; memhog probe allocated ~96 GB, no process/job cap), not a Synapse defect.
+- Env fixes committed `7d4d9a6`: Win `~/.cargo/config.toml` + repo `Cargo.toml [profile.dev]` incremental=false; reclaimed 257 GB; `~/.cargo/bin/synapse-mcp.exe` refreshed to latest; WSL already protected.
+- Open env note: repeated `/mcp` reconnects accumulated ~8 idle cargo-bin `synapse-mcp.exe` daemons (Claude Code not reaping prior MCP child on reconnect); harmless/small; cleared by a Claude Code restart.
+
 ## Current Resume Point - 2026-06-02T18:10:00-05:00
 - Open GitHub issues progress this session (chrisroyse/synapse):
   - #631 (J6 voice-reactive reflex): CLOSED. Patch `audio_event_sink` already committed in `992d069`; re-verified full on-disk FSV (happy + 5 edges + cleanup) and final checks (fmt, audio_event_sink test, m3 audio/subscribe/reflex/tools-list, release build SHA `75ECE572…`).
