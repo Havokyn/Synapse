@@ -389,6 +389,81 @@ pub fn current_input(state: &M1State, depth: u32) -> Result<ObservationInput, Er
     Ok(input)
 }
 
+/// Attaches CDP (when reachable) and folds the page's DOM/accessibility tree
+/// into `input.elements` as queryable web nodes (#685), upgrading `web_path` to
+/// `cdp`. This is the async companion to the synchronous probe in
+/// `sources::populate_cdp_diagnostics`: the probe reports *whether* a debug port
+/// is reachable; this turns a reachable port into actual web content.
+///
+/// Fail-loud: an attach/tree failure flips `cdp.status` to `attach_failed` with
+/// the specific reason code and detail, and leaves `web_path = uia_only` — never
+/// a silent empty tree. Non-browser / no-port foregrounds are a no-op.
+#[cfg(windows)]
+pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32, max_nodes: usize) {
+    use synapse_core::{CdpStatus, WebPerceptionPath};
+
+    let Some(cdp) = input.cdp.clone() else {
+        return;
+    };
+    if cdp.status != CdpStatus::Ok {
+        return;
+    }
+    let Some(endpoint) = cdp.endpoint.clone() else {
+        return;
+    };
+    let hwnd = input.foreground.hwnd;
+    let title = input.foreground.window_title.clone();
+
+    match synapse_a11y::fetch_dom_snapshot(&endpoint, hwnd, &title, max_nodes).await {
+        Ok(snapshot) => {
+            let count = u32::try_from(snapshot.nodes.len()).unwrap_or(u32::MAX);
+            for mut node in snapshot.nodes {
+                // Clamp web-node depth to the requested observe depth so deeply
+                // nested DOM elements still survive the element depth filter;
+                // parent links keep the true hierarchy.
+                node.depth = node.depth.min(max_depth);
+                input.elements.push(node);
+            }
+            input.web_path = Some(WebPerceptionPath::Cdp);
+            if let Some(diagnostics) = input.cdp.as_mut() {
+                diagnostics.attached_node_count = Some(count);
+            }
+            tracing::info!(
+                code = "A11Y_CDP_DOM_ATTACHED",
+                endpoint = %endpoint,
+                hwnd,
+                page_url = %snapshot.page_url,
+                node_count = count,
+                total_ax_nodes = snapshot.total_ax_nodes,
+                "attached CDP DOM tree into observation elements"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                code = error.code(),
+                endpoint = %endpoint,
+                hwnd,
+                error = %error,
+                "CDP DOM snapshot failed; web content not exposed (web_path stays uia_only)"
+            );
+            if let Some(diagnostics) = input.cdp.as_mut() {
+                diagnostics.status = CdpStatus::AttachFailed;
+                diagnostics.reason_code = Some(error.code().to_owned());
+                diagnostics.detail = Some(error.to_string());
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::unused_async)]
+pub async fn enrich_input_with_cdp(
+    _input: &mut ObservationInput,
+    _max_depth: u32,
+    _max_nodes: usize,
+) {
+}
+
 fn input_limited_to_depth(mut input: ObservationInput, depth: u32) -> ObservationInput {
     input.elements.retain(|node| node.depth <= depth);
     if let Some(focused) = &input.focused {
@@ -424,7 +499,17 @@ fn focused_from_accessible_node(node: &AccessibleNode) -> FocusedElement {
 /// snapshot's node-budget/deadline bounds the cost.
 const FIND_SNAPSHOT_DEPTH: u32 = 16;
 
-pub fn find_in_state(state: &mut M1State, params: &FindParams) -> Result<FindResponse, ErrorData> {
+/// Upper bound on CDP web nodes folded into a `find` snapshot. Web pages have
+/// far more nodes than native windows, and `find` walks deeper than `observe`.
+const FIND_CDP_MAX_NODES: usize = 300;
+
+/// Builds the perception input a `find` query searches (foreground or a specific
+/// window), including detection entities. Split from matching so the async `find`
+/// handler can fold in CDP web nodes (#685) before matching.
+pub fn build_find_input(
+    state: &mut M1State,
+    params: &FindParams,
+) -> Result<ObservationInput, ErrorData> {
     let mut input = if let Some(hwnd) = params.window_hwnd {
         let mut input = window_input_from_hwnd(hwnd, FIND_SNAPSHOT_DEPTH, state.perception_mode)?;
         input.capture_config = Some(state.active_capture_config.clone());
@@ -434,6 +519,25 @@ pub fn find_in_state(state: &mut M1State, params: &FindParams) -> Result<FindRes
         current_input(state, FIND_SNAPSHOT_DEPTH)?
     };
     populate_detection_from_state(state, &mut input);
+    Ok(input)
+}
+
+/// Maximum CDP web nodes a `find` query folds in. Exposed so the async handler
+/// can size its enrichment to match `find`'s deep snapshot.
+#[must_use]
+pub const fn find_cdp_max_nodes() -> usize {
+    FIND_CDP_MAX_NODES
+}
+
+/// `find`'s snapshot depth (deep, so nested controls are reachable).
+#[must_use]
+pub const fn find_snapshot_depth() -> u32 {
+    FIND_SNAPSHOT_DEPTH
+}
+
+/// Matches a prepared input against the `find` query.
+#[must_use]
+pub fn match_find_input(input: &ObservationInput, params: &FindParams) -> FindResponse {
     let limit = params.limit.unwrap_or(5).clamp(1, 20);
     let mut results = Vec::new();
     if matches!(
@@ -460,7 +564,7 @@ pub fn find_in_state(state: &mut M1State, params: &FindParams) -> Result<FindRes
     }
     results.sort_by(|left, right| right.score.total_cmp(&left.score));
     results.truncate(limit);
-    Ok(FindResponse { results })
+    FindResponse { results }
 }
 
 pub fn set_capture_target_in_state(

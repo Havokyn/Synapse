@@ -15,12 +15,16 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 chromiumoxide.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
 uiautomation.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+futures-util.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "uia_snapshot_depth2_60elem"

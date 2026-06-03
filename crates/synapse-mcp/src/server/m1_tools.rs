@@ -1,8 +1,8 @@
 use super::{
     ErrorData, FindParams, FindResponse, Health, Json, ObserveParams, Parameters, ReadTextParams,
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
-    SetPerceptionModeResponse, SynapseService, current_input, empty_input_schema, find_in_state,
-    mcp_error, observe_include, populate_audio_summary, populate_clipboard_summary,
+    SetPerceptionModeResponse, SynapseService, current_input, empty_input_schema, mcp_error,
+    observe_include, populate_audio_summary, populate_clipboard_summary,
     populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
     resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state, tool,
     tool_router,
@@ -62,15 +62,27 @@ impl SynapseService {
             "tool.invocation kind=observe"
         );
         let include = observe_include(&params.0);
-        let state = self.m1_state()?;
-        let mut input = current_input(&state, params.0.depth.unwrap_or(2).min(6))?;
-        if include.fs && input.fs_recent.is_empty() {
-            populate_fs_recent(&mut input, &state.fs_recent_tracker);
-        }
+        // Scope the (non-Send) state guard so it is released before any await.
+        let mut input = {
+            let state = self.m1_state()?;
+            let mut input = current_input(&state, params.0.depth.unwrap_or(2).min(6))?;
+            if include.fs && input.fs_recent.is_empty() {
+                populate_fs_recent(&mut input, &state.fs_recent_tracker);
+            }
+            input
+        };
         if let Some(since) = params.0.since_event_seq {
             input.recent_events.retain(|event| event.seq > since);
         }
-        drop(state);
+
+        if include.elements {
+            super::enrich_input_with_cdp(
+                &mut input,
+                include.max_subtree_depth,
+                include.max_subtree_nodes,
+            )
+            .await;
+        }
 
         if include.audio && input.audio == synapse_core::AudioContext::default() {
             populate_audio_summary(&self.m3_state, &mut input);
@@ -107,8 +119,17 @@ impl SynapseService {
             kind = "find",
             "tool.invocation kind=find"
         );
-        let mut state = self.m1_state()?;
-        find_in_state(&mut state, &params.0).map(Json)
+        let mut input = {
+            let mut state = self.m1_state()?;
+            super::build_find_input(&mut state, &params.0)?
+        };
+        super::enrich_input_with_cdp(
+            &mut input,
+            super::find_snapshot_depth(),
+            super::find_cdp_max_nodes(),
+        )
+        .await;
+        Ok(Json(super::match_find_input(&input, &params.0)))
     }
 
     #[tool(description = "OCR text from a screen region or visible element")]

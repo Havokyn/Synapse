@@ -13,6 +13,10 @@ pub enum A11yError {
     ElementStale { detail: String },
     #[error("Chromium DevTools Protocol is unreachable: {detail}")]
     CdpUnreachable { detail: String },
+    #[error("Chromium DevTools Protocol attach failed: {detail}")]
+    CdpAttachFailed { detail: String },
+    #[error("Chromium accessibility tree retrieval failed: {detail}")]
+    CdpAxtreeFailed { detail: String },
     #[error("invalid element id: {detail}")]
     InvalidElementId { detail: String },
     #[error("accessibility backend failed: {detail}")]
@@ -27,6 +31,8 @@ impl A11yError {
             Self::NoForeground { .. } => error_codes::A11Y_NO_FOREGROUND,
             Self::ElementStale { .. } => error_codes::A11Y_ELEMENT_STALE,
             Self::CdpUnreachable { .. } => error_codes::A11Y_CDP_UNREACHABLE,
+            Self::CdpAttachFailed { .. } => error_codes::A11Y_CDP_ATTACH_FAILED,
+            Self::CdpAxtreeFailed { .. } => error_codes::A11Y_CDP_AXTREE_FAILED,
             Self::InvalidElementId { .. } | Self::Internal { .. } => error_codes::OBSERVE_INTERNAL,
         }
     }

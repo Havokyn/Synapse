@@ -25,6 +25,14 @@ pub async fn act_click_with_handle(
     validate_click_params(&params)?;
     let started = Instant::now();
     let double_click_timing = cached_double_click_timing();
+    // #686: a web element id (cdcd sentinel) routes through CDP instead of UIA.
+    #[cfg(windows)]
+    if let ActClickTarget::Element(element) = &params.target {
+        if let Some(backend) = synapse_a11y::cdp_backend_from_element_id(&element.element_id) {
+            return execute_cdp_click(&params, element, backend, double_click_timing, started)
+                .await;
+        }
+    }
     if let ActClickTarget::Element(element) = &params.target {
         return element::execute_element_click(
             handle,
@@ -69,6 +77,85 @@ pub async fn act_click_with_handle(
         inter_click_delay_ms: double_click_timing.inter_click_delay_ms,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
     })
+}
+
+/// Routes a click on a CDP web element id through CDP (#686): resolve the
+/// browser's debug endpoint from the element's window, scroll the node into
+/// view, and dispatch the click in viewport coordinates. Fail-loud if the
+/// endpoint is gone or the node cannot be resolved.
+#[cfg(windows)]
+async fn execute_cdp_click(
+    params: &ActClickParams,
+    element: &schema::ActClickElementTarget,
+    backend_node_id: i64,
+    double_click_timing: synapse_action::DoubleClickTiming,
+    started: Instant,
+) -> Result<ActClickResponse, ErrorData> {
+    use synapse_core::MouseButton;
+
+    let hwnd = element
+        .element_id
+        .parts()
+        .map_err(|err| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("web element id is malformed: {err}"),
+            )
+        })?
+        .hwnd;
+    let endpoint = synapse_a11y::endpoint_for_window(hwnd).ok_or_else(|| {
+        mcp_error(
+            error_codes::A11Y_CDP_UNREACHABLE,
+            format!(
+                "no reachable CDP endpoint for web element {} (browser closed or debug port gone)",
+                element.element_id
+            ),
+        )
+    })?;
+    // Foreground window title disambiguates which tab owns the per-document node.
+    let title_hint = synapse_a11y::foreground_context(hwnd)
+        .map(|context| context.window_title)
+        .unwrap_or_default();
+    let button = match params.button {
+        MouseButton::Left => synapse_a11y::CdpMouseButton::Left,
+        MouseButton::Right => synapse_a11y::CdpMouseButton::Right,
+        MouseButton::Middle => synapse_a11y::CdpMouseButton::Middle,
+        other => {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("act_click button {other:?} is not supported for web (CDP) elements"),
+            ));
+        }
+    };
+
+    synapse_a11y::cdp_click_node(
+        &endpoint,
+        &title_hint,
+        backend_node_id,
+        button,
+        i64::from(params.clicks),
+    )
+    .await
+    .map_err(|err| action_error_to_mcp(&a11y_to_action_error(&err)))?;
+
+    Ok(ActClickResponse {
+        ok: true,
+        used_invoke_pattern: false,
+        backend_used: "cdp".to_owned(),
+        press_hold_ms: params.hold_ms,
+        double_click_window_ms: double_click_timing.window_ms,
+        inter_click_delay_ms: double_click_timing.inter_click_delay_ms,
+        elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+    })
+}
+
+/// Maps an a11y CDP error to an action error so it surfaces with the same shape
+/// as other action failures.
+#[cfg(windows)]
+fn a11y_to_action_error(err: &synapse_a11y::A11yError) -> ActionError {
+    ActionError::TargetInvalid {
+        detail: format!("{} ({})", err, err.code()),
+    }
 }
 
 fn validate_click_params(params: &ActClickParams) -> Result<(), ErrorData> {

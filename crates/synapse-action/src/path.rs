@@ -483,6 +483,10 @@ fn catmull_rom_segment(
     Ok(cubic_hermite(p1, m1, p2, m2, local_t))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Catmull-Rom tangent is defined by three points and their four knot times plus span/tension; grouping them adds indirection without clarity"
+)]
 fn catmull_start_tangent(
     p0: PathPoint,
     p1: PathPoint,
@@ -502,6 +506,10 @@ fn catmull_start_tangent(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Catmull-Rom tangent is defined by three points and their four knot times plus span/tension; grouping them adds indirection without clarity"
+)]
 fn catmull_end_tangent(
     p1: PathPoint,
     p2: PathPoint,

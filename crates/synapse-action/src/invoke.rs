@@ -140,6 +140,8 @@ fn a11y_error_to_action(error: synapse_a11y::A11yError) -> crate::ActionError {
             crate::ActionError::BackendUnavailable { detail }
         }
         synapse_a11y::A11yError::CdpUnreachable { .. }
+        | synapse_a11y::A11yError::CdpAttachFailed { .. }
+        | synapse_a11y::A11yError::CdpAxtreeFailed { .. }
         | synapse_a11y::A11yError::Internal { .. } => resolver::target_invalid(error),
     }
 }

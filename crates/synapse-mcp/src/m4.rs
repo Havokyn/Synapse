@@ -347,6 +347,15 @@ pub struct ActLaunchParams {
     #[schemars(default = "default_launch_timeout_ms", range(min = 1, max = 600_000))]
     pub timeout_ms: u32,
     pub idempotency_key: Option<String>,
+    /// Controls CDP debug-port injection for Chromium-family targets (#684).
+    /// `None` (default) = auto: inject `--remote-debugging-port=0` + a dedicated
+    /// `--user-data-dir` so `observe`/`find` can read the browser's DOM without
+    /// manual flags. `Some(false)` = opt out (launch the browser untouched).
+    /// `Some(true)` = force injection even if heuristics would skip it.
+    /// Ignored for non-Chromium targets.
+    #[serde(default)]
+    #[schemars(default)]
+    pub cdp_debug: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -357,6 +366,18 @@ pub struct ActLaunchResponse {
     pub matched_title: Option<String>,
     pub launched_at: String,
     pub reason: Option<String>,
+    /// CDP debug port opened for a Synapse-launched Chromium browser (#684), if
+    /// injection ran. `observe`/`find` use it to attach and read the DOM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_debug_port: Option<u16>,
+    /// CDP HTTP endpoint (`http://127.0.0.1:<port>`) when a debug port opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_endpoint: Option<String>,
+    /// Dedicated automation `--user-data-dir` the browser was launched with.
+    /// NOT the user's primary profile — logins there do not carry over (Chrome
+    /// 136+ refuses remote debugging on the default profile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_user_data_dir: Option<String>,
 }
 
 pub fn launch_request_details(params: &ActLaunchParams) -> serde_json::Value {
@@ -768,7 +789,20 @@ pub async fn launch(
     } else {
         HashSet::new()
     };
-    let pid = spawn_launch_child(&params)?;
+    // #684: make a CDP debug port reachable for Synapse-launched Chromium so
+    // observe/find can read the page DOM without manual flags. Augment the spawn
+    // command only (policy already matched the original command above).
+    let cdp_launch = chromium_cdp_launch(&params);
+    let spawn_params = match &cdp_launch {
+        Some(launch) => params_with_cdp_args(&params, launch),
+        None => params.clone(),
+    };
+    let pid = spawn_launch_child(&spawn_params)?;
+    let cdp = if let Some(launch) = &cdp_launch {
+        resolve_launched_cdp_port(pid, launch).await
+    } else {
+        LaunchedCdp::default()
+    };
     let launch_target_name = launch_target_file_name(&params.target);
 
     let window = if let Some(regex) = wait_regex {
@@ -795,6 +829,7 @@ pub async fn launch(
         reason = ?window.reason,
         wait_requested = params.wait_for_window_title_regex.is_some(),
         idempotency_present = params.idempotency_key.is_some(),
+        cdp_debug_port = ?cdp.port,
         "readback=act_launch after=process_spawn"
     );
     Ok(ActLaunchResponse {
@@ -803,7 +838,146 @@ pub async fn launch(
         matched_title: window.matched_title,
         launched_at,
         reason: window.reason,
+        cdp_debug_port: cdp.port,
+        cdp_endpoint: cdp.endpoint,
+        cdp_user_data_dir: cdp.user_data_dir,
     })
+}
+
+/// Planned CDP-debug augmentation for a Chromium-family launch (#684).
+#[derive(Clone, Debug)]
+struct ChromiumCdpLaunch {
+    /// Dedicated automation profile dir (must be non-default for Chrome 136+).
+    user_data_dir: std::path::PathBuf,
+    /// Args injected ahead of the caller's args.
+    injected_args: Vec<String>,
+}
+
+/// Outcome of opening + discovering a launched browser's CDP port.
+#[derive(Clone, Debug, Default)]
+struct LaunchedCdp {
+    port: Option<u16>,
+    endpoint: Option<String>,
+    user_data_dir: Option<String>,
+}
+
+/// Decides whether to inject CDP debug flags for this launch. Returns `None` for
+/// non-Chromium targets, when the caller opted out (`cdp_debug = Some(false)`),
+/// or when the caller already specified a debug port / user-data-dir (respect
+/// their intent). Otherwise plans an ephemeral port + dedicated profile.
+fn chromium_cdp_launch(params: &ActLaunchParams) -> Option<ChromiumCdpLaunch> {
+    if params.cdp_debug == Some(false) {
+        return None;
+    }
+    let is_chromium = synapse_a11y::is_chromium_family(&launch_target_file_name(&params.target));
+    if !is_chromium && params.cdp_debug != Some(true) {
+        return None;
+    }
+    let already_configured = params.args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        lower.starts_with("--remote-debugging-port") || lower.starts_with("--user-data-dir")
+    });
+    if already_configured {
+        tracing::info!(
+            code = "M4_ACT_LAUNCH_CDP_SKIPPED",
+            reason = "caller_supplied_debug_or_profile_flags",
+            "act_launch leaving caller-specified CDP/profile flags untouched"
+        );
+        return None;
+    }
+    let user_data_dir = cdp_automation_profile_dir();
+    let injected_args = vec![
+        "--remote-debugging-port=0".to_owned(),
+        format!("--user-data-dir={}", user_data_dir.display()),
+        "--no-first-run".to_owned(),
+        "--no-default-browser-check".to_owned(),
+    ];
+    Some(ChromiumCdpLaunch {
+        user_data_dir,
+        injected_args,
+    })
+}
+
+/// A fresh ActLaunchParams whose args are `injected_args` followed by the
+/// caller's args (so a positional URL still parses).
+fn params_with_cdp_args(params: &ActLaunchParams, launch: &ChromiumCdpLaunch) -> ActLaunchParams {
+    let mut spawn_params = params.clone();
+    let mut args = launch.injected_args.clone();
+    args.extend(params.args.iter().cloned());
+    spawn_params.args = args;
+    spawn_params
+}
+
+/// Dedicated, non-default automation profile dir. Honors
+/// `SYNAPSE_CDP_USER_DATA_DIR` for a stable (login-persisting) profile; otherwise
+/// a unique per-launch dir under the OS temp so concurrent browsers never share
+/// a profile (Chrome refuses a second debug port on the same profile).
+fn cdp_automation_profile_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("SYNAPSE_CDP_USER_DATA_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return dir;
+        }
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let token = format!("{}-{seq}-{nanos:x}", std::process::id());
+    std::env::temp_dir()
+        .join("synapse-cdp-profiles")
+        .join(token)
+}
+
+/// Polls the launched browser's `DevToolsActivePort` file (Chrome writes the
+/// chosen ephemeral port there) and registers it so observe/find can attach.
+/// Fail-loud: logs an error if the port never appears, but does not orphan the
+/// already-spawned browser.
+async fn resolve_launched_cdp_port(pid: u32, launch: &ChromiumCdpLaunch) -> LaunchedCdp {
+    let port_file = launch.user_data_dir.join("DevToolsActivePort");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let user_data_dir = Some(launch.user_data_dir.display().to_string());
+    loop {
+        if let Some(port) = read_devtools_active_port(&port_file) {
+            synapse_a11y::register_launched_port(pid, port);
+            tracing::info!(
+                code = "M4_ACT_LAUNCH_CDP_PORT_OPENED",
+                pid,
+                port,
+                user_data_dir = ?launch.user_data_dir,
+                "act_launch opened a CDP debug port for the launched browser"
+            );
+            return LaunchedCdp {
+                port: Some(port),
+                endpoint: Some(format!("http://127.0.0.1:{port}")),
+                user_data_dir,
+            };
+        }
+        if Instant::now() >= deadline {
+            tracing::error!(
+                code = error_codes::A11Y_CDP_ATTACH_FAILED,
+                pid,
+                user_data_dir = ?launch.user_data_dir,
+                "act_launch injected CDP flags but DevToolsActivePort never appeared; \
+                 the browser launched but its DOM will not be observable via CDP"
+            );
+            return LaunchedCdp {
+                port: None,
+                endpoint: None,
+                user_data_dir,
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// Reads the first line of a `DevToolsActivePort` file as a port number.
+fn read_devtools_active_port(path: &Path) -> Option<u16> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().next()?.trim().parse::<u16>().ok()
 }
 
 fn validate_combo_params(params: &ActComboParams) -> Result<(), ErrorData> {
@@ -2068,7 +2242,89 @@ mod tests {
             wait_for_window_title_regex: None,
             timeout_ms,
             idempotency_key: None,
+            cdp_debug: None,
         }
+    }
+
+    #[test]
+    fn chromium_cdp_launch_injects_ephemeral_port_and_dedicated_profile() {
+        let params = launch_params("chrome.exe", vec!["https://example.com"], 10_000);
+        let launch = chromium_cdp_launch(&params).expect("chrome.exe should get CDP injection");
+        println!(
+            "readback=cdp_launch edge=chrome before=args:{:?} after=injected:{:?} udd:{:?}",
+            params.args, launch.injected_args, launch.user_data_dir
+        );
+        assert!(
+            launch
+                .injected_args
+                .iter()
+                .any(|arg| arg == "--remote-debugging-port=0")
+        );
+        assert!(
+            launch
+                .injected_args
+                .iter()
+                .any(|arg| arg.starts_with("--user-data-dir="))
+        );
+        // The dedicated profile must be non-default (Chrome 136+ requirement).
+        assert!(
+            launch
+                .user_data_dir
+                .to_string_lossy()
+                .contains("synapse-cdp-profiles")
+        );
+
+        let spawn_params = params_with_cdp_args(&params, &launch);
+        // Injected flags precede the caller's URL so the positional arg parses.
+        assert_eq!(
+            spawn_params.args.first().map(String::as_str),
+            Some("--remote-debugging-port=0")
+        );
+        assert_eq!(
+            spawn_params.args.last().map(String::as_str),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn chromium_cdp_launch_respects_opt_out_and_non_chromium() {
+        let mut opted_out = launch_params("chrome.exe", vec![], 10_000);
+        opted_out.cdp_debug = Some(false);
+        println!("readback=cdp_launch edge=opt_out before=cdp_debug:Some(false)");
+        assert!(chromium_cdp_launch(&opted_out).is_none());
+
+        let notepad = launch_params("notepad.exe", vec![], 10_000);
+        println!("readback=cdp_launch edge=non_chromium before=target:notepad.exe");
+        assert!(chromium_cdp_launch(&notepad).is_none());
+    }
+
+    #[test]
+    fn chromium_cdp_launch_defers_to_caller_supplied_flags() {
+        let with_port = launch_params("msedge.exe", vec!["--remote-debugging-port=9222"], 10_000);
+        println!(
+            "readback=cdp_launch edge=caller_port before=args:{:?}",
+            with_port.args
+        );
+        assert!(chromium_cdp_launch(&with_port).is_none());
+
+        let with_profile = launch_params("chrome.exe", vec!["--user-data-dir=C:\\my"], 10_000);
+        assert!(chromium_cdp_launch(&with_profile).is_none());
+    }
+
+    #[test]
+    fn read_devtools_active_port_parses_first_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "synapse-cdp-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let port_file = dir.join("DevToolsActivePort");
+        std::fs::write(&port_file, "51234\n/devtools/browser/abc-123\n").expect("write port file");
+        let port = read_devtools_active_port(&port_file);
+        println!("readback=devtools_active_port before=file:{port_file:?} after=port:{port:?}");
+        assert_eq!(port, Some(51234));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn combo_press_step(at_ms: u32, key: &str) -> ActComboStep {
@@ -2661,6 +2917,9 @@ mod tests {
             matched_title: Some("launch.txt - Notepad".to_owned()),
             launched_at: "2026-05-31T20:00:00Z".to_owned(),
             reason: None,
+            cdp_debug_port: None,
+            cdp_endpoint: None,
+            cdp_user_data_dir: None,
         };
 
         let row = launch_process_history_row(&params, &response)

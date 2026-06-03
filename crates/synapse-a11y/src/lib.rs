@@ -1,6 +1,8 @@
 #![allow(unsafe_code)]
 
 mod cdp;
+mod cdp_action;
+mod cdp_dom;
 mod error;
 mod events;
 mod ids;
@@ -11,6 +13,9 @@ mod ui_element;
 mod window;
 
 pub use cdp::*;
+#[cfg(windows)]
+pub use cdp_action::*;
+pub use cdp_dom::*;
 pub use error::*;
 pub use events::*;
 pub use ids::*;

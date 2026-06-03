@@ -23,8 +23,9 @@ use crate::{
     m1::{
         FindParams, FindResponse, M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams,
         SetCaptureTargetResponse, SetPerceptionModeParams, SetPerceptionModeResponse,
-        SharedM1State, apply_profile_runtime_config_in_state, current_input, empty_input_schema,
-        find_in_state, mcp_error, observe_include, populate_clipboard_summary,
+        SharedM1State, apply_profile_runtime_config_in_state, build_find_input, current_input,
+        empty_input_schema, enrich_input_with_cdp, find_cdp_max_nodes, find_snapshot_depth,
+        match_find_input, mcp_error, observe_include, populate_clipboard_summary,
         populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
         resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
     },

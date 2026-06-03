@@ -17,6 +17,12 @@ const TEXT_INTEGRITY_DISPATCH_ONLY: &str = "dispatch_only_requires_target_readba
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN: &str = "uia_value_pattern_readback";
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY: &str =
     "uia_value_pattern_dispatch_only_requires_target_readback";
+/// Text was inserted into a web input via CDP `Input.insertText` after focusing
+/// the DOM node. Verify via `observe`/`find` (the node's `value`) — this path
+/// dispatches into the renderer, so a follow-up readback is required (#686).
+#[cfg(windows)]
+const TEXT_INTEGRITY_CDP_INSERT_TEXT: &str =
+    "cdp_insert_text_dispatch_only_requires_target_readback";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +74,58 @@ pub struct ActTypeResponse {
     pub minimum_linear_ms_per_char: u32,
 }
 
+/// Routes `act_type into_element=<web element id>` through CDP (#686): resolve
+/// the browser endpoint from the element's window, focus the DOM node, and
+/// insert the text. Fail-loud if the endpoint/node is gone.
+#[cfg(windows)]
+async fn cdp_type_into_element(
+    element_id: &ElementId,
+    backend_node_id: i64,
+    emitted: &str,
+    chars_typed: u32,
+    started: Instant,
+) -> Result<ActTypeResponse, ErrorData> {
+    use synapse_core::error_codes;
+
+    let hwnd = element_id
+        .parts()
+        .map_err(|err| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("web element id is malformed: {err}"),
+            )
+        })?
+        .hwnd;
+    let endpoint = synapse_a11y::endpoint_for_window(hwnd).ok_or_else(|| {
+        mcp_error(
+            error_codes::A11Y_CDP_UNREACHABLE,
+            format!(
+                "no reachable CDP endpoint for web element {element_id} (browser closed or debug port gone)"
+            ),
+        )
+    })?;
+    let title_hint = synapse_a11y::foreground_context(hwnd)
+        .map(|context| context.window_title)
+        .unwrap_or_default();
+    synapse_a11y::cdp_type_node(&endpoint, &title_hint, backend_node_id, emitted)
+        .await
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+    tracing::info!(
+        code = "M2_ACT_TYPE_CDP_INSERT_TEXT",
+        element_id = %element_id,
+        chars_typed,
+        "readback=act_type_into_element method=cdp_insert_text chars_typed={chars_typed}"
+    );
+    Ok(ActTypeResponse {
+        ok: true,
+        chars_typed,
+        elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        target_text_integrity: TEXT_INTEGRITY_CDP_INSERT_TEXT.to_owned(),
+        target_readback_required: true,
+        minimum_linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
+    })
+}
+
 pub async fn act_type_with_handle(
     handle: ActionHandle,
     recording: Option<Arc<RecordingBackend>>,
@@ -79,6 +137,12 @@ pub async fn act_type_with_handle(
     let chars_typed = char_count(&emitted)?;
 
     if let Some(element_id) = &params.into_element {
+        // #686: a web element id (cdcd sentinel) routes through CDP focus+insert.
+        #[cfg(windows)]
+        if let Some(backend) = synapse_a11y::cdp_backend_from_element_id(element_id) {
+            return cdp_type_into_element(element_id, backend, &emitted, chars_typed, started)
+                .await;
+        }
         let readback =
             synapse_a11y::set_element_value(element_id, &emitted).map_err(a11y_error_to_mcp)?;
         let readback_matches = readback.after_value == emitted;
