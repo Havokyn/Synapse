@@ -1,7 +1,7 @@
 use synapse_core::{Point, Rect};
 
 use crate::{
-    CaptureConfig, CaptureError, CapturedBgraBitmap, CaptureThreadPriority, DpiAwarenessStatus,
+    CaptureConfig, CaptureError, CaptureThreadPriority, CapturedBgraBitmap, DpiAwarenessStatus,
     controller::CaptureThreadContext,
 };
 

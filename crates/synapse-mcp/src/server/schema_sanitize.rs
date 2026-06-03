@@ -352,7 +352,11 @@ mod tests {
         let mut offenders = Vec::new();
         for tool in &tools {
             let input = Value::Object((*tool.input_schema).clone());
-            nonstandard_format_paths(&input, &format!("{}.inputSchema", tool.name), &mut offenders);
+            nonstandard_format_paths(
+                &input,
+                &format!("{}.inputSchema", tool.name),
+                &mut offenders,
+            );
             if let Some(output) = &tool.output_schema {
                 let output = Value::Object((**output).clone());
                 nonstandard_format_paths(
