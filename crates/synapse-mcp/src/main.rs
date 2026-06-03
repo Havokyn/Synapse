@@ -16,6 +16,7 @@
     )
 )]
 mod connect;
+mod doctor;
 mod http;
 mod m1;
 mod m2;
@@ -54,6 +55,8 @@ enum Mode {
     Http,
     /// Thin stdio<->HTTP bridge to the shared daemon (for stdio-only clients).
     Connect,
+    /// Enumerate/classify synapse-mcp processes; with --kill-stray, clean them.
+    Doctor,
 }
 
 #[derive(Debug, Parser)]
@@ -77,6 +80,10 @@ struct Cli {
     log_level: String,
     #[arg(long, env = "SYNAPSE_REFLEX_DISABLED")]
     reflex_disabled: bool,
+    /// In `--mode doctor`, kill matching stray synapse-mcp processes once a
+    /// live lock-holder daemon is identified for the selected DB path.
+    #[arg(long)]
+    kill_stray: bool,
     #[arg(long, env = "SYNAPSE_ENABLE_AUDIO")]
     enable_audio: bool,
     /// Restrict action dispatch to reviewed profiles. Off by default: Synapse
@@ -175,6 +182,11 @@ async fn run() -> anyhow::Result<ExitCode> {
         drop(telemetry_guard);
         return result;
     }
+    if matches!(cli.mode, Mode::Doctor) {
+        let code = doctor::run_doctor(cli.kill_stray, cli.db.as_deref());
+        drop(telemetry_guard);
+        return Ok(code);
+    }
 
     let dpi_awareness = synapse_capture::init_process_dpi_awareness()
         .context("initialize per-monitor DPI awareness")?;
@@ -236,7 +248,9 @@ async fn run() -> anyhow::Result<ExitCode> {
             drop(telemetry_guard);
             Ok(code)
         }
-        Mode::Connect => unreachable!("connect mode is handled before daemon setup"),
+        Mode::Connect | Mode::Doctor => {
+            unreachable!("connect and doctor modes are handled before daemon setup")
+        }
     }
 }
 
