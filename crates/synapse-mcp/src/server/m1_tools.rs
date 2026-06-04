@@ -82,6 +82,7 @@ impl SynapseService {
                 include.max_subtree_nodes,
             )
             .await;
+            super::enrich_input_with_browser_ocr(&mut input, include.max_subtree_nodes);
         }
 
         if include.audio && input.audio == synapse_core::AudioContext::default() {
@@ -129,6 +130,7 @@ impl SynapseService {
             super::find_cdp_max_nodes(),
         )
         .await;
+        super::enrich_input_with_browser_ocr(&mut input, super::find_cdp_max_nodes());
         Ok(Json(super::match_find_input(&input, &params.0)))
     }
 

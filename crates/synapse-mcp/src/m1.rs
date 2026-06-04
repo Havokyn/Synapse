@@ -474,6 +474,199 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
     }
 }
 
+const BROWSER_OCR_CHROME_TOP_PX: i32 = 96;
+const BROWSER_OCR_TILE_HEIGHT_PX: i32 = 600;
+const BROWSER_OCR_MAX_TILES: usize = 8;
+const OCR_RUNTIME_PREFIX: &str = "0c0c";
+
+/// Recovers browser page text through screen OCR when CDP did not yield a DOM
+/// tree. This is the degraded leg of the #687 ladder: it creates queryable text
+/// nodes and upgrades `web_path` to `ocr` only when OCR actually returned text.
+#[cfg(windows)]
+pub fn enrich_input_with_browser_ocr(input: &mut ObservationInput, max_nodes: usize) {
+    use synapse_core::{SensorStatus, WebPerceptionPath};
+
+    if max_nodes == 0 || !should_attempt_browser_ocr(input) {
+        return;
+    }
+    if !matches!(
+        input.capture_status,
+        SensorStatus::Healthy | SensorStatus::DegradedLatency { .. }
+    ) {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_SKIPPED_CAPTURE_UNAVAILABLE",
+            hwnd = input.foreground.hwnd,
+            capture_status = ?input.capture_status,
+            "browser OCR fallback skipped because screen capture is not available"
+        );
+        return;
+    }
+    let Some(content_region) = browser_content_region(input.foreground.window_bounds) else {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_SKIPPED_EMPTY_REGION",
+            hwnd = input.foreground.hwnd,
+            window_bounds = ?input.foreground.window_bounds,
+            "browser OCR fallback skipped because the browser content region is empty"
+        );
+        return;
+    };
+
+    let started = std::time::Instant::now();
+    let mut words = Vec::new();
+    let mut attempted_tiles = 0usize;
+    let mut failed_tiles = 0usize;
+    for tile in browser_ocr_tiles(content_region) {
+        attempted_tiles += 1;
+        match synapse_perception::read_text(tile) {
+            Ok(mut tile_words) => words.append(&mut tile_words),
+            Err(error) => {
+                failed_tiles = failed_tiles.saturating_add(1);
+                tracing::debug!(
+                    code = error.code(),
+                    hwnd = input.foreground.hwnd,
+                    tile = ?tile,
+                    error = %error,
+                    "browser OCR tile produced no text"
+                );
+            }
+        }
+        if words.len() >= max_nodes {
+            break;
+        }
+    }
+    input
+        .sensor_latency_ms
+        .insert("ocr".to_owned(), started.elapsed().as_secs_f32() * 1000.0);
+
+    let added = apply_browser_ocr_words(input, words, max_nodes);
+    if added == 0 {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_NO_TEXT",
+            hwnd = input.foreground.hwnd,
+            content_region = ?content_region,
+            attempted_tiles,
+            failed_tiles,
+            "browser OCR fallback found no readable page text; web_path remains uia_only"
+        );
+        return;
+    }
+    tracing::info!(
+        code = "A11Y_BROWSER_OCR_ATTACHED",
+        hwnd = input.foreground.hwnd,
+        content_region = ?content_region,
+        attempted_tiles,
+        failed_tiles,
+        node_count = added,
+        web_path = %WebPerceptionPath::Ocr.as_str(),
+        "browser OCR fallback added queryable text nodes"
+    );
+}
+
+#[cfg(not(windows))]
+pub fn enrich_input_with_browser_ocr(_input: &mut ObservationInput, _max_nodes: usize) {}
+
+fn should_attempt_browser_ocr(input: &ObservationInput) -> bool {
+    use synapse_core::{CdpStatus, WebPerceptionPath};
+
+    if input.web_path != Some(WebPerceptionPath::UiaOnly) {
+        return false;
+    }
+    input.cdp.as_ref().is_some_and(|diagnostics| {
+        matches!(
+            diagnostics.status,
+            CdpStatus::Unreachable | CdpStatus::AttachFailed
+        )
+    })
+}
+
+fn apply_browser_ocr_words(
+    input: &mut ObservationInput,
+    words: Vec<synapse_perception::TextRegion>,
+    max_nodes: usize,
+) -> usize {
+    let nodes = browser_ocr_nodes(input.foreground.hwnd, words, max_nodes);
+    if nodes.is_empty() {
+        return 0;
+    }
+    let added = nodes.len();
+    input.elements.extend(nodes);
+    input.web_path = Some(synapse_core::WebPerceptionPath::Ocr);
+    added
+}
+
+fn browser_ocr_nodes(
+    hwnd: i64,
+    words: Vec<synapse_perception::TextRegion>,
+    max_nodes: usize,
+) -> Vec<AccessibleNode> {
+    words
+        .into_iter()
+        .filter(|word| !word.text.trim().is_empty() && word.bbox.w > 0 && word.bbox.h > 0)
+        .take(max_nodes)
+        .enumerate()
+        .map(|(index, word)| {
+            let trimmed = word.text.trim().to_owned();
+            AccessibleNode {
+                element_id: browser_ocr_element_id(hwnd, index),
+                parent: None,
+                name: trimmed,
+                role: "text".to_owned(),
+                automation_id: Some(format!("ocr:word:{index}")),
+                value: None,
+                bbox: word.bbox,
+                enabled: true,
+                focused: false,
+                patterns: Vec::new(),
+                children_count: 0,
+                depth: 1,
+            }
+        })
+        .collect()
+}
+
+fn browser_ocr_element_id(hwnd: i64, index: usize) -> ElementId {
+    synapse_core::element_id(hwnd, &format!("{OCR_RUNTIME_PREFIX}{index:012x}"))
+}
+
+fn browser_content_region(window_bounds: Rect) -> Option<Rect> {
+    if window_bounds.w <= 0 || window_bounds.h <= 0 {
+        return None;
+    }
+    let top_inset = if window_bounds.h > 240 {
+        BROWSER_OCR_CHROME_TOP_PX.min(window_bounds.h / 3)
+    } else {
+        0
+    };
+    let height = window_bounds.h.saturating_sub(top_inset);
+    (height > 0).then_some(Rect {
+        x: window_bounds.x,
+        y: window_bounds.y.saturating_add(top_inset),
+        w: window_bounds.w,
+        h: height,
+    })
+}
+
+fn browser_ocr_tiles(content_region: Rect) -> Vec<Rect> {
+    if content_region.w <= 0 || content_region.h <= 0 {
+        return Vec::new();
+    }
+    let mut tiles = Vec::new();
+    let tile_height = content_region.h.min(BROWSER_OCR_TILE_HEIGHT_PX).max(1);
+    let bottom = content_region.y.saturating_add(content_region.h);
+    let mut y = content_region.y;
+    while y < bottom && tiles.len() < BROWSER_OCR_MAX_TILES {
+        let height = bottom.saturating_sub(y).min(tile_height).max(1);
+        tiles.push(Rect {
+            x: content_region.x,
+            y,
+            w: content_region.w,
+            h: height,
+        });
+        y = y.saturating_add(height);
+    }
+    tiles
+}
+
 #[cfg(not(windows))]
 #[allow(clippy::unused_async)]
 pub async fn enrich_input_with_cdp(
@@ -867,8 +1060,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use synapse_core::{
-        Backend, ProfileBackends, ProfileDetection, ProfileMatch, ProfileOcr, ProfileUseScope,
+        Backend, CdpDiagnostics, CdpStatus, ProfileBackends, ProfileDetection, ProfileMatch,
+        ProfileOcr, ProfileUseScope, SensorStatus, WebPerceptionPath,
     };
+    use synapse_perception::TextRegion;
 
     #[test]
     fn capture_interval_floor_applies_to_manual_and_profile_metadata() {
@@ -1122,6 +1317,189 @@ mod tests {
                 Some(&json!(error_codes::OCR_NO_TEXT))
             );
         }
+    }
+
+    #[test]
+    fn browser_ocr_words_upgrade_uia_only_to_queryable_ocr_nodes() {
+        let mut input = chromium_ocr_input();
+        let before_path = input.web_path;
+        let before_len = input.elements.len();
+
+        let added = apply_browser_ocr_words(
+            &mut input,
+            vec![
+                TextRegion {
+                    text: " Checkout ".to_owned(),
+                    bbox: Rect {
+                        x: 120,
+                        y: 180,
+                        w: 92,
+                        h: 24,
+                    },
+                    confidence: 0.95,
+                },
+                TextRegion {
+                    text: "now".to_owned(),
+                    bbox: Rect {
+                        x: 218,
+                        y: 180,
+                        w: 44,
+                        h: 24,
+                    },
+                    confidence: 0.93,
+                },
+            ],
+            8,
+        );
+
+        println!(
+            "readback=browser_ocr edge=happy before_path:{before_path:?} before_elements:{before_len} after_path:{:?} after_elements:{} added:{added}",
+            input.web_path,
+            input.elements.len()
+        );
+        assert_eq!(added, 2);
+        assert_eq!(input.web_path, Some(WebPerceptionPath::Ocr));
+        assert_eq!(input.elements[0].name, "Checkout");
+        assert_eq!(input.elements[0].role, "text");
+        assert_eq!(
+            input.elements[0].automation_id.as_deref(),
+            Some("ocr:word:0")
+        );
+        assert!(
+            input.elements[0]
+                .element_id
+                .parts()
+                .expect("OCR element id parses")
+                .runtime_id_hex
+                .starts_with(OCR_RUNTIME_PREFIX)
+        );
+    }
+
+    #[test]
+    fn browser_ocr_words_keep_uia_only_when_ocr_has_no_usable_text() {
+        let mut input = chromium_ocr_input();
+
+        let added = apply_browser_ocr_words(
+            &mut input,
+            vec![
+                TextRegion {
+                    text: "   ".to_owned(),
+                    bbox: Rect {
+                        x: 1,
+                        y: 2,
+                        w: 30,
+                        h: 12,
+                    },
+                    confidence: 0.5,
+                },
+                TextRegion {
+                    text: "Hidden".to_owned(),
+                    bbox: Rect {
+                        x: 1,
+                        y: 2,
+                        w: 0,
+                        h: 12,
+                    },
+                    confidence: 0.5,
+                },
+            ],
+            8,
+        );
+
+        println!(
+            "readback=browser_ocr edge=empty after_path:{:?} after_elements:{} added:{added}",
+            input.web_path,
+            input.elements.len()
+        );
+        assert_eq!(added, 0);
+        assert_eq!(input.web_path, Some(WebPerceptionPath::UiaOnly));
+        assert!(input.elements.is_empty());
+    }
+
+    #[test]
+    fn browser_ocr_guard_only_allows_cdp_failures_on_uia_only_path() {
+        let mut input = chromium_ocr_input();
+        assert!(should_attempt_browser_ocr(&input));
+
+        input.cdp = Some(CdpDiagnostics {
+            process_name: "chrome.exe".to_owned(),
+            status: CdpStatus::Ok,
+            endpoint: Some("http://127.0.0.1:9222".to_owned()),
+            reason_code: None,
+            detail: None,
+            capabilities: Vec::new(),
+            attached_node_count: None,
+        });
+        assert!(!should_attempt_browser_ocr(&input));
+
+        input.cdp = Some(CdpDiagnostics::unreachable(
+            "chrome.exe",
+            error_codes::A11Y_CDP_UNREACHABLE,
+        ));
+        input.web_path = Some(WebPerceptionPath::Cdp);
+        assert!(!should_attempt_browser_ocr(&input));
+    }
+
+    #[test]
+    fn browser_content_tiles_skip_chrome_band_and_bound_tile_count() {
+        let content = browser_content_region(Rect {
+            x: 10,
+            y: 20,
+            w: 1200,
+            h: 1600,
+        })
+        .expect("large browser window has content region");
+        let tiles = browser_ocr_tiles(content);
+
+        println!(
+            "readback=browser_ocr edge=tiles content:{content:?} tile_count:{} first:{:?} last:{:?}",
+            tiles.len(),
+            tiles.first(),
+            tiles.last()
+        );
+        assert_eq!(content.y, 116);
+        assert_eq!(content.h, 1504);
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(tiles[0].h, BROWSER_OCR_TILE_HEIGHT_PX);
+        assert_eq!(tiles[2].h, 304);
+        assert!(
+            browser_content_region(Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 0,
+            })
+            .is_none()
+        );
+    }
+
+    fn chromium_ocr_input() -> ObservationInput {
+        let mut input = ObservationInput::new(ForegroundContext {
+            hwnd: 0x2200,
+            pid: 7777,
+            process_name: "chrome.exe".to_owned(),
+            process_path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_owned(),
+            window_title: "Example - Google Chrome".to_owned(),
+            window_bounds: Rect {
+                x: 0,
+                y: 0,
+                w: 1280,
+                h: 900,
+            },
+            monitor_index: 0,
+            dpi_scale: 1.0,
+            profile_id: Some("chrome".to_owned()),
+            steam_appid: None,
+            is_fullscreen: false,
+            is_dwm_composed: true,
+        });
+        input.capture_status = SensorStatus::Healthy;
+        input.cdp = Some(CdpDiagnostics::unreachable(
+            "chrome.exe",
+            error_codes::A11Y_CDP_UNREACHABLE,
+        ));
+        input.web_path = Some(WebPerceptionPath::UiaOnly);
+        input
     }
 
     fn profile_with_mode(mode: PerceptionMode) -> Profile {

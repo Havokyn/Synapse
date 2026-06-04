@@ -34,17 +34,21 @@ Browser observations carry diagnostics so agents can tell the difference between
   `elements`.
 - `diagnostics.cdp.status = "unreachable"` with
   `reason_code = "A11Y_CDP_UNREACHABLE"`: the foreground process is Chromium
-  family, but no probed debug port accepted a connection. `web_path` remains
-  `uia_only`.
+  family, but no probed debug port accepted a connection. Synapse then attempts
+  OCR over tiled browser content. If readable text is found,
+  `diagnostics.web_path = "ocr"` and OCR text nodes appear in `elements`; if OCR
+  has no usable text or capture is unavailable, `web_path` remains `uia_only`.
 - CDP attach errors use the same diagnostics object with a non-`ok` status and
-  detail. Treat them as actionable runtime failures; do not fall back silently.
+  detail. Synapse may still recover readable text through OCR, but the CDP
+  failure remains visible in diagnostics.
 - Non-browser foreground windows leave `diagnostics.cdp` and `web_path` unset.
 
 The intended strategy ladder is:
 
 1. CDP DOM and accessibility tree for Chromium page content.
-2. OCR/capture for pixels that CDP cannot describe.
-3. UIA for browser chrome and native app controls.
+2. OCR/capture over tiled browser content when CDP is down or attach fails.
+3. Explicit `uia_only` for browser chrome/native UI when neither DOM nor OCR
+   produced page content.
 
 ## Launching a Browser for DOM Access
 
@@ -97,9 +101,11 @@ For browser work, prefer this loop:
    visible UI state, downloaded file bytes, server-side record, or the Synapse
    audit row that should have changed.
 
-If `observe` reports `A11Y_CDP_UNREACHABLE`, relaunch through `act_launch` or
-provide a real debug port through `SYNAPSE_CDP_PORTS`. Do not keep retrying
-`find` against the collapsed UIA tree and treat missing page buttons as absent.
+If `observe` reports `A11Y_CDP_UNREACHABLE` and `web_path = "ocr"`, text can be
+searched but DOM-only controls still need a CDP-backed browser launch. If
+`web_path = "uia_only"`, relaunch through `act_launch` or provide a real debug
+port through `SYNAPSE_CDP_PORTS`. Do not keep retrying `find` against the
+collapsed UIA tree and treat missing page buttons as absent.
 
 ## Recovering Truncated Observations
 
