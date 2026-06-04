@@ -58,18 +58,16 @@ install_synapse_token_loader() {
 # Source this from shell startup before launching Codex/Claude HTTP MCP clients.
 _synapse_mcp_token_path="$TOKEN_WSL"
 
-if [ -z "\${SYNAPSE_BEARER_TOKEN:-}" ]; then
-    if [ ! -r "\$_synapse_mcp_token_path" ]; then
-        printf '%s\n' "SYNAPSE_MCP_TOKEN_UNREADABLE path=\$_synapse_mcp_token_path remediation=start the Windows synapse-mcp daemon or repair token generation" >&2
-    else
-        _synapse_mcp_token="\$(tr -d '\r\n' < "\$_synapse_mcp_token_path")"
-        if [ -z "\$_synapse_mcp_token" ]; then
-            printf '%s\n' "SYNAPSE_MCP_TOKEN_EMPTY path=\$_synapse_mcp_token_path remediation=regenerate the Synapse MCP bearer token" >&2
-        else
-            export SYNAPSE_BEARER_TOKEN="\$_synapse_mcp_token"
-        fi
-        unset _synapse_mcp_token
+if [ ! -r "\$_synapse_mcp_token_path" ]; then
+    printf '%s\n' "SYNAPSE_MCP_TOKEN_UNREADABLE path=\$_synapse_mcp_token_path remediation=start the Windows synapse-mcp daemon or repair token generation" >&2
+else
+    _synapse_mcp_token="\$(tr -d '\r\n' < "\$_synapse_mcp_token_path")"
+    if [ -z "\$_synapse_mcp_token" ]; then
+        printf '%s\n' "SYNAPSE_MCP_TOKEN_EMPTY path=\$_synapse_mcp_token_path remediation=regenerate the Synapse MCP bearer token" >&2
+    elif [ "\${SYNAPSE_BEARER_TOKEN:-}" != "\$_synapse_mcp_token" ]; then
+        export SYNAPSE_BEARER_TOKEN="\$_synapse_mcp_token"
     fi
+    unset _synapse_mcp_token
 fi
 
 unset _synapse_mcp_token_path

@@ -230,7 +230,9 @@ Install Synapse for me and wire it into my AI tools.
    config below.
 3. Start the Windows HTTP daemon once and read its bearer token from
    %APPDATA%\synapse\token.txt. Set SYNAPSE_BEARER_TOKEN in the Windows user
-   environment to that exact token for future Codex processes.
+   environment to that exact token, and install the Synapse token loader into
+   the standard Codex launchers so future Codex processes load the token before
+   MCP starts.
 4. Connect it to Claude Code (user scope) with Streamable HTTP:
      claude mcp add --scope user --transport http synapse http://127.0.0.1:7700/mcp --header "Authorization: Bearer <token>"
 5. Connect it to Codex by adding this to ~/.codex/config.toml:
@@ -240,8 +242,11 @@ Install Synapse for me and wire it into my AI tools.
 6. Connect it to the Claude Desktop app by adding a "synapse" server to
    %APPDATA%\Claude\claude_desktop_config.json under "mcpServers" with the same
    command and ["--mode","connect","--bind","127.0.0.1:7700"] args. Preserve any existing servers in that file.
-7. Verify: restart each client, then call the Synapse `health` tool and confirm
-   it returns { "ok": true, ... }.
+7. Verify: restart each client, then call the Synapse `health` tool through the
+   real MCP client and confirm it returns { "ok": true, ... }. If an
+   already-running Codex session still says `Transport closed`, restart Codex
+   through the patched launcher; Windows cannot update that process environment
+   after it has started.
 
 I'm on Windows. Use the real absolute Cargo bin path, don't invent one, and tell
 me anything that needs my approval (e.g. installing the Rust toolchain).
@@ -281,8 +286,10 @@ incremental, not a fresh RocksDB build), deploy the bundled profiles next to the
 binary, generate a loopback bearer token, register the auto-start daemon
 (interactive desktop session, single-writer DB) with `--profile-dir`, verify
 `health`, and wire detected MCP clients. Claude Code and Codex use Streamable
-HTTP; Claude Desktop on Windows uses the `connect` bridge because it is
-stdio-only. WSL clients must not launch the Windows `.exe` bridge directly.
+HTTP; Windows Codex launchers also get a Synapse token loader so new Codex
+processes do not depend on a stale parent environment. Claude Desktop on Windows
+uses the `connect` bridge because it is stdio-only. WSL clients must not launch
+the Windows `.exe` bridge directly.
 Re-run any time to update; `-Remove` (PowerShell) uninstalls the daemon task.
 
 ### Build it yourself

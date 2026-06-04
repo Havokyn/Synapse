@@ -16,4 +16,10 @@ harnesses, CI, GitHub Actions, direct HTTP helpers, or direct storage writes for
 real Synapse MCP tool triggers when a Synapse MCP tool exists. If the configured
 Codex `mcp__synapse` Streamable HTTP transport is closed, stale, or missing,
 treat that as local host setup work and repair the Codex HTTP entry plus bearer
-token environment before accepting Synapse runtime behavior.
+token environment before accepting Synapse runtime behavior. Re-run
+`scripts/synapse-setup.ps1` if the standard Codex launchers lack the Synapse
+token loader. If the already-running Codex process started before
+`SYNAPSE_BEARER_TOKEN` existed or changed, Windows cannot update that process
+environment after the fact; do not claim direct `mcp__synapse` FSV is available
+until a fresh Codex process initializes with the token loader and the live tool
+call succeeds.

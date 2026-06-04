@@ -75,6 +75,223 @@ function Info($m)  { Write-Host "[synapse-setup] $m" }
 function Step($m)  { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
 function Die($m)   { throw "[synapse-setup] FATAL: $m" }
 
+$processTokenAtStart = $env:SYNAPSE_BEARER_TOKEN
+
+function Get-ProcessLineage {
+    param([int]$StartPid = $PID)
+    $lineage = @()
+    $seen = @{}
+    $current = $StartPid
+    while ($current -and -not $seen.ContainsKey($current)) {
+        $seen[$current] = $true
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue
+        if (-not $p) { break }
+        $lineage += $p
+        $current = [int]$p.ParentProcessId
+    }
+    return $lineage
+}
+
+function Install-CodexSynapseTokenLoader {
+    param(
+        [Parameter(Mandatory=$true)][string]$CodexCommandPath,
+        [Parameter(Mandatory=$true)][string]$TokenPath
+    )
+
+    $npmDir = Split-Path -Parent $CodexCommandPath
+    if (-not $npmDir -or -not (Test-Path $npmDir)) {
+        Die "Cannot resolve Codex launcher directory from '$CodexCommandPath'."
+    }
+
+    $ps1Path = Join-Path $npmDir 'codex.ps1'
+    $cmdPath = Join-Path $npmDir 'codex.cmd'
+    $shPath = Join-Path $npmDir 'codex'
+
+    if (Test-Path $ps1Path) {
+        $ps1 = @'
+#!/usr/bin/env pwsh
+$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent
+
+# Synapse MCP token loader: begin
+$synapseConfigPath = Join-Path $env:USERPROFILE '.codex\config.toml'
+$synapseTokenPath = Join-Path $env:APPDATA 'synapse\token.txt'
+$synapseHasConfig = $false
+if (Test-Path $synapseConfigPath) {
+  try {
+    $synapseHasConfig = ((Get-Content -Raw $synapseConfigPath) -match '(?m)^\[mcp_servers\.synapse\]')
+  } catch {
+    Write-Error "SYNAPSE_CODEX_CONFIG_UNREADABLE path=$synapseConfigPath remediation=repair Codex config permissions or rerun scripts\synapse-setup.ps1"
+    exit 1
+  }
+}
+if ($synapseHasConfig) {
+  if (-not (Test-Path $synapseTokenPath)) {
+    Write-Error "SYNAPSE_CODEX_TOKEN_MISSING path=$synapseTokenPath remediation=run scripts\synapse-setup.ps1 to generate the bearer token"
+    exit 1
+  }
+  $synapseTokenRaw = Get-Content -Raw $synapseTokenPath
+  $synapseToken = if ($null -eq $synapseTokenRaw) { '' } else { $synapseTokenRaw.Trim() }
+  if ([string]::IsNullOrWhiteSpace($synapseToken)) {
+    Write-Error "SYNAPSE_CODEX_TOKEN_EMPTY path=$synapseTokenPath remediation=delete the empty token and rerun scripts\synapse-setup.ps1"
+    exit 1
+  }
+  if ($env:SYNAPSE_BEARER_TOKEN -ne $synapseToken) {
+    $env:SYNAPSE_BEARER_TOKEN = $synapseToken
+  }
+}
+Remove-Variable synapseConfigPath,synapseTokenPath,synapseHasConfig -ErrorAction SilentlyContinue
+Remove-Variable synapseTokenRaw,synapseToken -ErrorAction SilentlyContinue
+# Synapse MCP token loader: end
+
+$exe=""
+if ($PSVersionTable.PSVersion -lt "6.0" -or $IsWindows) {
+  # Fix case when both the Windows and Linux builds of Node
+  # are installed in the same directory
+  $exe=".exe"
+}
+$ret=0
+if (Test-Path "$basedir/node$exe") {
+  # Support pipeline input
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "$basedir/node$exe"  "$basedir/node_modules/@openai/codex/bin/codex.js" $args
+  } else {
+    & "$basedir/node$exe"  "$basedir/node_modules/@openai/codex/bin/codex.js" $args
+  }
+  $ret=$LASTEXITCODE
+} else {
+  # Support pipeline input
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "node$exe"  "$basedir/node_modules/@openai/codex/bin/codex.js" $args
+  } else {
+    & "node$exe"  "$basedir/node_modules/@openai/codex/bin/codex.js" $args
+  }
+  $ret=$LASTEXITCODE
+}
+exit $ret
+'@
+        Copy-Item $ps1Path "$ps1Path.synapse-bak" -Force
+        Set-Content -Path $ps1Path -Value $ps1 -Encoding utf8
+        Info "Installed Synapse token loader in Codex PowerShell launcher: $ps1Path"
+    } else {
+        Info "WARN: Codex PowerShell launcher not found at $ps1Path; cannot install ps1 token loader."
+    }
+
+    if (Test-Path $cmdPath) {
+        $cmd = @'
+@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+REM Synapse MCP token loader: begin
+SET "_synapse_cfg=%USERPROFILE%\.codex\config.toml"
+SET "_synapse_tok=%APPDATA%\synapse\token.txt"
+SET "_synapse_has_cfg="
+IF EXIST "%_synapse_cfg%" (
+  %SystemRoot%\System32\findstr.exe /R /C:"^\[mcp_servers\.synapse\]" "%_synapse_cfg%" >NUL 2>NUL
+  IF NOT ERRORLEVEL 1 SET "_synapse_has_cfg=1"
+)
+IF DEFINED _synapse_has_cfg (
+  IF NOT EXIST "%_synapse_tok%" (
+    ECHO SYNAPSE_CODEX_TOKEN_MISSING path=%_synapse_tok% remediation=run scripts\synapse-setup.ps1 to generate the bearer token 1>&2
+    EXIT /B 1
+  )
+  SET /P _synapse_file_token=<"%_synapse_tok%"
+  IF NOT DEFINED _synapse_file_token (
+    ECHO SYNAPSE_CODEX_TOKEN_EMPTY path=%_synapse_tok% remediation=delete the empty token and rerun scripts\synapse-setup.ps1 1>&2
+    EXIT /B 1
+  )
+  IF NOT "%SYNAPSE_BEARER_TOKEN%"=="%_synapse_file_token%" SET "SYNAPSE_BEARER_TOKEN=%_synapse_file_token%"
+)
+SET "_synapse_cfg="
+SET "_synapse_tok="
+SET "_synapse_has_cfg="
+SET "_synapse_file_token="
+REM Synapse MCP token loader: end
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & SET "SYNAPSE_BEARER_TOKEN=%SYNAPSE_BEARER_TOKEN%" & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+'@
+        Copy-Item $cmdPath "$cmdPath.synapse-bak" -Force
+        Set-Content -Path $cmdPath -Value $cmd -Encoding ascii
+        Info "Installed Synapse token loader in Codex CMD launcher: $cmdPath"
+    } else {
+        Info "WARN: Codex CMD launcher not found at $cmdPath; cannot install cmd token loader."
+    }
+
+    if (Test-Path $shPath) {
+        $sh = @'
+#!/bin/sh
+basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
+
+# Synapse MCP token loader: begin
+synapse_cfg="$USERPROFILE/.codex/config.toml"
+synapse_tok="$APPDATA/synapse/token.txt"
+case `uname` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            synapse_cfg=$(cygpath -u "$synapse_cfg")
+            synapse_tok=$(cygpath -u "$synapse_tok")
+        fi
+    ;;
+esac
+if [ -f "$synapse_cfg" ] && grep -Eq '^\[mcp_servers\.synapse\]' "$synapse_cfg"; then
+    if [ ! -r "$synapse_tok" ]; then
+        printf '%s\n' "SYNAPSE_CODEX_TOKEN_MISSING path=$synapse_tok remediation=run scripts/synapse-setup.ps1 to generate the bearer token" >&2
+        exit 1
+    fi
+    synapse_file_token=$(tr -d '\r\n' < "$synapse_tok")
+    if [ -z "$synapse_file_token" ]; then
+        printf '%s\n' "SYNAPSE_CODEX_TOKEN_EMPTY path=$synapse_tok remediation=delete the empty token and rerun scripts/synapse-setup.ps1" >&2
+        exit 1
+    fi
+    if [ "${SYNAPSE_BEARER_TOKEN:-}" != "$synapse_file_token" ]; then
+        SYNAPSE_BEARER_TOKEN="$synapse_file_token"
+        export SYNAPSE_BEARER_TOKEN
+    fi
+fi
+unset synapse_cfg synapse_tok synapse_file_token
+# Synapse MCP token loader: end
+
+case `uname` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=`cygpath -w "$basedir"`
+        fi
+    ;;
+esac
+
+if [ -x "$basedir/node" ]; then
+  exec "$basedir/node"  "$basedir/node_modules/@openai/codex/bin/codex.js" "$@"
+else
+  exec node  "$basedir/node_modules/@openai/codex/bin/codex.js" "$@"
+fi
+'@
+        Copy-Item $shPath "$shPath.synapse-bak" -Force
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($shPath, ($sh -replace "`r?`n", "`n"), $utf8NoBom)
+        Info "Installed Synapse token loader in Codex shell launcher: $shPath"
+    } else {
+        Info "WARN: Codex shell launcher not found at $shPath; cannot install shell token loader."
+    }
+
+    $loaderTokenRaw = if (Test-Path $TokenPath) { Get-Content -Raw $TokenPath } else { $null }
+    $loaderToken = if ($null -eq $loaderTokenRaw) { '' } else { $loaderTokenRaw.Trim() }
+    if ((Test-Path $TokenPath) -and [string]::IsNullOrWhiteSpace($loaderToken)) {
+        Die "Installed Codex token loaders, but token at $TokenPath is empty."
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Uninstall path
 # ---------------------------------------------------------------------------
@@ -178,7 +395,8 @@ if (-not (Test-Path $TokenPath)) {
     ($bytes | ForEach-Object { $_.ToString('x2') }) -join '' | Set-Content -Path $TokenPath -NoNewline -Encoding ascii
     Info "Generated token -> $TokenPath"
 } else { Info "Reusing token -> $TokenPath" }
-$token = (Get-Content -Raw $TokenPath).Trim()
+$tokenRaw = Get-Content -Raw $TokenPath
+$token = if ($null -eq $tokenRaw) { '' } else { $tokenRaw.Trim() }
 if ($token.Length -lt 16) { Die "Token at $TokenPath is too short ($($token.Length) chars); delete it and re-run to regenerate." }
 [Environment]::SetEnvironmentVariable('SYNAPSE_BEARER_TOKEN', $token, 'User')
 $env:SYNAPSE_BEARER_TOKEN = $token
@@ -264,6 +482,7 @@ if (-not $SkipClientWiring) {
         & $codex.Source mcp remove synapse 2>$null | Out-Null
         & $codex.Source mcp add synapse --url "http://$Bind/mcp" --bearer-token-env-var SYNAPSE_BEARER_TOKEN
         if ($LASTEXITCODE -ne 0) { Die "codex mcp add failed (exit $LASTEXITCODE). Codex must be wired to HTTP, not the connect bridge." }
+        Install-CodexSynapseTokenLoader -CodexCommandPath $codex.Source -TokenPath $TokenPath
         Info "Codex (Windows) wired via Streamable HTTP transport."
     } elseif (Test-Path $codexCfg) {
         $c = Get-Content -Raw $codexCfg
@@ -284,6 +503,14 @@ if (-not $SkipClientWiring) {
             Info "Claude Desktop wired -> connect bridge."
         } catch { Info "WARN: could not update $desktopCfg : $($_.Exception.Message)" }
     } else { Info "No Claude Desktop config at $desktopCfg; skipping." }
+}
+
+$lineage = Get-ProcessLineage
+$codexAncestor = $lineage | Where-Object {
+    $_.Name -ieq 'codex.exe' -or $_.CommandLine -match '@openai[\\/]+codex|codex\.js|codex-win32'
+} | Select-Object -First 1
+if ($codexAncestor -and $processTokenAtStart -ne $token) {
+    Die ("SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE codex_pid={0} token_at_process_start={1} token_file={2} remediation=restart Codex through the patched codex launcher; Windows cannot update an already-running Codex process environment, so this current session cannot authenticate mcp__synapse yet." -f $codexAncestor.ProcessId, ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })), $TokenPath)
 }
 
 Step "Done"

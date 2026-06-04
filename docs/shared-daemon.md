@@ -87,14 +87,17 @@ clients are connected.
   `SYNAPSE_BEARER_TOKEN` matches `%APPDATA%\synapse\token.txt`, and read
   `codex mcp get synapse`. If it drifted, repair it with
   `codex mcp add synapse --url http://127.0.0.1:7700/mcp --bearer-token-env-var SYNAPSE_BEARER_TOKEN`.
+  Re-run `scripts/synapse-setup.ps1` if the standard Windows Codex launchers do
+  not contain the Synapse token loader; the setup script patches those launchers
+  so future Codex processes load the canonical token before MCP initialization.
   Then re-read health and tool discovery and retry the real wired
   `mcp__synapse` tools. Direct HTTP probes are diagnostics only; do not use
-  them as FSV substitutes. If those host SoTs are healthy but the already-running
-  Codex process still has a closed transport, check the installed Codex command
-  surface for a real MCP reload/reconnect action. When none exists, start a
-  fresh Codex session so MCP initializes again; do not claim the current chat's
-  direct `mcp__synapse` FSV is available until the live namespace itself
-  succeeds.
+  them as FSV substitutes. If the already-running Codex process was launched
+  before `SYNAPSE_BEARER_TOKEN` existed or changed, Windows cannot update that
+  process environment after the fact; setup reports
+  `SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE` and the current chat cannot claim
+  direct `mcp__synapse` FSV until a fresh Codex process initializes with the
+  token loader.
 - **WSL Codex/Claude leaves `synapse-mcp --mode connect` children under
   `wsl.exe`** — this is a configuration error. Reconfigure the WSL client to
   HTTP transport with bearer auth. The bridge now refuses direct WSL interop
