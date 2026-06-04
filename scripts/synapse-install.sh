@@ -15,7 +15,7 @@
 #      \\wsl.localhost bakes transient drive paths into the binary).
 #   3. Invokes scripts/synapse-setup.ps1 on the Windows side to build, install,
 #      deploy profiles, register the auto-start daemon, and wire Windows clients.
-#   4. Wires the WSL-side Claude Code + Codex at the connect bridge.
+#   4. Wires the WSL-side Claude Code + Codex to the daemon over Streamable HTTP.
 #
 # Fail-loud: every prerequisite is checked; on any failure the script stops and
 # prints exactly what failed and how to fix it. No silent fallbacks.
@@ -50,6 +50,52 @@ WIN_CARGO="$WIN_HOME_WSL/.cargo/bin/cargo.exe"
 WIN_EXE_WSL="$WIN_HOME_WSL/.cargo/bin/synapse-mcp.exe"   # /mnt path used by WSL clients
 WIN_EXE_WIN="$WIN_USERPROFILE\\.cargo\\bin\\synapse-mcp.exe"
 
+install_synapse_token_loader() {
+  local loader="$HOME/.config/synapse/mcp-env.sh"
+  mkdir -p "$(dirname "$loader")"
+  cat > "$loader" <<EOF
+# Synapse MCP bearer token bridge for WSL agent clients.
+# Source this from shell startup before launching Codex/Claude HTTP MCP clients.
+_synapse_mcp_token_path="$TOKEN_WSL"
+
+if [ -z "\${SYNAPSE_BEARER_TOKEN:-}" ]; then
+    if [ ! -r "\$_synapse_mcp_token_path" ]; then
+        printf '%s\n' "SYNAPSE_MCP_TOKEN_UNREADABLE path=\$_synapse_mcp_token_path remediation=start the Windows synapse-mcp daemon or repair token generation" >&2
+    else
+        _synapse_mcp_token="\$(tr -d '\r\n' < "\$_synapse_mcp_token_path")"
+        if [ -z "\$_synapse_mcp_token" ]; then
+            printf '%s\n' "SYNAPSE_MCP_TOKEN_EMPTY path=\$_synapse_mcp_token_path remediation=regenerate the Synapse MCP bearer token" >&2
+        else
+            export SYNAPSE_BEARER_TOKEN="\$_synapse_mcp_token"
+        fi
+        unset _synapse_mcp_token
+    fi
+fi
+
+unset _synapse_mcp_token_path
+EOF
+  chmod 600 "$loader"
+
+  local marker='if [ -f "$HOME/.config/synapse/mcp-env.sh" ]; then'
+  local block='# Synapse MCP HTTP bearer token bridge for WSL agent clients.
+if [ -f "$HOME/.config/synapse/mcp-env.sh" ]; then
+    . "$HOME/.config/synapse/mcp-env.sh"
+else
+    printf '"'"'%s\n'"'"' "SYNAPSE_MCP_ENV_MISSING path=$HOME/.config/synapse/mcp-env.sh remediation=restore the WSL Synapse MCP env loader" >&2
+fi'
+  for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+    [ -f "$rc" ] || continue
+    if ! grep -Fq "$marker" "$rc"; then
+      printf '\n%s\n' "$block" >> "$rc"
+    fi
+  done
+
+  # Populate this process too, so the commands below see the same SoT.
+  # shellcheck disable=SC1090
+  . "$loader"
+  [ -n "${SYNAPSE_BEARER_TOKEN:-}" ] || die "SYNAPSE_BEARER_TOKEN did not load from $TOKEN_WSL."
+}
+
 # --- 2. Sync source to a local Windows path ---------------------------------
 SRC_WSL="$WIN_HOME_WSL/synapse-src"
 SRC_WIN="$WIN_USERPROFILE\\synapse-src"
@@ -68,48 +114,43 @@ PS1_WIN="$SRC_WIN\\scripts\\synapse-setup.ps1"
 "$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -SourceDir "$SRC_WIN" -Bind "$BIND" \
   || die "Windows-side setup failed. See the [synapse-setup] output above for the exact failing step."
 
-# --- 4. Wire WSL-side clients at the connect bridge -------------------------
+# Read the bearer token before client wiring. The raw token is never printed.
+TOKEN_WSL="$(wslpath "$("$CMD" /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r')")/synapse/token.txt"
+[ -f "$TOKEN_WSL" ] || die "Token not found at $TOKEN_WSL — the Windows setup did not complete."
+TOK="$(tr -d '\r\n' < "$TOKEN_WSL")"
+[ -n "$TOK" ] || die "Token at $TOKEN_WSL is empty."
+install_synapse_token_loader
+
+# --- 4. Wire WSL-side clients to Streamable HTTP ----------------------------
 say "Wiring WSL-side MCP clients"
 
-# Claude Code (WSL): stdio client -> connect bridge (launches the Windows .exe via interop)
+# Claude Code (WSL): Streamable HTTP -> shared Windows daemon.
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove synapse -s user >/dev/null 2>&1 || true
-  claude mcp add --scope user synapse -- "$WIN_EXE_WSL" --mode connect --bind "$BIND"
-  say "Claude Code (WSL) wired -> connect bridge ($WIN_EXE_WSL)."
+  claude mcp add --scope user --transport http synapse "http://$BIND/mcp" --header "Authorization: Bearer $TOK"
+  say "Claude Code (WSL) wired -> Streamable HTTP daemon."
 else
   say "claude CLI not found in WSL; skipping Claude Code wiring."
 fi
 
-# Codex (WSL): stdio-only -> connect bridge, with the operator hotkey disabled
+# Codex (WSL): Streamable HTTP -> shared Windows daemon.
 CODEX_CFG="$HOME/.codex/config.toml"
-if [ -f "$CODEX_CFG" ]; then
-  if ! grep -qE '^\[mcp_servers\.synapse\]' "$CODEX_CFG"; then
-    {
-      printf '\n[mcp_servers.synapse]\n'
-      printf 'command = "%s"\n' "$WIN_EXE_WSL"
-      printf 'args = ["--mode", "connect", "--bind", "%s"]\n' "$BIND"
-      printf 'env = { SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY = "1" }\n'
-    } >> "$CODEX_CFG"
-    say "Codex (WSL) wired -> [mcp_servers.synapse] connect bridge."
-  else
-    say "Codex already has [mcp_servers.synapse]; left as-is."
-  fi
+if command -v codex >/dev/null 2>&1; then
+  codex mcp remove synapse >/dev/null 2>&1 || true
+  codex mcp add synapse --url "http://$BIND/mcp" --bearer-token-env-var SYNAPSE_BEARER_TOKEN
+  say "Codex (WSL) wired -> Streamable HTTP daemon."
+elif [ -f "$CODEX_CFG" ]; then
+  die "Codex config exists at $CODEX_CFG but codex CLI is not on PATH, so the installer cannot safely replace stale synapse config. Install/repair Codex CLI, then re-run."
 else
-  say "No Codex config at $CODEX_CFG; skipping."
+  say "codex CLI/config not found in WSL; skipping Codex wiring."
 fi
 
 # --- 5. Verify the daemon is reachable from WSL -----------------------------
 say "Verifying daemon health from WSL"
-TOKEN_WSL="$(wslpath "$("$CMD" /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r')")/synapse/token.txt"
-if [ -f "$TOKEN_WSL" ]; then
-  TOK="$(tr -d '\r\n' < "$TOKEN_WSL")"
-  if curl -fsS -m 5 -H "Authorization: Bearer $TOK" "http://$BIND/health" >/dev/null 2>&1; then
-    say "Daemon healthy and reachable from WSL on http://$BIND."
-  else
-    die "Daemon not reachable from WSL on http://$BIND. The Windows daemon may not have started; check %LOCALAPPDATA%\\synapse\\logs\\daemon.log."
-  fi
+if curl -fsS -m 5 -H "Authorization: Bearer $TOK" "http://$BIND/health" >/dev/null 2>&1; then
+  say "Daemon healthy and reachable from WSL on http://$BIND."
 else
-  die "Token not found at $TOKEN_WSL — the Windows setup did not complete."
+  die "Daemon not reachable from WSL on http://$BIND. The Windows daemon may not have started; check %LOCALAPPDATA%\\synapse\\logs\\daemon.log."
 fi
 
 say "Done. Restart Claude Code / Codex; call the synapse 'health' tool to confirm."

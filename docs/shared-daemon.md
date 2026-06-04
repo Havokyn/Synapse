@@ -82,18 +82,19 @@ clients are connected.
 ## Troubleshooting
 
 - **Codex `mcp__synapse` says `Transport closed`** — treat this as configured
-  host setup work. Confirm the daemon process and `127.0.0.1:7700` socket, run
-  the configured bridge command
-  `C:\Users\hotra\.cargo\bin\synapse-mcp.exe --mode connect --bind 127.0.0.1:7700`
-  against the repo-built daemon, re-read health and tool discovery, and retry
-  the real wired `mcp__synapse` tools. Direct HTTP or standalone stdio probes
-  are diagnostics only; do not use them as FSV substitutes. If those host SoTs
-  are healthy but the already-running Codex process still has no
-  `synapse-mcp --mode connect` child and the live tool remains closed, check
-  the installed Codex command surface for a real MCP reload/reconnect action.
-  When none exists, start a fresh Codex session so MCP initializes again; do not
-  claim the current chat's direct `mcp__synapse` FSV is available until the live
-  namespace itself succeeds.
+  host setup work. Codex should be Streamable HTTP, not stdio: confirm the
+  daemon process and `127.0.0.1:7700` socket, confirm
+  `SYNAPSE_BEARER_TOKEN` matches `%APPDATA%\synapse\token.txt`, and read
+  `codex mcp get synapse`. If it drifted, repair it with
+  `codex mcp add synapse --url http://127.0.0.1:7700/mcp --bearer-token-env-var SYNAPSE_BEARER_TOKEN`.
+  Then re-read health and tool discovery and retry the real wired
+  `mcp__synapse` tools. Direct HTTP probes are diagnostics only; do not use
+  them as FSV substitutes. If those host SoTs are healthy but the already-running
+  Codex process still has a closed transport, check the installed Codex command
+  surface for a real MCP reload/reconnect action. When none exists, start a
+  fresh Codex session so MCP initializes again; do not claim the current chat's
+  direct `mcp__synapse` FSV is available until the live namespace itself
+  succeeds.
 - **WSL Codex/Claude leaves `synapse-mcp --mode connect` children under
   `wsl.exe`** — this is a configuration error. Reconfigure the WSL client to
   HTTP transport with bearer auth. The bridge now refuses direct WSL interop

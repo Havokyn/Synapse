@@ -43,7 +43,7 @@
   Loopback address the daemon binds. Default 127.0.0.1:7700.
 
 .PARAMETER WireClients
-  Wire the Windows-side MCP clients (Claude Code via HTTP, Codex + Claude
+  Wire the Windows-side MCP clients (Claude Code and Codex via HTTP, Claude
   Desktop via the connect bridge). Default $true.
 
 .PARAMETER Remove
@@ -180,6 +180,20 @@ if (-not (Test-Path $TokenPath)) {
 } else { Info "Reusing token -> $TokenPath" }
 $token = (Get-Content -Raw $TokenPath).Trim()
 if ($token.Length -lt 16) { Die "Token at $TokenPath is too short ($($token.Length) chars); delete it and re-run to regenerate." }
+[Environment]::SetEnvironmentVariable('SYNAPSE_BEARER_TOKEN', $token, 'User')
+$env:SYNAPSE_BEARER_TOKEN = $token
+Info "Set Windows User SYNAPSE_BEARER_TOKEN from $TokenPath for future Codex HTTP MCP processes."
+try {
+    $signature = '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+    $type = Add-Type -MemberDefinition $signature -Name Win32SendMessageTimeout -Namespace SynapseEnv -PassThru -ErrorAction Stop
+    $broadcastResult = [UIntPtr]::Zero
+    $rawReturn = $type::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$broadcastResult)
+    if ($rawReturn -eq [IntPtr]::Zero) {
+        Info "WARN: environment broadcast returned 0; future GUI clients may need restart before seeing SYNAPSE_BEARER_TOKEN."
+    }
+} catch {
+    Info "WARN: environment broadcast failed: $($_.Exception.Message). Future GUI clients may need restart before seeing SYNAPSE_BEARER_TOKEN."
+}
 
 # ---------------------------------------------------------------------------
 # 6. Register + start the auto-start HTTP daemon (interactive desktop session)
@@ -241,18 +255,24 @@ if (-not $SkipClientWiring) {
         } catch { Info "WARN: 'claude mcp add' failed: $($_.Exception.Message). Wire it manually (transport http -> http://$Bind/mcp)." }
     } else { Info "claude CLI not found on Windows PATH; skipping Claude Code wiring." }
 
-    # Codex + Claude Desktop are stdio-only -> connect bridge.
+    # Codex speaks Streamable HTTP; Claude Desktop remains stdio-only -> connect bridge.
     $bridgeArgs = @('--mode','connect','--bind',$Bind)
 
+    $codex = Get-Command codex -ErrorAction SilentlyContinue
     $codexCfg = "$env:USERPROFILE\.codex\config.toml"
-    if (Test-Path $codexCfg) {
+    if ($codex) {
+        & $codex.Source mcp remove synapse 2>$null | Out-Null
+        & $codex.Source mcp add synapse --url "http://$Bind/mcp" --bearer-token-env-var SYNAPSE_BEARER_TOKEN
+        if ($LASTEXITCODE -ne 0) { Die "codex mcp add failed (exit $LASTEXITCODE). Codex must be wired to HTTP, not the connect bridge." }
+        Info "Codex (Windows) wired via Streamable HTTP transport."
+    } elseif (Test-Path $codexCfg) {
         $c = Get-Content -Raw $codexCfg
-        if ($c -notmatch '(?m)^\[mcp_servers\.synapse\]') {
-            $argsToml = ($bridgeArgs | ForEach-Object { '"' + $_ + '"' }) -join ', '
-            Add-Content $codexCfg "`n[mcp_servers.synapse]`ncommand = `"$($ExePath -replace '\\','\\')`"`nargs = [$argsToml]`nenv = { SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY = `"1`" }`n"
-            Info "Codex (Windows) wired -> [mcp_servers.synapse] connect bridge."
-        } else { Info "Codex already has [mcp_servers.synapse]; left as-is." }
-    } else { Info "No Codex config at $codexCfg; skipping." }
+        $bindUrlRegex = [regex]::Escape("http://$Bind/mcp")
+        if ($c -match '(?m)^\[mcp_servers\.synapse\]' -and ($c -notmatch "url\s*=\s*`"$bindUrlRegex`"" -or $c -notmatch 'bearer_token_env_var\s*=\s*"SYNAPSE_BEARER_TOKEN"')) {
+            Die "Codex config exists at $codexCfg but codex CLI is not on PATH and the synapse entry is not the required HTTP transport. Install/repair Codex CLI, then re-run."
+        }
+        Info "Codex CLI not found; existing Codex config is already HTTP or has no synapse entry."
+    } else { Info "codex CLI/config not found; skipping Codex wiring." }
 
     $desktopCfg = "$env:APPDATA\Claude\claude_desktop_config.json"
     if (Test-Path $desktopCfg) {

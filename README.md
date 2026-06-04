@@ -226,17 +226,21 @@ Install Synapse for me and wire it into my AI tools.
      cargo install --path crates/synapse-mcp --force
    This drops synapse-mcp.exe into my Cargo bin dir
    (%USERPROFILE%\.cargo\bin\synapse-mcp.exe). Find the absolute path to that
-   binary and use it verbatim in every config below.
-3. Connect it to Claude Code (user scope):
-     claude mcp add --scope user synapse -- "<absolute path>\synapse-mcp.exe" --mode connect --bind 127.0.0.1:7700
-4. Connect it to Codex by adding this to ~/.codex/config.toml:
+   binary and use it verbatim for the daemon and stdio-only Claude Desktop
+   config below.
+3. Start the Windows HTTP daemon once and read its bearer token from
+   %APPDATA%\synapse\token.txt. Set SYNAPSE_BEARER_TOKEN in the Windows user
+   environment to that exact token for future Codex processes.
+4. Connect it to Claude Code (user scope) with Streamable HTTP:
+     claude mcp add --scope user --transport http synapse http://127.0.0.1:7700/mcp --header "Authorization: Bearer <token>"
+5. Connect it to Codex by adding this to ~/.codex/config.toml:
      [mcp_servers.synapse]
-     command = "<absolute path>\\synapse-mcp.exe"
-     args = ["--mode", "connect", "--bind", "127.0.0.1:7700"]
-5. Connect it to the Claude Desktop app by adding a "synapse" server to
+     url = "http://127.0.0.1:7700/mcp"
+     bearer_token_env_var = "SYNAPSE_BEARER_TOKEN"
+6. Connect it to the Claude Desktop app by adding a "synapse" server to
    %APPDATA%\Claude\claude_desktop_config.json under "mcpServers" with the same
    command and ["--mode","connect","--bind","127.0.0.1:7700"] args. Preserve any existing servers in that file.
-6. Verify: restart each client, then call the Synapse `health` tool and confirm
+7. Verify: restart each client, then call the Synapse `health` tool and confirm
    it returns { "ok": true, ... }.
 
 I'm on Windows. Use the real absolute Cargo bin path, don't invent one, and tell
@@ -276,8 +280,9 @@ from a **local** source path into a persistent target (re-installs are
 incremental, not a fresh RocksDB build), deploy the bundled profiles next to the
 binary, generate a loopback bearer token, register the auto-start daemon
 (interactive desktop session, single-writer DB) with `--profile-dir`, verify
-`health`, and wire the detected MCP clients (Claude Code via HTTP on Windows /
-the connect bridge in WSL; Codex and Claude Desktop via the connect bridge).
+`health`, and wire detected MCP clients. Claude Code and Codex use Streamable
+HTTP; Claude Desktop on Windows uses the `connect` bridge because it is
+stdio-only. WSL clients must not launch the Windows `.exe` bridge directly.
 Re-run any time to update; `-Remove` (PowerShell) uninstalls the daemon task.
 
 ### Build it yourself
@@ -295,15 +300,15 @@ cargo install --path crates/synapse-mcp --force   # -> %USERPROFILE%\.cargo\bin\
 Claude Code (user scope):
 
 ```bash
-claude mcp add --scope user synapse -- <cargo-bin>\synapse-mcp.exe --mode connect --bind 127.0.0.1:7700
+claude mcp add --scope user --transport http synapse http://127.0.0.1:7700/mcp --header "Authorization: Bearer <token>"
 ```
 
 Codex (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.synapse]
-command = "C:\\Users\\you\\.cargo\\bin\\synapse-mcp.exe"
-args = ["--mode", "connect", "--bind", "127.0.0.1:7700"]
+url = "http://127.0.0.1:7700/mcp"
+bearer_token_env_var = "SYNAPSE_BEARER_TOKEN"
 ```
 
 Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):

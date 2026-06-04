@@ -14,5 +14,6 @@ Authoritative wake-up sources for agents on this configured host:
 Manual FSV remains mandatory. Do not substitute scripts, tests, benchmarks,
 harnesses, CI, GitHub Actions, direct HTTP helpers, or direct storage writes for
 real Synapse MCP tool triggers when a Synapse MCP tool exists. If the configured
-Codex `mcp__synapse` bridge is closed, stale, or missing, treat that as local
-host setup work and repair it before accepting Synapse runtime behavior.
+Codex `mcp__synapse` Streamable HTTP transport is closed, stale, or missing,
+treat that as local host setup work and repair the Codex HTTP entry plus bearer
+token environment before accepting Synapse runtime behavior.
