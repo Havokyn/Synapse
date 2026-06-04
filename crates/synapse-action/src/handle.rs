@@ -246,16 +246,30 @@ impl ActionHandle {
         let plan = self
             .session_inputs
             .lock()
-            .map(|mut inputs| inputs.release_plan(session_id))
+            .map(|inputs| inputs.release_plan(session_id))
+            .map_err(|_err| ActionError::BackendUnavailable {
+                detail: "session input ownership ledger is poisoned".to_owned(),
+            })?;
+        self.session_inputs
+            .lock()
+            .map(|mut inputs| inputs.remove_retained_shared_owners(session_id))
             .map_err(|_err| ActionError::BackendUnavailable {
                 detail: "session input ownership ledger is poisoned".to_owned(),
             })?;
         let mut first_error = None;
         for action in plan.actions {
-            if let Err(error) = self.execute_unattributed(action).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            match self.execute_unattributed(action.clone()).await {
+                Ok(()) => {
+                    if let Err(error) = self.confirm_session_release_action(session_id, &action)
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(error);
+                }
+                Err(_) => {}
             }
         }
         if let Some(error) = first_error {
@@ -309,6 +323,19 @@ impl ActionHandle {
         self.session_inputs
             .lock()
             .map(|mut inputs| inputs.apply_success(session_id, action))
+            .map_err(|_err| ActionError::BackendUnavailable {
+                detail: "session input ownership ledger is poisoned".to_owned(),
+            })
+    }
+
+    fn confirm_session_release_action(
+        &self,
+        session_id: &str,
+        action: &Action,
+    ) -> ActionResult<()> {
+        self.session_inputs
+            .lock()
+            .map(|mut inputs| inputs.confirm_session_release_action(session_id, action))
             .map_err(|_err| ActionError::BackendUnavailable {
                 detail: "session input ownership ledger is poisoned".to_owned(),
             })
@@ -516,7 +543,7 @@ impl SessionInputOwnership {
         }
     }
 
-    fn release_plan(&mut self, session_id: &str) -> SessionReleasePlan {
+    fn release_plan(&self, session_id: &str) -> SessionReleasePlan {
         let mut plan = SessionReleasePlan {
             actions: Vec::new(),
             summary: SessionReleaseSummary {
@@ -525,33 +552,27 @@ impl SessionInputOwnership {
             },
         };
 
-        let mut keys = Vec::with_capacity(self.keys.len());
-        for mut input in self.keys.drain(..) {
-            if !input.owners.remove(session_id) {
-                keys.push(input);
+        for input in &self.keys {
+            if !input.owners.contains(session_id) {
                 continue;
             }
-            if input.owners.is_empty() {
+            if input.owners.len() == 1 {
                 plan.summary.released_keys = plan.summary.released_keys.saturating_add(1);
                 plan.actions.push(Action::KeyUp {
-                    key: input.key,
+                    key: input.key.clone(),
                     backend: input.backend,
                 });
             } else {
                 plan.summary.retained_shared_inputs =
                     plan.summary.retained_shared_inputs.saturating_add(1);
-                keys.push(input);
             }
         }
-        self.keys = keys;
 
-        let mut buttons = Vec::with_capacity(self.buttons.len());
-        for mut input in self.buttons.drain(..) {
-            if !input.owners.remove(session_id) {
-                buttons.push(input);
+        for input in &self.buttons {
+            if !input.owners.contains(session_id) {
                 continue;
             }
-            if input.owners.is_empty() {
+            if input.owners.len() == 1 {
                 plan.summary.released_buttons = plan.summary.released_buttons.saturating_add(1);
                 plan.actions.push(Action::MouseButton {
                     button: input.button,
@@ -562,18 +583,14 @@ impl SessionInputOwnership {
             } else {
                 plan.summary.retained_shared_inputs =
                     plan.summary.retained_shared_inputs.saturating_add(1);
-                buttons.push(input);
             }
         }
-        self.buttons = buttons;
 
-        let mut pads = Vec::with_capacity(self.pads.len());
-        for mut input in self.pads.drain(..) {
-            if !input.owners.remove(session_id) {
-                pads.push(input);
+        for input in &self.pads {
+            if !input.owners.contains(session_id) {
                 continue;
             }
-            if input.owners.is_empty() {
+            if input.owners.len() == 1 {
                 plan.summary.neutralized_pads = plan.summary.neutralized_pads.saturating_add(1);
                 plan.actions.push(Action::PadReport {
                     pad: input.pad,
@@ -582,12 +599,33 @@ impl SessionInputOwnership {
             } else {
                 plan.summary.retained_shared_inputs =
                     plan.summary.retained_shared_inputs.saturating_add(1);
-                pads.push(input);
             }
         }
-        self.pads = pads;
 
         plan
+    }
+
+    fn remove_retained_shared_owners(&mut self, session_id: &str) {
+        remove_retained_shared_owner(&mut self.keys, session_id);
+        remove_retained_shared_owner(&mut self.buttons, session_id);
+        remove_retained_shared_owner(&mut self.pads, session_id);
+    }
+
+    fn confirm_session_release_action(&mut self, session_id: &str, action: &Action) {
+        match action {
+            Action::KeyUp { key, backend } => self.release_key(session_id, key, *backend),
+            Action::MouseButton {
+                button,
+                action: ButtonAction::Up,
+                backend,
+                ..
+            } => self.release_button(session_id, *button, *backend),
+            Action::PadReport { pad, report } if is_neutral_report(report) => {
+                self.release_pad(session_id, *pad, Backend::Vigem);
+                self.release_pad(session_id, *pad, Backend::Hardware);
+            }
+            _ => {}
+        }
     }
 
     fn clear(&mut self) {
@@ -696,6 +734,18 @@ fn release_owned_input<T>(
 {
     inputs.retain_mut(|input| {
         if matches_input(input) {
+            input.owners_mut().remove(session_id);
+        }
+        !input.owners().is_empty()
+    });
+}
+
+fn remove_retained_shared_owner<T>(inputs: &mut Vec<T>, session_id: &str)
+where
+    T: OwnedInputOwners,
+{
+    inputs.retain_mut(|input| {
+        if input.owners().contains(session_id) && input.owners().len() > 1 {
             input.owners_mut().remove(session_id);
         }
         !input.owners().is_empty()

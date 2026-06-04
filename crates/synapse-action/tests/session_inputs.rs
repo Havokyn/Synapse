@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use synapse_action::{ActionBackend, ActionEmitter, RecordingBackend};
+use synapse_action::{ActionBackend, ActionEmitter, ActionError, ActionHandle, RecordingBackend};
 use synapse_core::{Action, Backend, GamepadController, GamepadReport, Key, KeyCode, PadButton};
 use tokio_util::sync::CancellationToken;
 
@@ -198,6 +198,73 @@ async fn unknown_session_release_does_not_emit_global_release() {
     assert!(final_snapshot.held_keys.is_empty());
 }
 
+#[tokio::test]
+async fn failed_session_release_keeps_unreleased_input_owned() {
+    let (handle, mut action_rx) = ActionHandle::channel();
+    let session_a = handle.with_session_id(Some("session-a".to_owned()));
+    let ctrl_down = Action::KeyDown {
+        key: key("ctrl"),
+        backend: Backend::Software,
+    };
+    let shift_down = Action::KeyDown {
+        key: key("shift"),
+        backend: Backend::Software,
+    };
+
+    execute_with_ack(session_a.clone(), &mut action_rx, ctrl_down).await;
+    execute_with_ack(session_a, &mut action_rx, shift_down).await;
+    let before = handle
+        .session_inputs_snapshot()
+        .unwrap_or_else(|error| panic!("ownership before failed release should read: {error}"));
+
+    let release_handle = handle.clone();
+    let release_task =
+        tokio::spawn(async move { release_handle.release_session_inputs("session-a").await });
+    ack_next_action(
+        &mut action_rx,
+        Action::KeyUp {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        },
+        Ok(()),
+    )
+    .await;
+    ack_next_action(
+        &mut action_rx,
+        Action::KeyUp {
+            key: key("shift"),
+            backend: Backend::Software,
+        },
+        Err(ActionError::BackendUnavailable {
+            detail: "forced key-up failure".to_owned(),
+        }),
+    )
+    .await;
+
+    let error = release_task
+        .await
+        .unwrap_or_else(|error| panic!("release task should join: {error}"))
+        .expect_err("forced key-up failure should fail session release");
+    let after = handle
+        .session_inputs_snapshot()
+        .unwrap_or_else(|error| panic!("ownership after failed release should read: {error}"));
+    println!(
+        "readback=session_inputs edge=failed_release before_ownership={before:?} after_ownership={after:?} error={error:?}"
+    );
+
+    assert_eq!(
+        error.code(),
+        synapse_core::error_codes::ACTION_BACKEND_UNAVAILABLE
+    );
+    let session = after
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session-a")
+        .unwrap_or_else(|| panic!("failed release should leave session ownership for retry"));
+    assert_eq!(session.keys.len(), 1);
+    assert_eq!(session.keys[0].key, key("shift"));
+}
+
 fn key(value: &str) -> Key {
     Key {
         code: KeyCode::Named {
@@ -216,4 +283,31 @@ fn held_pad_report() -> GamepadReport {
         lt: 0.0,
         rt: 0.0,
     }
+}
+
+async fn execute_with_ack(
+    handle: ActionHandle,
+    action_rx: &mut tokio::sync::mpsc::Receiver<synapse_action::ActionMessage>,
+    action: Action,
+) {
+    let expected = action.clone();
+    let task = tokio::spawn(async move { handle.execute(action).await });
+    ack_next_action(action_rx, expected, Ok(())).await;
+    task.await
+        .unwrap_or_else(|error| panic!("action task should join: {error}"))
+        .unwrap_or_else(|error| panic!("action should succeed: {error}"));
+}
+
+async fn ack_next_action(
+    action_rx: &mut tokio::sync::mpsc::Receiver<synapse_action::ActionMessage>,
+    expected: Action,
+    result: Result<(), ActionError>,
+) {
+    let (actual, ack) = action_rx
+        .recv()
+        .await
+        .unwrap_or_else(|| panic!("expected queued action {expected:?}"));
+    assert_eq!(actual, expected);
+    ack.send(result)
+        .unwrap_or_else(|_result| panic!("action acknowledgement receiver should be open"));
 }
