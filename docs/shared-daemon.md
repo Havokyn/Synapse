@@ -71,6 +71,12 @@ both exit **4** instead of failing later inside a tool call.
   processes are temporary. Close them after the check and reread the
   process/socket table so only the intended daemon and requested user-facing
   apps remain.
+- `scripts/synapse-setup.ps1` refuses to stop/restart the shared daemon while
+  active HTTP MCP sessions, live client TCP connections, or bridge/stdio
+  children are present. This fails closed with `SYNAPSE_ACTIVE_CLIENTS_PRESENT`
+  and prints the process/socket readback. Use `-ForceRestart` only after a
+  deliberate maintenance decision; setup must not silently interrupt another
+  agent.
 - The Windows auto-start daemon task must not launch through `cmd.exe` at any
   point. `scripts/synapse-setup.ps1` writes
   `synapse-daemon-launch-hidden.vbs` and registers
@@ -126,3 +132,9 @@ clients are connected.
   `%LOCALAPPDATA%\synapse\logs\daemon-launcher.log` and the rotated
   `%LOCALAPPDATA%\synapse\logs\synapse.log.*` telemetry files for launch,
   `STORAGE_*`, or bind errors.
+- **Setup/update says `SYNAPSE_ACTIVE_CLIENTS_PRESENT`** — setup saw a live
+  daemon with active MCP sessions, established loopback client sockets, or
+  bridge/stdio children. Close the client/helper that owns the session, rerun
+  setup, and read the process/socket SoT again. If a restart is truly required
+  while clients are attached, rerun with `-ForceRestart` only after coordinating
+  a maintenance window; this flag exists to make interruption explicit.

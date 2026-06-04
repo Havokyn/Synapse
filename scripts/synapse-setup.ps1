@@ -44,6 +44,12 @@
   launched inside a Windows Job Object with kill-on-close, so Cargo/rustc
   children cannot survive if this setup process exits or is killed.
 
+.PARAMETER ForceRestart
+  Permit setup/remove to stop the shared daemon even when active HTTP MCP
+  sessions, live client TCP connections, or bridge children are present. Without
+  this explicit maintenance flag, setup fails closed instead of interrupting
+  another agent.
+
 .PARAMETER Bind
   Loopback address the daemon binds. Default 127.0.0.1:7700.
 
@@ -71,6 +77,7 @@ param(
     [string]$TokenPath   = "$env:APPDATA\synapse\token.txt",
     [string]$TaskName    = 'SynapseMcpDaemon',
     [ValidateRange(1, 1440)][int]$BuildTimeoutMinutes = 90,
+    [switch]$ForceRestart,
     [switch]$SkipClientWiring,
     [switch]$Remove,
     [switch]$Purge
@@ -729,6 +736,173 @@ function Format-SynapseMcpProcessSnapshot {
     }) -join "`n")
 }
 
+function Get-SynapseBindEndpoint {
+    param([Parameter(Mandatory=$true)][string]$Bind)
+
+    $lastColon = $Bind.LastIndexOf(':')
+    if ($lastColon -lt 1 -or $lastColon -eq ($Bind.Length - 1)) {
+        Die "SYNAPSE_BIND_PARSE_FAILED bind=$Bind remediation=use host:port, for example 127.0.0.1:7700"
+    }
+
+    $address = $Bind.Substring(0, $lastColon)
+    $portText = $Bind.Substring($lastColon + 1)
+    $port = 0
+    if (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        Die "SYNAPSE_BIND_PARSE_FAILED bind=$Bind port=$portText remediation=use a TCP port from 1 through 65535"
+    }
+
+    [pscustomobject]@{ Address = $address; Port = $port }
+}
+
+function Get-SynapseTcpClientSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Bind)
+
+    $endpoint = Get-SynapseBindEndpoint -Bind $Bind
+    @(Get-NetTCPConnection -LocalAddress $endpoint.Address -LocalPort $endpoint.Port -ErrorAction SilentlyContinue |
+        Where-Object { "$($_.State)" -ne 'Listen' } |
+        Sort-Object LocalPort, RemotePort, OwningProcess |
+        Select-Object State, LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess,
+            @{Name='OwnerName';Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}},
+            @{Name='OwnerCommandLine';Expression={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine}})
+}
+
+function Format-SynapseTcpClientSnapshot {
+    param([object[]]$Snapshot)
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        return '<none>'
+    }
+    return (($Snapshot | ForEach-Object {
+        "state=$($_.State) local=$($_.LocalAddress):$($_.LocalPort) remote=$($_.RemoteAddress):$($_.RemotePort) owner_pid=$($_.OwningProcess) owner=$($_.OwnerName) owner_cmd=$($_.OwnerCommandLine)"
+    }) -join "`n")
+}
+
+function Read-SynapseSetupTokenForRestartGuard {
+    param([Parameter(Mandatory=$true)][string]$TokenPath)
+
+    if (-not (Test-Path -LiteralPath $TokenPath)) {
+        return [pscustomobject]@{ Ok = $false; Code = 'SYNAPSE_RESTART_GUARD_TOKEN_MISSING'; Token = $null; Detail = "path=$TokenPath" }
+    }
+
+    try {
+        $raw = Get-Content -Raw -LiteralPath $TokenPath
+        $token = if ($null -eq $raw) { '' } else { $raw.Trim() }
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Code = 'SYNAPSE_RESTART_GUARD_TOKEN_READ_FAILED'; Token = $null; Detail = "path=$TokenPath error=$($_.Exception.Message)" }
+    }
+
+    if ($token.Length -lt 16) {
+        return [pscustomobject]@{ Ok = $false; Code = 'SYNAPSE_RESTART_GUARD_TOKEN_INVALID'; Token = $null; Detail = "path=$TokenPath length=$($token.Length)" }
+    }
+
+    [pscustomobject]@{ Ok = $true; Code = 'OK'; Token = $token; Detail = "path=$TokenPath length=$($token.Length)" }
+}
+
+function Read-SynapseHealthForRestartGuard {
+    param(
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$Token
+    )
+
+    try {
+        $health = Invoke-RestMethod -Uri "http://$Bind/health" -Headers @{ Authorization = "Bearer $Token" } -TimeoutSec 4
+        [pscustomobject]@{ Ok = $true; Health = $health; Error = $null }
+    } catch {
+        [pscustomobject]@{ Ok = $false; Health = $null; Error = $_.Exception.Message }
+    }
+}
+
+function Get-SynapseActiveSessionCount {
+    param([Parameter(Mandatory=$true)]$Health)
+
+    $value = $Health.subsystems.http.active_sessions
+    if ($null -eq $value) {
+        return $null
+    }
+
+    try {
+        return [int]$value
+    } catch {
+        return $null
+    }
+}
+
+function Assert-SynapseRestartAllowed {
+    param(
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$TokenPath,
+        [switch]$ForceRestart
+    )
+
+    $processes = Get-SynapseMcpProcessSnapshot
+    if ($processes.Count -eq 0) {
+        Info "Synapse restart guard reason=$Reason existing_process_count=0 verdict=clear"
+        return
+    }
+
+    $null = Get-SynapseBindEndpoint -Bind $Bind
+    $nonHttpProcesses = @($processes | Where-Object { $_.CommandLine -notmatch '(?i)--mode\s+http' })
+    $tokenRead = Read-SynapseSetupTokenForRestartGuard -TokenPath $TokenPath
+    if (-not $tokenRead.Ok) {
+        $message = "$($tokenRead.Code) reason=$Reason process_count=$($processes.Count) $($tokenRead.Detail) remediation=do not restart blindly while the daemon may have clients; repair token state or rerun with -ForceRestart after coordinating a maintenance window"
+        if ($ForceRestart) {
+            Info "FORCE_RESTART: $message"
+        } else {
+            Die $message
+        }
+    }
+
+    $activeSessions = $null
+    $healthRead = $null
+    if ($tokenRead.Ok) {
+        $healthRead = Read-SynapseHealthForRestartGuard -Bind $Bind -Token $tokenRead.Token
+        if (-not $healthRead.Ok) {
+            $message = "SYNAPSE_RESTART_GUARD_HEALTH_UNREADABLE reason=$Reason bind=$Bind error=$($healthRead.Error) remediation=do not restart blindly; repair the daemon/token or rerun with -ForceRestart after coordinating a maintenance window"
+            if ($ForceRestart) {
+                Info "FORCE_RESTART: $message"
+            } else {
+                Die $message
+            }
+        }
+    }
+
+    if ($tokenRead.Ok -and $healthRead.Ok) {
+        $activeSessions = Get-SynapseActiveSessionCount -Health $healthRead.Health
+        if ($null -eq $activeSessions) {
+            $message = "SYNAPSE_RESTART_GUARD_ACTIVE_SESSIONS_UNREADABLE reason=$Reason bind=$Bind remediation=health did not expose subsystems.http.active_sessions; do not restart blindly"
+            if ($ForceRestart) {
+                Info "FORCE_RESTART: $message"
+            } else {
+                Die $message
+            }
+        }
+    }
+
+    $tcpClients = Get-SynapseTcpClientSnapshot -Bind $Bind
+    $blockers = @()
+    if ($nonHttpProcesses.Count -gt 0) { $blockers += "non_http_synapse_processes=$($nonHttpProcesses.Count)" }
+    if ($null -ne $activeSessions -and $activeSessions -gt 0) { $blockers += "active_sessions=$activeSessions" }
+    if ($tcpClients.Count -gt 0) { $blockers += "live_tcp_clients=$($tcpClients.Count)" }
+
+    if ($blockers.Count -gt 0) {
+        $message = ("SYNAPSE_ACTIVE_CLIENTS_PRESENT reason={0} blockers={1} process_count={2} active_sessions={3} live_tcp_clients={4}`nprocesses:`n{5}`ntcp_clients:`n{6}`nremediation=wait for MCP clients to disconnect, close stale helpers first, or rerun with -ForceRestart only after coordinating a maintenance window" -f `
+            $Reason,
+            ($blockers -join ','),
+            $processes.Count,
+            ($(if ($null -eq $activeSessions) { 'unknown' } else { $activeSessions })),
+            $tcpClients.Count,
+            (Format-SynapseMcpProcessSnapshot -Snapshot $processes),
+            (Format-SynapseTcpClientSnapshot -Snapshot $tcpClients))
+        if ($ForceRestart) {
+            Info "FORCE_RESTART: $message"
+        } else {
+            Die $message
+        }
+    } else {
+        Info "Synapse restart guard reason=$Reason verdict=clear active_sessions=0 live_tcp_clients=0 process_count=$($processes.Count)"
+    }
+}
+
 function Stop-SynapseMcpProcesses {
     param(
         [Parameter(Mandatory=$true)][string]$Reason,
@@ -778,6 +952,7 @@ function Stop-SynapseMcpProcesses {
 # ---------------------------------------------------------------------------
 if ($Remove) {
     Step "Removing scheduled task '$TaskName'"
+    Assert-SynapseRestartAllowed -Reason 'remove' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask  -TaskName $TaskName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
@@ -840,6 +1015,7 @@ if (-not $SkipBuild) {
 # 3. Stop the running daemon/bridges so the .exe is not locked, then install
 # ---------------------------------------------------------------------------
 Step "Installing daemon binary -> $ExePath"
+Assert-SynapseRestartAllowed -Reason 'install_binary' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
