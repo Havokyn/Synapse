@@ -13,7 +13,7 @@ use synapse_action::{
 use synapse_core::Rect;
 use synapse_core::{
     Action, AimCurve, AimNaturalParams, Backend, ElementId, Key, KeyCode, MouseButton, MouseTarget,
-    Point,
+    Point, error_codes,
 };
 
 use crate::m1::mcp_error;
@@ -29,9 +29,12 @@ pub struct ActDragParams {
     #[serde(default = "default_drag_button")]
     #[schemars(default = "default_drag_button")]
     pub button: DragButton,
-    #[serde(default = "default_drag_curve")]
-    #[schemars(default = "default_drag_curve")]
-    pub curve: DragCurve,
+    #[serde(default = "default_drag_velocity_profile")]
+    #[schemars(default = "default_drag_velocity_profile")]
+    pub velocity_profile: DragVelocityProfile,
+    #[serde(default)]
+    #[schemars(skip)]
+    pub curve: Option<LegacyDragCurve>,
     #[serde(default = "default_drag_duration_ms")]
     #[schemars(default = "default_drag_duration_ms")]
     pub duration_ms: u32,
@@ -74,7 +77,16 @@ pub enum DragButton {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum DragCurve {
+pub enum DragVelocityProfile {
+    Natural,
+    Instant,
+    Linear,
+    EaseInOut,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyDragCurve {
     Natural,
     Instant,
     Linear,
@@ -104,7 +116,9 @@ pub enum DragModifier {
 pub struct ActDragResponse {
     pub ok: bool,
     pub button_used: DragButton,
-    pub curve_used: DragCurve,
+    pub velocity_profile_used: DragVelocityProfile,
+    pub deprecated_curve_alias_used: bool,
+    pub deprecation: Option<String>,
     pub duration_ms: u32,
     pub distance_px: f64,
     pub modifiers_used: Vec<DragModifier>,
@@ -121,11 +135,12 @@ pub async fn act_drag_with_handle(
     let from = target_point(&params.from, "from")?;
     let to = target_point(&params.to, "to")?;
     let backend = params.backend.to_backend();
+    let (velocity_profile, deprecated_curve_alias_used) = resolve_velocity_profile(&params)?;
     let action = Action::MouseDrag {
         from,
         to,
         button: params.button.to_mouse_button(),
-        curve: params.curve.to_aim_curve(),
+        curve: velocity_profile.to_aim_curve(),
         duration_ms: params.duration_ms,
         backend,
     };
@@ -145,7 +160,11 @@ pub async fn act_drag_with_handle(
     Ok(ActDragResponse {
         ok: true,
         button_used: params.button,
-        curve_used: params.curve,
+        velocity_profile_used: velocity_profile,
+        deprecated_curve_alias_used,
+        deprecation: deprecated_curve_alias_used.then(|| {
+            "act_drag.curve is a deprecated compatibility alias; use velocity_profile. Spatial paths belong in act_stroke.path.".to_owned()
+        }),
         duration_ms: params.duration_ms,
         distance_px: from.distance_to(to),
         modifiers_used: params.modifiers,
@@ -164,7 +183,7 @@ impl DragButton {
     }
 }
 
-impl DragCurve {
+impl DragVelocityProfile {
     const fn to_aim_curve(self) -> AimCurve {
         match self {
             Self::Natural => AimCurve::Natural {
@@ -173,12 +192,35 @@ impl DragCurve {
             Self::Instant => AimCurve::Instant,
             Self::Linear => AimCurve::Linear,
             Self::EaseInOut => AimCurve::EaseInOut,
-            Self::Bezier => AimCurve::Bezier {
-                p1: (0.25, 0.10),
-                p2: (0.75, 0.90),
-            },
         }
     }
+}
+
+impl LegacyDragCurve {
+    const fn to_velocity_profile(self) -> Option<DragVelocityProfile> {
+        match self {
+            Self::Natural => Some(DragVelocityProfile::Natural),
+            Self::Instant => Some(DragVelocityProfile::Instant),
+            Self::Linear => Some(DragVelocityProfile::Linear),
+            Self::EaseInOut => Some(DragVelocityProfile::EaseInOut),
+            Self::Bezier => None,
+        }
+    }
+}
+
+fn resolve_velocity_profile(
+    params: &ActDragParams,
+) -> Result<(DragVelocityProfile, bool), ErrorData> {
+    let Some(curve) = params.curve else {
+        return Ok((params.velocity_profile, false));
+    };
+    let Some(profile) = curve.to_velocity_profile() else {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_drag curve=bezier is deprecated and is not a valid velocity_profile; use act_stroke with path.kind=cubic_bezier for spatial Bezier paths, or velocity_profile=ease_in_out for point-to-point timing",
+        ));
+    };
+    Ok((profile, true))
 }
 
 impl DragBackend {
@@ -457,8 +499,8 @@ const fn default_drag_button() -> DragButton {
     DragButton::Left
 }
 
-const fn default_drag_curve() -> DragCurve {
-    DragCurve::Natural
+const fn default_drag_velocity_profile() -> DragVelocityProfile {
+    DragVelocityProfile::Natural
 }
 
 const fn default_drag_duration_ms() -> u32 {
@@ -484,18 +526,17 @@ mod tests {
     use synapse_action::ActionEmitter;
 
     use super::{
-        ActDragParams, ActDragPointTarget, ActDragTarget, DragBackend, DragButton, DragCurve,
-        DragModifier, act_drag_with_handle, event_sequence,
+        ActDragParams, ActDragPointTarget, ActDragTarget, DragBackend, DragButton, DragModifier,
+        DragVelocityProfile, LegacyDragCurve, act_drag_with_handle, event_sequence,
     };
 
     #[tokio::test]
-    async fn recording_backend_readback_exposes_all_drag_curve_variants() {
-        for (curve, expected_label) in [
-            (DragCurve::Natural, "natural_fast"),
-            (DragCurve::Instant, "instant"),
-            (DragCurve::Linear, "linear"),
-            (DragCurve::EaseInOut, "ease_in_out"),
-            (DragCurve::Bezier, "bezier"),
+    async fn recording_backend_readback_exposes_drag_velocity_profiles() {
+        for (velocity_profile, expected_label) in [
+            (DragVelocityProfile::Natural, "natural_fast"),
+            (DragVelocityProfile::Instant, "instant"),
+            (DragVelocityProfile::Linear, "linear"),
+            (DragVelocityProfile::EaseInOut, "ease_in_out"),
         ] {
             let (handle, _snapshot_handle, _emitter) = ActionEmitter::channel();
             let recording = Arc::new(synapse_action::RecordingBackend::new());
@@ -503,14 +544,15 @@ mod tests {
                 from: ActDragTarget::Point(ActDragPointTarget { x: 10, y: 20 }),
                 to: ActDragTarget::Point(ActDragPointTarget { x: 110, y: 140 }),
                 button: DragButton::Left,
-                curve,
+                velocity_profile,
+                curve: None,
                 duration_ms: 120,
                 backend: DragBackend::Software,
                 modifiers: Vec::new(),
             };
             let before = recording.events();
             println!(
-                "readback=act_drag_recording edge=curve before=curve:{curve:?} events={before:?}"
+                "readback=act_drag_recording edge=velocity_profile before=velocity_profile:{velocity_profile:?} events={before:?}"
             );
 
             let response = act_drag_with_handle(handle, Some(Arc::clone(&recording)), params)
@@ -519,12 +561,13 @@ mod tests {
             let after = recording.events();
             let sequence = event_sequence(&after);
             println!(
-                "readback=act_drag_recording edge=curve after=curve:{curve:?} sequence={sequence} distance={} result_value=ok",
+                "readback=act_drag_recording edge=velocity_profile after=velocity_profile:{velocity_profile:?} sequence={sequence} distance={} result_value=ok",
                 response.distance_px
             );
 
             assert!(response.ok);
-            assert_eq!(response.curve_used, curve);
+            assert_eq!(response.velocity_profile_used, velocity_profile);
+            assert!(!response.deprecated_curve_alias_used);
             assert_eq!(
                 sequence,
                 format!("down:left>mouse_move:screen(110,140):{expected_label}:120>up:left")
@@ -540,7 +583,8 @@ mod tests {
             from: ActDragTarget::Point(ActDragPointTarget { x: 10, y: 20 }),
             to: ActDragTarget::Point(ActDragPointTarget { x: 70, y: 80 }),
             button: DragButton::Left,
-            curve: DragCurve::Linear,
+            velocity_profile: DragVelocityProfile::Linear,
+            curve: None,
             duration_ms: 80,
             backend: DragBackend::Software,
             modifiers: vec![DragModifier::Shift],
@@ -566,5 +610,72 @@ mod tests {
             sequence,
             "key_down:shift>down:left>mouse_move:screen(70,80):linear:80>up:left>key_up:shift"
         );
+    }
+
+    #[tokio::test]
+    async fn deprecated_curve_alias_maps_non_bezier_values_to_velocity_profile() {
+        let (handle, _snapshot_handle, _emitter) = ActionEmitter::channel();
+        let recording = Arc::new(synapse_action::RecordingBackend::new());
+        let params = ActDragParams {
+            from: ActDragTarget::Point(ActDragPointTarget { x: 10, y: 20 }),
+            to: ActDragTarget::Point(ActDragPointTarget { x: 70, y: 80 }),
+            button: DragButton::Left,
+            velocity_profile: DragVelocityProfile::Natural,
+            curve: Some(LegacyDragCurve::Linear),
+            duration_ms: 80,
+            backend: DragBackend::Software,
+            modifiers: Vec::new(),
+        };
+        let response = act_drag_with_handle(handle, Some(Arc::clone(&recording)), params)
+            .await
+            .unwrap_or_else(|error| panic!("legacy act_drag curve alias should parse: {error}"));
+        let sequence = event_sequence(&recording.events());
+        println!(
+            "readback=act_drag_recording edge=legacy_curve_alias after_sequence={sequence} deprecated={} deprecation={:?}",
+            response.deprecated_curve_alias_used, response.deprecation
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.velocity_profile_used, DragVelocityProfile::Linear);
+        assert!(response.deprecated_curve_alias_used);
+        assert!(
+            response
+                .deprecation
+                .as_deref()
+                .is_some_and(|message| message.contains("velocity_profile"))
+        );
+        assert_eq!(
+            sequence,
+            "down:left>mouse_move:screen(70,80):linear:80>up:left"
+        );
+    }
+
+    #[tokio::test]
+    async fn deprecated_curve_bezier_returns_clear_error() {
+        let (handle, _snapshot_handle, _emitter) = ActionEmitter::channel();
+        let recording = Arc::new(synapse_action::RecordingBackend::new());
+        let params = ActDragParams {
+            from: ActDragTarget::Point(ActDragPointTarget { x: 10, y: 20 }),
+            to: ActDragTarget::Point(ActDragPointTarget { x: 70, y: 80 }),
+            button: DragButton::Left,
+            velocity_profile: DragVelocityProfile::Natural,
+            curve: Some(LegacyDragCurve::Bezier),
+            duration_ms: 80,
+            backend: DragBackend::Software,
+            modifiers: Vec::new(),
+        };
+        let error = act_drag_with_handle(handle, Some(Arc::clone(&recording)), params)
+            .await
+            .expect_err("legacy act_drag curve=bezier should fail closed");
+        println!("readback=act_drag_recording edge=legacy_curve_bezier after_error={error:?}");
+
+        assert!(error.message.to_string().contains("curve=bezier"));
+        assert!(
+            error
+                .message
+                .to_string()
+                .contains("act_stroke with path.kind=cubic_bezier")
+        );
+        assert!(recording.events().is_empty());
     }
 }

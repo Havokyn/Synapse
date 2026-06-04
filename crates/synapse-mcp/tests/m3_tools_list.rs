@@ -81,6 +81,7 @@ async fn m3_tools_list_snapshot_defaults_and_closed_schemas() -> anyhow::Result<
     assert_no_duplicate_names(&names)?;
 
     assert_schema_roots_closed(tools)?;
+    assert_motion_semantics_are_advertised(tools)?;
     let defaults = m3_default_readbacks(tools)?;
 
     let snapshot = json!({
@@ -150,6 +151,47 @@ fn assert_schema_roots_closed(tools: &[Value]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn assert_motion_semantics_are_advertised(tools: &[Value]) -> anyhow::Result<()> {
+    let drag = tool_by_name(tools, "act_drag")?;
+    let drag_description = drag
+        .get("description")
+        .and_then(Value::as_str)
+        .context("act_drag description missing")?;
+    ensure!(
+        drag_description.contains("velocity_profile controls timing only"),
+        "act_drag description must describe velocity_profile as timing-only: {drag_description}"
+    );
+    ensure!(
+        drag_description.contains("act_stroke.path"),
+        "act_drag description must direct spatial paths to act_stroke.path: {drag_description}"
+    );
+    ensure!(
+        value_at(drag, "inputSchema.properties.curve").is_err(),
+        "act_drag schema must not advertise deprecated curve"
+    );
+    value_at(drag, "inputSchema.properties.velocity_profile")
+        .context("act_drag schema must advertise velocity_profile")?;
+
+    let aim_description = tool_by_name(tools, "act_aim")?
+        .get("description")
+        .and_then(Value::as_str)
+        .context("act_aim description missing")?;
+    ensure!(
+        aim_description.contains("not spatial path shape"),
+        "act_aim description must not imply spatial path shaping: {aim_description}"
+    );
+
+    let stroke_description = tool_by_name(tools, "act_stroke")?
+        .get("description")
+        .and_then(Value::as_str)
+        .context("act_stroke description missing")?;
+    ensure!(
+        stroke_description.contains("explicit spatial path"),
+        "act_stroke description must advertise explicit spatial path ownership: {stroke_description}"
+    );
+    Ok(())
+}
+
 fn m3_default_readbacks(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
     let mut readbacks = Vec::new();
     read_schema_defaults(&mut readbacks, tools)?;
@@ -179,6 +221,13 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
         "act_click",
         "inputSchema.properties.hold_ms.default",
         &json!(120),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "act_drag",
+        "inputSchema.properties.velocity_profile.default",
+        &json!("natural"),
     )?;
     read_default(
         readbacks,

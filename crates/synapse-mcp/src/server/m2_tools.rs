@@ -174,7 +174,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Move the pointer toward a screen, element, or track target")]
+    #[tool(
+        description = "Move the pointer to a screen, element, or track target; style controls point-to-point timing, not spatial path shape"
+    )]
     pub async fn act_aim(
         &self,
         params: Parameters<ActAimParams>,
@@ -198,7 +200,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Drag between screen coordinates or element centers")]
+    #[tool(
+        description = "Drag in a point-to-point line between screen coordinates or element centers; velocity_profile controls timing only, use act_stroke.path for arcs, Beziers, polylines, and other spatial paths"
+    )]
     pub async fn act_drag(
         &self,
         params: Parameters<ActDragParams>,
@@ -222,7 +226,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Move or draw along a path using a timed continuous mouse stroke")]
+    #[tool(
+        description = "Move or draw along an explicit spatial path using timed continuous mouse samples"
+    )]
     pub async fn act_stroke(
         &self,
         params: Parameters<ActStrokeParams>,

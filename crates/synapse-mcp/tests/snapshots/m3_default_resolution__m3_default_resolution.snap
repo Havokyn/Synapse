@@ -85,13 +85,23 @@ expression: snapshot
     },
     {
       "actual": "natural",
-      "path": "act_drag.inputSchema.properties.curve.default",
+      "path": "act_drag.inputSchema.properties.velocity_profile.default",
       "tool": "act_drag"
+    },
+    {
+      "actual": "constant",
+      "path": "act_stroke.inputSchema.properties.velocity_profile.default",
+      "tool": "act_stroke"
     },
     {
       "actual": "natural",
       "path": "act_type.inputSchema.properties.dynamics.default",
       "tool": "act_type"
+    },
+    {
+      "actual": "constant",
+      "path": "reflex_register.inputSchema.properties.velocity_profile.default",
+      "tool": "reflex_register"
     }
   ],
   "required": [

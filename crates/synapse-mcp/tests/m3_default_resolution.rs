@@ -172,9 +172,9 @@ fn assert_no_instant_or_burst_motion_defaults(tools: &[Value]) -> anyhow::Result
     );
     ensure!(
         observed.iter().any(|row| row["tool"] == "act_drag"
-            && row["path"] == "act_drag.inputSchema.properties.curve.default"
+            && row["path"] == "act_drag.inputSchema.properties.velocity_profile.default"
             && row["actual"] == "natural"),
-        "act_drag curve default must be natural"
+        "act_drag velocity_profile default must be natural"
     );
     Ok(observed)
 }
@@ -187,7 +187,9 @@ fn collect_motion_defaults(
 ) -> anyhow::Result<()> {
     match value {
         Value::Object(map) => {
-            if (path.ends_with(".properties.curve") || path.ends_with(".properties.dynamics"))
+            if (path.ends_with(".properties.curve")
+                || path.ends_with(".properties.velocity_profile")
+                || path.ends_with(".properties.dynamics"))
                 && let Some(default) = map.get("default")
             {
                 let forbidden = default
