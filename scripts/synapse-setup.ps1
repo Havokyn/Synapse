@@ -107,6 +107,11 @@ function Quote-WindowsCommandArgument {
     return '"' + $escaped + '"'
 }
 
+function Quote-VbsString {
+    param([Parameter(Mandatory=$true)][string]$Value)
+    return '"' + ($Value -replace '"', '""') + '"'
+}
+
 function Ensure-SynapseSetupProcessJobType {
     if ('SynapseSetup.ProcessJob' -as [type]) { return }
 
@@ -613,6 +618,66 @@ fi
     }
 }
 
+function Get-SynapseMcpProcessSnapshot {
+    @(Get-CimInstance Win32_Process -Filter "Name='synapse-mcp.exe'" -ErrorAction SilentlyContinue |
+        Sort-Object ProcessId |
+        Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+}
+
+function Format-SynapseMcpProcessSnapshot {
+    param([object[]]$Snapshot)
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        return '<none>'
+    }
+    return (($Snapshot | ForEach-Object {
+        "pid=$($_.ProcessId) ppid=$($_.ParentProcessId) cmd=$($_.CommandLine)"
+    }) -join "`n")
+}
+
+function Stop-SynapseMcpProcesses {
+    param(
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $before = Get-SynapseMcpProcessSnapshot
+    Info "Synapse process stop requested reason=$Reason before_count=$($before.Count)"
+    Info ("Synapse process stop before:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $before))
+    if ($before.Count -eq 0) {
+        return
+    }
+
+    $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (-not (Test-Path $taskkillPath)) {
+        Die "SYNAPSE_TASKKILL_MISSING path=$taskkillPath remediation=repair Windows SystemRoot or run setup from a normal Windows environment"
+    }
+
+    foreach ($proc in $before) {
+        $pidValue = [int]$proc.ProcessId
+        $taskkillOutput = & $taskkillPath /pid $pidValue /t /f 2>&1
+        $taskkillExit = $LASTEXITCODE
+        if ($taskkillOutput) {
+            Info ("taskkill pid={0} exit={1}: {2}" -f $pidValue, $taskkillExit, (($taskkillOutput | Out-String).Trim()))
+        } else {
+            Info "taskkill pid=$pidValue exit=$taskkillExit"
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 250
+        $after = Get-SynapseMcpProcessSnapshot
+        if ($after.Count -eq 0) {
+            Info "Synapse process stop verified reason=$Reason after_count=0"
+            return
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    $remaining = Get-SynapseMcpProcessSnapshot
+    Die ("SYNAPSE_PROCESS_STOP_FAILED reason={0} timeout_s={1} remaining_count={2} remaining=`n{3}" -f `
+        $Reason, $TimeoutSeconds, $remaining.Count, (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
+}
+
 # ---------------------------------------------------------------------------
 # Uninstall path
 # ---------------------------------------------------------------------------
@@ -623,8 +688,7 @@ if ($Remove) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Info "Unregistered '$TaskName'."
     } else { Info "Task '$TaskName' not present." }
-    Info "Stopping any running daemon/bridge processes."
-    taskkill /im synapse-mcp.exe /f 2>$null | Out-Null
+    Stop-SynapseMcpProcesses -Reason 'remove'
     if ($Purge) {
         foreach ($p in @($DbPath, $ProfilesDir, (Split-Path -Parent $TokenPath))) {
             if (Test-Path $p) { Remove-Item -Recurse -Force $p; Info "Deleted $p" }
@@ -684,8 +748,7 @@ Step "Installing daemon binary -> $ExePath"
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
-taskkill /im synapse-mcp.exe /f 2>$null | Out-Null
-Start-Sleep -Seconds 2
+Stop-SynapseMcpProcesses -Reason 'install_binary'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ExePath) | Out-Null
 if (-not $SkipBuild) {
     if (Test-Path $ExePath) { Copy-Item $ExePath "$ExePath.bak" -Force; Info "Backed up old binary -> $ExePath.bak" }
@@ -746,14 +809,28 @@ try {
 # ---------------------------------------------------------------------------
 Step "Registering auto-start daemon task '$TaskName'"
 $launcher = Join-Path $LogDir 'synapse-daemon-launch.cmd'
+$hiddenLauncher = Join-Path $LogDir 'synapse-daemon-launch-hidden.vbs'
 $daemonLog = Join-Path $LogDir 'daemon.log'
 @"
 @echo off
 set SYNAPSE_BEARER_TOKEN=$token
 "$ExePath" --mode http --bind $Bind --db "$DbPath" --profile-dir "$ProfilesDir" --log-level info >> "$daemonLog" 2>&1
 "@ | Set-Content -Path $launcher -Encoding ascii
+$cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+$wscriptExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
+if (-not (Test-Path $wscriptExe)) {
+    Die "SYNAPSE_HIDDEN_LAUNCHER_MISSING path=$wscriptExe remediation=repair Windows Script Host or run the daemon manually with a hidden process supervisor"
+}
+$hiddenCommand = "$(Quote-WindowsCommandArgument $cmdExe) /d /s /c $(Quote-WindowsCommandArgument $launcher)"
+@"
+Option Explicit
+Dim shell, exitCode
+Set shell = CreateObject("WScript.Shell")
+exitCode = shell.Run($(Quote-VbsString $hiddenCommand), 0, True)
+WScript.Quit exitCode
+"@ | Set-Content -Path $hiddenLauncher -Encoding ascii
 
-$action  = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/c `"$launcher`""
+$action  = New-ScheduledTaskAction -Execute $wscriptExe -Argument "//B //Nologo `"$hiddenLauncher`"" -WorkingDirectory $LogDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $princ   = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

@@ -71,6 +71,13 @@ both exit **4** instead of failing later inside a tool call.
   processes are temporary. Close them after the check and reread the
   process/socket table so only the intended daemon and requested user-facing
   apps remain.
+- The Windows auto-start daemon task must not schedule `cmd.exe` directly.
+  `scripts/synapse-setup.ps1` writes `synapse-daemon-launch-hidden.vbs` and
+  registers `wscript.exe //B //Nologo` so the long-running daemon can stay
+  attached to the task without flashing a blank console window in the
+  operator's desktop session. If a visible `C:\Windows\System32\cmd.exe`
+  window appears during setup, re-run setup and read back the task action plus
+  visible-window list.
 
 ## Health
 
