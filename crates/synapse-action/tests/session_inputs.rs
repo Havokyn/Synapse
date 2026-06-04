@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use synapse_action::{ActionBackend, ActionEmitter, ActionError, ActionHandle, RecordingBackend};
 use synapse_core::{Action, Backend, GamepadController, GamepadReport, Key, KeyCode, PadButton};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -263,6 +264,75 @@ async fn failed_session_release_keeps_unreleased_input_owned() {
         .unwrap_or_else(|| panic!("failed release should leave session ownership for retry"));
     assert_eq!(session.keys.len(), 1);
     assert_eq!(session.keys[0].key, key("shift"));
+}
+
+#[tokio::test]
+async fn session_release_serializes_new_owner_until_release_action_ack() {
+    let (handle, mut action_rx) = ActionHandle::channel();
+    let ctrl_down = Action::KeyDown {
+        key: key("ctrl"),
+        backend: Backend::Software,
+    };
+    let session_a = handle.with_session_id(Some("session-a".to_owned()));
+    execute_with_ack(session_a, &mut action_rx, ctrl_down.clone()).await;
+
+    let release_handle = handle.clone();
+    let release_task =
+        tokio::spawn(async move { release_handle.release_session_inputs("session-a").await });
+    let (release_action, release_ack) = action_rx
+        .recv()
+        .await
+        .unwrap_or_else(|| panic!("expected queued session-a release action"));
+    assert_eq!(
+        release_action,
+        Action::KeyUp {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        }
+    );
+
+    let session_b = handle.with_session_id(Some("session-b".to_owned()));
+    let session_b_task = tokio::spawn(async move { session_b.execute(ctrl_down).await });
+    tokio::task::yield_now().await;
+    assert!(
+        matches!(action_rx.try_recv(), Err(TryRecvError::Empty)),
+        "session-b must not enqueue a new down until session-a cleanup ack is confirmed"
+    );
+
+    release_ack
+        .send(Ok(()))
+        .unwrap_or_else(|_result| panic!("release acknowledgement receiver should be open"));
+    let summary = release_task
+        .await
+        .unwrap_or_else(|error| panic!("release task should join: {error}"))
+        .unwrap_or_else(|error| panic!("session release should succeed: {error}"));
+    assert_eq!(summary.released_keys, 1);
+
+    ack_next_action(
+        &mut action_rx,
+        Action::KeyDown {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        },
+        Ok(()),
+    )
+    .await;
+    session_b_task
+        .await
+        .unwrap_or_else(|error| panic!("session-b task should join: {error}"))
+        .unwrap_or_else(|error| panic!("session-b keydown should succeed: {error}"));
+
+    let after = handle
+        .session_inputs_snapshot()
+        .unwrap_or_else(|error| panic!("ownership after serialized release should read: {error}"));
+    println!("readback=session_inputs edge=release_enqueue_race after_ownership={after:?}");
+    let session = after
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session-b")
+        .unwrap_or_else(|| panic!("session-b ownership should be recorded after cleanup"));
+    assert_eq!(session.keys.len(), 1);
+    assert_eq!(session.keys[0].key, key("ctrl"));
 }
 
 fn key(value: &str) -> Key {

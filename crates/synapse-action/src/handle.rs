@@ -8,7 +8,7 @@ use synapse_core::{
     Action, Backend, ButtonAction, ComboInput, ComboStep, GamepadController, GamepadReport, Key,
     MouseButton, PadId,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
 use crate::{ActionError, ActionResult, validate_action};
 
@@ -35,6 +35,7 @@ pub struct ActionHandle {
     combo_scheduler: Arc<Mutex<Option<Arc<dyn ActionComboScheduler>>>>,
     session_id: Option<String>,
     session_inputs: Arc<Mutex<SessionInputOwnership>>,
+    session_input_gate: Arc<AsyncMutex<()>>,
 }
 
 impl std::fmt::Debug for ActionHandle {
@@ -54,6 +55,7 @@ impl ActionHandle {
             combo_scheduler: Arc::new(Mutex::new(None)),
             session_id: None,
             session_inputs: Arc::new(Mutex::new(SessionInputOwnership::default())),
+            session_input_gate: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -78,6 +80,7 @@ impl ActionHandle {
                 combo_scheduler: Arc::new(Mutex::new(None)),
                 session_id: None,
                 session_inputs: Arc::new(Mutex::new(SessionInputOwnership::default())),
+                session_input_gate: Arc::new(AsyncMutex::new(())),
             },
             rx,
             safety_rx,
@@ -92,6 +95,7 @@ impl ActionHandle {
             combo_scheduler: Arc::clone(&self.combo_scheduler),
             session_id,
             session_inputs: Arc::clone(&self.session_inputs),
+            session_input_gate: Arc::clone(&self.session_input_gate),
         }
     }
 
@@ -128,11 +132,16 @@ impl ActionHandle {
             .await
     }
 
-    async fn execute_unattributed(&self, action: Action) -> ActionResult<()> {
-        self.execute_with_owner(action, None).await
+    async fn execute_with_owner(
+        &self,
+        action: Action,
+        session_id: Option<String>,
+    ) -> ActionResult<()> {
+        let _session_input_gate = self.session_input_gate.lock().await;
+        self.execute_with_owner_gated(action, session_id).await
     }
 
-    async fn execute_with_owner(
+    async fn execute_with_owner_gated(
         &self,
         action: Action,
         session_id: Option<String>,
@@ -243,6 +252,7 @@ impl ActionHandle {
         &self,
         session_id: &str,
     ) -> ActionResult<SessionReleaseSummary> {
+        let _session_input_gate = self.session_input_gate.lock().await;
         let plan = self
             .session_inputs
             .lock()
@@ -258,7 +268,7 @@ impl ActionHandle {
             })?;
         let mut first_error = None;
         for action in plan.actions {
-            match self.execute_unattributed(action.clone()).await {
+            match self.execute_with_owner_gated(action.clone(), None).await {
                 Ok(()) => {
                     if let Err(error) = self.confirm_session_release_action(session_id, &action)
                         && first_error.is_none()
