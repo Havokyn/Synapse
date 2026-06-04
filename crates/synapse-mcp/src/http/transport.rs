@@ -10,9 +10,11 @@ use axum::{
     routing::get,
 };
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService,
+    session::{SessionState, SessionStore, SessionStoreError, local::LocalSessionManager},
 };
 use synapse_core::Health;
+use synapse_storage::{Db, cf};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +29,7 @@ use crate::{
 };
 
 type McpHttpService = StreamableHttpService<SynapseService, LocalSessionManager>;
+const MCP_SESSION_STORE_PREFIX: &str = "mcp/session/v1/";
 
 #[derive(Clone)]
 struct HttpState {
@@ -239,8 +242,10 @@ fn streamable_service(
     shutdown_cancel: &CancellationToken,
     service: SynapseService,
 ) -> anyhow::Result<(McpHttpService, Arc<LocalSessionManager>)> {
-    let config = StreamableHttpServerConfig::default()
+    let session_store = Arc::new(SynapseMcpSessionStore::new(session_store_db(&service)?));
+    let mut config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown_cancel.child_token());
+    config.session_store = Some(session_store);
     let mut session_manager = LocalSessionManager::default();
     session_manager.session_config =
         session::load_session_config().context("load HTTP session config")?;
@@ -251,6 +256,84 @@ fn streamable_service(
         config,
     );
     Ok((service, session_manager))
+}
+
+fn session_store_db(service: &SynapseService) -> anyhow::Result<Arc<Db>> {
+    let m3_handle = service.m3_state_handle();
+    let mut state = m3_handle.lock().map_err(|_poisoned| {
+        anyhow::anyhow!("m3 service state lock poisoned during session-store setup")
+    })?;
+    state
+        .ensure_storage()
+        .context("open storage for HTTP MCP session store")
+}
+
+#[derive(Clone)]
+struct SynapseMcpSessionStore {
+    db: Arc<Db>,
+}
+
+impl SynapseMcpSessionStore {
+    fn new(db: Arc<Db>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for SynapseMcpSessionStore {
+    async fn load(&self, session_id: &str) -> Result<Option<SessionState>, SessionStoreError> {
+        let key = mcp_session_store_key(session_id);
+        let rows = self
+            .db
+            .scan_cf_prefix(cf::CF_KV, &key)
+            .map_err(session_store_error)?;
+        let Some((_key, value)) = rows.into_iter().find(|(row_key, _value)| row_key == &key) else {
+            return Ok(None);
+        };
+        let state =
+            synapse_storage::decode_json::<SessionState>(&value).map_err(session_store_error)?;
+        tracing::info!(
+            code = "MCP_HTTP_SESSION_STORE_LOAD",
+            session_id,
+            "loaded MCP HTTP session state from CF_KV"
+        );
+        Ok(Some(state))
+    }
+
+    async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
+        let key = mcp_session_store_key(session_id);
+        let encoded = synapse_storage::encode_json(state).map_err(session_store_error)?;
+        self.db
+            .put_batch_pressure_bypass(cf::CF_KV, [(key, encoded)])
+            .map_err(session_store_error)?;
+        tracing::info!(
+            code = "MCP_HTTP_SESSION_STORE_WRITE",
+            session_id,
+            "persisted MCP HTTP session state to CF_KV"
+        );
+        Ok(())
+    }
+
+    async fn delete(&self, session_id: &str) -> Result<(), SessionStoreError> {
+        let key = mcp_session_store_key(session_id);
+        self.db
+            .delete_batch(cf::CF_KV, [key])
+            .map_err(session_store_error)?;
+        tracing::info!(
+            code = "MCP_HTTP_SESSION_STORE_DELETE",
+            session_id,
+            "deleted MCP HTTP session state from CF_KV"
+        );
+        Ok(())
+    }
+}
+
+fn mcp_session_store_key(session_id: &str) -> Vec<u8> {
+    format!("{MCP_SESSION_STORE_PREFIX}{session_id}").into_bytes()
+}
+
+fn session_store_error(error: synapse_storage::StorageError) -> SessionStoreError {
+    Box::new(error)
 }
 
 fn http_service(
@@ -360,4 +443,83 @@ async fn wait_for_shutdown_signal(phase: &'static str) -> anyhow::Result<()> {
     tokio::signal::ctrl_c()
         .await
         .with_context(|| format!("wait for ctrl-c {phase}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyhow::Context as _;
+    use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
+    use synapse_core::SCHEMA_VERSION;
+
+    use super::*;
+
+    fn test_session_state(name: &str) -> SessionState {
+        SessionState::new(InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new(name, "0.0.0-test"),
+        ))
+    }
+
+    fn test_store_error(error: SessionStoreError) -> anyhow::Error {
+        anyhow::anyhow!("{error}")
+    }
+
+    #[tokio::test]
+    async fn synapse_mcp_session_store_round_trips_exact_keys_and_deletes() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
+        let store = SynapseMcpSessionStore::new(db);
+
+        assert!(
+            store
+                .load("codex-session")
+                .await
+                .map_err(test_store_error)?
+                .is_none(),
+            "unknown session should not load"
+        );
+
+        let state = test_session_state("codex-test");
+        let neighboring_state = test_session_state("codex-test-neighbor");
+        store
+            .store("codex-session", &state)
+            .await
+            .map_err(test_store_error)?;
+        store
+            .store("codex-session-extra", &neighboring_state)
+            .await
+            .map_err(test_store_error)?;
+
+        let loaded = store
+            .load("codex-session")
+            .await
+            .map_err(test_store_error)?
+            .context("stored session should load")?;
+        assert_eq!(loaded.initialize_params, state.initialize_params);
+
+        store
+            .delete("codex-session")
+            .await
+            .map_err(test_store_error)?;
+        assert!(
+            store
+                .load("codex-session")
+                .await
+                .map_err(test_store_error)?
+                .is_none(),
+            "deleted session should not load"
+        );
+        assert!(
+            store
+                .load("codex-session-extra")
+                .await
+                .map_err(test_store_error)?
+                .is_some(),
+            "deleting one session should not delete a prefix-sharing neighbor"
+        );
+
+        Ok(())
+    }
 }
