@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     http::sse::SseState,
     m1::{
-        FindParams, FindResponse, M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams,
+        CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse, FindParams,
+        FindResponse, M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams,
         SetCaptureTargetResponse, SetPerceptionModeParams, SetPerceptionModeResponse,
         SharedM1State, apply_profile_runtime_config_in_state, build_find_input, current_input,
         empty_input_schema, enrich_input_with_browser_ocr, enrich_input_with_cdp,

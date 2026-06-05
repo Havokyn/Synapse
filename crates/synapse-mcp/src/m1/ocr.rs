@@ -213,9 +213,9 @@ fn ocr_result_from_text_regions(
         words: regions
             .into_iter()
             .map(|word| OcrWord {
+                confidence: identifier_aware_confidence(&word.text, word.confidence),
                 text: word.text,
                 bbox: word.bbox,
-                confidence: normalize_confidence(word.confidence),
             })
             .collect(),
         confidence,
@@ -230,10 +230,53 @@ fn aggregate_confidence(regions: &[TextRegion]) -> f32 {
     }
     let sum = regions
         .iter()
-        .map(|word| normalize_confidence(word.confidence))
+        .map(|word| identifier_aware_confidence(&word.text, word.confidence))
         .sum::<f32>();
     let count = u16::try_from(regions.len()).unwrap_or(u16::MAX);
     sum / f32::from(count)
+}
+
+fn identifier_aware_confidence(text: &str, confidence: f32) -> f32 {
+    let confidence = normalize_confidence(confidence);
+    if is_ambiguous_identifier_token(text) {
+        confidence.min(AMBIGUOUS_IDENTIFIER_CONFIDENCE_CAP)
+    } else {
+        confidence
+    }
+}
+
+const AMBIGUOUS_IDENTIFIER_CONFIDENCE_CAP: f32 = 0.74;
+
+fn is_ambiguous_identifier_token(text: &str) -> bool {
+    let token = text.trim_matches(|ch: char| !identifier_char(ch));
+    if token.len() < 2 || !token.chars().any(ambiguous_identifier_char) {
+        return false;
+    }
+    let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+    let has_separator = token.chars().any(identifier_separator);
+    let lower = token.to_ascii_lowercase();
+    let has_ambiguous_pair = [
+        "v1", "vl", "vi", "i1", "l1", "1l", "1i", "o0", "0o", "ol", "lo",
+    ]
+    .iter()
+    .any(|pair| lower.contains(pair));
+    has_digit || has_separator || has_ambiguous_pair || lower == "vl" || lower == "v1"
+}
+
+const fn identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '-' | '_' | '.' | ':' | '/' | '\\' | '|' | '[' | ']' | '(' | ')'
+        )
+}
+
+const fn identifier_separator(ch: char) -> bool {
+    matches!(ch, '-' | '_' | '.' | ':' | '/' | '\\' | '|')
+}
+
+const fn ambiguous_identifier_char(ch: char) -> bool {
+    matches!(ch, '0' | 'O' | 'o' | '1' | 'I' | 'l' | '|' | 'v' | 'V')
 }
 
 const fn normalize_confidence(confidence: f32) -> f32 {

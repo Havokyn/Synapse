@@ -1,5 +1,6 @@
 use super::{
-    ErrorData, FindParams, FindResponse, Health, Json, ObserveParams, Parameters, ReadTextParams,
+    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse, ErrorData,
+    FindParams, FindResponse, Health, Json, ObserveParams, Parameters, ReadTextParams,
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
     SetPerceptionModeResponse, SynapseService, empty_input_schema, mcp_error, observe_include,
     observe_input, populate_audio_summary, populate_clipboard_summary,
@@ -8,33 +9,33 @@ use super::{
     tool_router,
 };
 
-#[cfg(windows)]
 use std::{
     path::{Path, PathBuf},
-    time::Instant,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
+use std::time::Instant;
+
+#[cfg(windows)]
 use chrono::{DateTime, Utc};
+use image::{DynamicImage, ImageFormat, RgbaImage};
 #[cfg(windows)]
 use image::{GrayImage, Luma};
 #[cfg(windows)]
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
 use sha2::{Digest as _, Sha256};
 use synapse_action::{BackendResolutionPolicy, ResolvedBackend, VigemBackend};
 use synapse_core::{
-    HudFieldError, HudReadings, InputBackendCapability, InputBackendDiagnostics, OcrResult,
-    Profile, error_codes,
+    ForegroundContext, HudFieldError, HudReadings, InputBackendCapability, InputBackendDiagnostics,
+    OcrResult, Profile, Rect, error_codes,
 };
 use synapse_perception::ObservationAssembler;
 #[cfg(windows)]
 use synapse_storage::{cf, decode_json, encode_json};
 
 #[cfg(windows)]
-use synapse_core::{
-    HudExtractor, HudFieldSpec, HudReading, OcrBackend, Point, Rect, SCHEMA_VERSION,
-};
+use synapse_core::{HudExtractor, HudFieldSpec, HudReading, OcrBackend, Point, SCHEMA_VERSION};
 #[cfg(windows)]
 use synapse_perception::{
     FieldExtractionRequest, HudTemplate, OcrProvider, PerceptionError, PerceptionResult,
@@ -171,6 +172,41 @@ impl SynapseService {
         self.read_text_request_with_cache(request).map(Json)
     }
 
+    #[tool(
+        description = "Capture the current foreground window or explicit screen region to a caller-specified PNG/JPEG file"
+    )]
+    pub async fn capture_screenshot(
+        &self,
+        params: Parameters<CaptureScreenshotParams>,
+    ) -> Result<Json<CaptureScreenshotResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "capture_screenshot",
+            "tool.invocation kind=capture_screenshot"
+        );
+        let foreground = if params.0.region.is_some() {
+            synapse_a11y::current_foreground_context().ok()
+        } else {
+            Some(synapse_a11y::current_foreground_context().map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!("capture_screenshot could not resolve the foreground window: {error}"),
+                )
+            })?)
+        };
+        let region = params
+            .0
+            .region
+            .or_else(|| foreground.as_ref().map(|context| context.window_bounds))
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::CAPTURE_TARGET_INVALID,
+                    "capture_screenshot requires a region when no foreground window is available",
+                )
+            })?;
+        capture_screenshot_to_file(&params.0, region, foreground).map(Json)
+    }
+
     #[tool(description = "Set the active capture target")]
     pub async fn set_capture_target(
         &self,
@@ -198,6 +234,285 @@ impl SynapseService {
         let mut state = self.m1_state()?;
         set_perception_mode_in_state(&mut state, &params.0).map(Json)
     }
+}
+
+fn capture_screenshot_to_file(
+    params: &CaptureScreenshotParams,
+    region: Rect,
+    foreground: Option<ForegroundContext>,
+) -> Result<CaptureScreenshotResponse, ErrorData> {
+    validate_screenshot_region(region)?;
+    let output_path = screenshot_output_path(&params.path)?;
+    let format = screenshot_format_from_path(&output_path)?;
+    ensure_screenshot_path_available(&output_path, params.overwrite)?;
+    let captured = synapse_capture::screen_region_to_bgra_bitmap(region).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("capture_screenshot failed for region {region:?}: {error}"),
+        )
+    })?;
+    let bitmap_sha256 = sha256_hex(&captured.bytes);
+    let temp_path = screenshot_temp_path(&output_path);
+    if temp_path.try_exists().map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "capture_screenshot temp path existence check failed for {}: {error}",
+                temp_path.display()
+            ),
+        )
+    })? {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "capture_screenshot temp path already exists: {}",
+                temp_path.display()
+            ),
+        ));
+    }
+    save_screenshot_bitmap(&captured, &temp_path, format)?;
+    install_screenshot_file(&temp_path, &output_path, params.overwrite)?;
+    let metadata = std::fs::metadata(&output_path).map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!(
+                "capture_screenshot metadata readback failed for {}: {error}",
+                output_path.display()
+            ),
+        )
+    })?;
+    if metadata.len() == 0 {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "capture_screenshot wrote an empty file: {}",
+                output_path.display()
+            ),
+        ));
+    }
+    Ok(CaptureScreenshotResponse {
+        path: output_path.to_string_lossy().into_owned(),
+        format,
+        capture_backend: "gdi_screen_region_bgra".to_owned(),
+        region: captured.region,
+        width: captured.width,
+        height: captured.height,
+        bytes_written: metadata.len(),
+        bitmap_sha256,
+        foreground,
+    })
+}
+
+fn validate_screenshot_region(region: Rect) -> Result<(), ErrorData> {
+    if region.w <= 0 || region.h <= 0 {
+        return Err(mcp_error(
+            error_codes::CAPTURE_TARGET_INVALID,
+            format!(
+                "capture_screenshot region must be non-empty: bbox=({}, {}, {}, {})",
+                region.x, region.y, region.w, region.h
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn screenshot_output_path(raw_path: &str) -> Result<PathBuf, ErrorData> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "capture_screenshot path must be a non-empty absolute file path",
+        ));
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "capture_screenshot path must be absolute: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(path)
+}
+
+fn screenshot_format_from_path(path: &Path) -> Result<CaptureScreenshotFormat, ErrorData> {
+    let Some(extension) = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "capture_screenshot path must end in .png, .jpg, or .jpeg: {}",
+                path.display()
+            ),
+        ));
+    };
+    match extension.as_str() {
+        "png" => Ok(CaptureScreenshotFormat::Png),
+        "jpg" | "jpeg" => Ok(CaptureScreenshotFormat::Jpeg),
+        other => Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "capture_screenshot unsupported file extension .{other}; expected .png, .jpg, or .jpeg"
+            ),
+        )),
+    }
+}
+
+fn ensure_screenshot_path_available(path: &Path, overwrite: bool) -> Result<(), ErrorData> {
+    if path.try_exists().map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!(
+                "capture_screenshot output path existence check failed for {}: {error}",
+                path.display()
+            ),
+        )
+    })? {
+        if path.is_dir() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "capture_screenshot output path is a directory: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if !overwrite {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "capture_screenshot output file already exists and overwrite=false: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            mcp_error(
+                error_codes::STORAGE_WRITE_FAILED,
+                format!(
+                    "capture_screenshot failed to create parent directory {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn save_screenshot_bitmap(
+    captured: &synapse_capture::CapturedBgraBitmap,
+    path: &Path,
+    format: CaptureScreenshotFormat,
+) -> Result<(), ErrorData> {
+    let expected_len = usize::try_from(captured.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(captured.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::CAPTURE_TARGET_INVALID,
+                format!(
+                    "capture_screenshot bitmap dimensions overflow: {}x{}",
+                    captured.width, captured.height
+                ),
+            )
+        })?;
+    if captured.bytes.len() != expected_len {
+        return Err(mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!(
+                "capture_screenshot BGRA byte length mismatch: expected {expected_len}, got {}",
+                captured.bytes.len()
+            ),
+        ));
+    }
+    let mut rgba = captured.bytes.clone();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let image = RgbaImage::from_raw(captured.width, captured.height, rgba).ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!(
+                "capture_screenshot could not create image buffer from {}x{} bitmap",
+                captured.width, captured.height
+            ),
+        )
+    })?;
+    let result = match format {
+        CaptureScreenshotFormat::Png => image.save_with_format(path, ImageFormat::Png),
+        CaptureScreenshotFormat::Jpeg => DynamicImage::ImageRgba8(image)
+            .to_rgb8()
+            .save_with_format(path, ImageFormat::Jpeg),
+    };
+    result.map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "capture_screenshot failed to encode {}: {error}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn install_screenshot_file(
+    temp_path: &Path,
+    output_path: &Path,
+    overwrite: bool,
+) -> Result<(), ErrorData> {
+    if overwrite && output_path.exists() {
+        std::fs::remove_file(output_path).map_err(|error| {
+            let _ = std::fs::remove_file(temp_path);
+            mcp_error(
+                error_codes::STORAGE_WRITE_FAILED,
+                format!(
+                    "capture_screenshot failed to replace existing file {}: {error}",
+                    output_path.display()
+                ),
+            )
+        })?;
+    }
+    std::fs::rename(temp_path, output_path).map_err(|error| {
+        let _ = std::fs::remove_file(temp_path);
+        mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "capture_screenshot failed to move {} to {}: {error}",
+                temp_path.display(),
+                output_path.display()
+            ),
+        )
+    })
+}
+
+fn screenshot_temp_path(output_path: &Path) -> PathBuf {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let file_name = output_path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "capture".into());
+    output_path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        now_ns
+    ))
 }
 
 impl SynapseService {
@@ -616,13 +931,11 @@ fn elapsed_ms_u64(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-#[cfg(windows)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex_encode(&digest)
 }
 
-#[cfg(windows)]
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));

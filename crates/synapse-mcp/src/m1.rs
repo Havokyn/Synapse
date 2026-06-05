@@ -272,6 +272,38 @@ pub struct ReadTextParams {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CaptureScreenshotParams {
+    pub path: String,
+    #[serde(default)]
+    pub region: Option<Rect>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureScreenshotResponse {
+    pub path: String,
+    pub format: CaptureScreenshotFormat,
+    pub capture_backend: String,
+    pub region: Rect,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_written: u64,
+    pub bitmap_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundContext>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureScreenshotFormat {
+    Png,
+    Jpeg,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetCaptureTargetParams {
     pub target: CaptureTargetParam,
     #[serde(default)]
@@ -479,7 +511,7 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
 const BROWSER_OCR_CHROME_TOP_PX: i32 = 96;
 const BROWSER_OCR_TILE_HEIGHT_PX: i32 = 600;
 const BROWSER_OCR_MAX_TILES: usize = 8;
-const OCR_RUNTIME_PREFIX: &str = "0c0c";
+const OCR_RUNTIME_RECT_PREFIX: &str = "0c0c01";
 
 /// Recovers browser page text through screen OCR when CDP did not yield a DOM
 /// tree. This is the degraded leg of the #687 ladder: it creates queryable text
@@ -573,7 +605,7 @@ fn should_attempt_browser_ocr(input: &ObservationInput) -> bool {
     if input.web_path != Some(WebPerceptionPath::UiaOnly) {
         return false;
     }
-    if has_chromium_renderer_uia_content(input) {
+    if has_chromium_main_pane_uia_content(input) {
         return false;
     }
     input.cdp.as_ref().is_some_and(|diagnostics| {
@@ -584,11 +616,11 @@ fn should_attempt_browser_ocr(input: &ObservationInput) -> bool {
     })
 }
 
-fn has_chromium_renderer_uia_content(input: &ObservationInput) -> bool {
+fn has_chromium_main_pane_uia_content(input: &ObservationInput) -> bool {
     if !synapse_a11y::is_chromium_family(&input.foreground.process_name) {
         return false;
     }
-    let Some(content_region) = browser_content_region(input.foreground.window_bounds) else {
+    let Some(main_region) = browser_main_pane_region(input.foreground.window_bounds) else {
         return false;
     };
     input.elements.iter().any(|node| {
@@ -599,13 +631,22 @@ fn has_chromium_renderer_uia_content(input: &ObservationInput) -> bool {
         {
             return false;
         }
-        if node.bbox.w <= 0 || node.bbox.h <= 0 || !rects_overlap(node.bbox, content_region) {
+        if node.bbox.w <= 0 || node.bbox.h <= 0 || !rects_overlap(node.bbox, main_region) {
             return false;
         }
         let role = node.role.to_ascii_lowercase();
         matches!(
             role.as_str(),
-            "button" | "document" | "edit" | "heading" | "hyperlink" | "link" | "text"
+            "button"
+                | "cell"
+                | "data_item"
+                | "edit"
+                | "heading"
+                | "hyperlink"
+                | "link"
+                | "list_item"
+                | "row"
+                | "text"
         ) && (!node.name.trim().is_empty()
             || node
                 .value
@@ -651,14 +692,15 @@ fn browser_ocr_nodes(
         .enumerate()
         .map(|(index, word)| {
             let trimmed = word.text.trim().to_owned();
+            let bbox = word.bbox;
             AccessibleNode {
-                element_id: browser_ocr_element_id(hwnd, index),
+                element_id: browser_ocr_element_id(hwnd, bbox, index),
                 parent: None,
                 name: trimmed,
                 role: "text".to_owned(),
                 automation_id: Some(format!("ocr:word:{index}")),
                 value: None,
-                bbox: word.bbox,
+                bbox,
                 enabled: true,
                 focused: false,
                 patterns: Vec::new(),
@@ -669,8 +711,44 @@ fn browser_ocr_nodes(
         .collect()
 }
 
-fn browser_ocr_element_id(hwnd: i64, index: usize) -> ElementId {
-    synapse_core::element_id(hwnd, &format!("{OCR_RUNTIME_PREFIX}{index:012x}"))
+fn browser_ocr_element_id(hwnd: i64, bbox: Rect, index: usize) -> ElementId {
+    synapse_core::element_id(
+        hwnd,
+        &format!(
+            "{OCR_RUNTIME_RECT_PREFIX}{:08x}{:08x}{:08x}{:08x}{index:08x}",
+            bbox.x.cast_unsigned(),
+            bbox.y.cast_unsigned(),
+            bbox.w.cast_unsigned(),
+            bbox.h.cast_unsigned()
+        ),
+    )
+}
+
+pub(crate) fn browser_ocr_rect_from_element_id(element_id: &ElementId) -> Option<Rect> {
+    let parts = element_id.parts().ok()?;
+    browser_ocr_rect_from_runtime_id(&parts.runtime_id_hex)
+}
+
+pub(crate) fn is_browser_ocr_element_id(element_id: &ElementId) -> bool {
+    element_id
+        .parts()
+        .is_ok_and(|parts| parts.runtime_id_hex.starts_with(OCR_RUNTIME_RECT_PREFIX))
+}
+
+fn browser_ocr_rect_from_runtime_id(runtime_id_hex: &str) -> Option<Rect> {
+    let encoded = runtime_id_hex.strip_prefix(OCR_RUNTIME_RECT_PREFIX)?;
+    if encoded.len() < 32 {
+        return None;
+    }
+    let x = i32_from_hex_u32(&encoded[0..8])?;
+    let y = i32_from_hex_u32(&encoded[8..16])?;
+    let w = i32_from_hex_u32(&encoded[16..24])?;
+    let h = i32_from_hex_u32(&encoded[24..32])?;
+    (w > 0 && h > 0).then_some(Rect { x, y, w, h })
+}
+
+fn i32_from_hex_u32(raw: &str) -> Option<i32> {
+    u32::from_str_radix(raw, 16).ok().map(u32::cast_signed)
 }
 
 fn browser_content_region(window_bounds: Rect) -> Option<Rect> {
@@ -688,6 +766,20 @@ fn browser_content_region(window_bounds: Rect) -> Option<Rect> {
         y: window_bounds.y.saturating_add(top_inset),
         w: window_bounds.w,
         h: height,
+    })
+}
+
+fn browser_main_pane_region(window_bounds: Rect) -> Option<Rect> {
+    let content = browser_content_region(window_bounds)?;
+    if content.w <= 1 {
+        return Some(content);
+    }
+    let left_inset = (content.w / 4).clamp(240, 720).min(content.w - 1);
+    Some(Rect {
+        x: content.x.saturating_add(left_inset),
+        y: content.y,
+        w: content.w.saturating_sub(left_inset),
+        h: content.h,
     })
 }
 
@@ -1416,7 +1508,16 @@ mod tests {
                 .parts()
                 .expect("OCR element id parses")
                 .runtime_id_hex
-                .starts_with(OCR_RUNTIME_PREFIX)
+                .starts_with("0c0c")
+        );
+        assert_eq!(
+            browser_ocr_rect_from_element_id(&input.elements[0].element_id),
+            Some(Rect {
+                x: 120,
+                y: 180,
+                w: 92,
+                h: 24,
+            })
         );
     }
 
@@ -1488,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_ocr_skips_when_renderer_uia_content_is_present() {
+    fn browser_ocr_skips_when_main_pane_uia_content_is_present() {
         let mut input = chromium_ocr_input();
         input.elements.push(AccessibleNode {
             element_id: synapse_core::element_id(0x2200, "0000002a00000042"),
@@ -1498,7 +1599,7 @@ mod tests {
             automation_id: Some("probe-button".to_owned()),
             value: None,
             bbox: Rect {
-                x: 40,
+                x: 420,
                 y: 180,
                 w: 320,
                 h: 34,
@@ -1511,12 +1612,44 @@ mod tests {
         });
 
         println!(
-            "readback=browser_ocr edge=renderer_uia after_has_content:{} after_should_ocr:{}",
-            has_chromium_renderer_uia_content(&input),
+            "readback=browser_ocr edge=main_pane_uia after_has_content:{} after_should_ocr:{}",
+            has_chromium_main_pane_uia_content(&input),
             should_attempt_browser_ocr(&input)
         );
-        assert!(has_chromium_renderer_uia_content(&input));
+        assert!(has_chromium_main_pane_uia_content(&input));
         assert!(!should_attempt_browser_ocr(&input));
+    }
+
+    #[test]
+    fn browser_ocr_runs_when_only_sidebar_uia_content_is_present() {
+        let mut input = chromium_ocr_input();
+        input.elements.push(AccessibleNode {
+            element_id: synapse_core::element_id(0x2200, "0000002a00000043"),
+            parent: None,
+            name: "Navigation Item".to_owned(),
+            role: "link".to_owned(),
+            automation_id: Some("sidebar-link".to_owned()),
+            value: None,
+            bbox: Rect {
+                x: 40,
+                y: 180,
+                w: 220,
+                h: 34,
+            },
+            enabled: true,
+            focused: false,
+            patterns: vec![synapse_core::UiaPattern::Invoke],
+            children_count: 0,
+            depth: 2,
+        });
+
+        println!(
+            "readback=browser_ocr edge=sidebar_only after_has_content:{} after_should_ocr:{}",
+            has_chromium_main_pane_uia_content(&input),
+            should_attempt_browser_ocr(&input)
+        );
+        assert!(!has_chromium_main_pane_uia_content(&input));
+        assert!(should_attempt_browser_ocr(&input));
     }
 
     #[test]

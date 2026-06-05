@@ -39,7 +39,7 @@ pub(super) async fn execute_element_click(
     timing: DoubleClickTiming,
     started: Instant,
 ) -> Result<ActClickResponse, ErrorData> {
-    if !params.use_invoke_pattern {
+    if element_is_coordinate_only(&element.element_id) || !params.use_invoke_pattern {
         let screen_point = element_center(&element.element_id)?;
         trace_element_click_outcome(element, 0, "coordinate_direct", Some(screen_point));
         let actions = coordinate_click_actions(params, screen_point);
@@ -220,11 +220,15 @@ async fn post_element_window_message_click(
 
 #[cfg(windows)]
 fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorData> {
-    let rect = synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
-        action_error_to_mcp(&ActionError::ElementNotResolved {
-            detail: format!("act_click element {element_id} could not be resolved: {err}"),
-        })
-    })?;
+    let rect = if let Some(rect) = browser_ocr_rect_or_error(element_id)? {
+        rect
+    } else {
+        synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
+            action_error_to_mcp(&ActionError::ElementNotResolved {
+                detail: format!("act_click element {element_id} could not be resolved: {err}"),
+            })
+        })?
+    };
 
     if rect.w <= 0 || rect.h <= 0 {
         return Err(action_error_to_mcp(&ActionError::TargetInvalid {
@@ -248,6 +252,23 @@ fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorDa
     })
 }
 
+#[cfg(windows)]
+fn browser_ocr_rect_or_error(
+    element_id: &synapse_core::ElementId,
+) -> Result<Option<synapse_core::Rect>, ErrorData> {
+    match crate::m1::browser_ocr_rect_from_element_id(element_id) {
+        Some(rect) => Ok(Some(rect)),
+        None if crate::m1::is_browser_ocr_element_id(element_id) => {
+            Err(action_error_to_mcp(&ActionError::TargetInvalid {
+                detail: format!(
+                    "act_click browser OCR element {element_id} does not contain a valid non-empty bbox"
+                ),
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(not(windows))]
 fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorData> {
     Err(action_error_to_mcp(&ActionError::BackendUnavailable {
@@ -255,6 +276,10 @@ fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorDa
             "act_click element target {element_id} requires Windows UI Automation bbox resolution"
         ),
     }))
+}
+
+fn element_is_coordinate_only(element_id: &synapse_core::ElementId) -> bool {
+    crate::m1::is_browser_ocr_element_id(element_id)
 }
 
 fn trace_element_click_outcome(

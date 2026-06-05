@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use synapse_action::{ActionBackend, ActionEmitter, RecordingBackend};
-use synapse_core::{Backend, error_codes};
+use synapse_action::{ActionBackend, ActionEmitter, RecordedInput, RecordingBackend};
+use synapse_core::{Backend, MouseTarget, Point, error_codes};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -118,6 +118,116 @@ async fn element_click_rejects_non_mouse_element_transports_before_delivery() {
         cancel.cancel();
         let _ = join.await;
     }
+}
+
+#[tokio::test]
+async fn browser_ocr_element_click_uses_coordinate_route_even_when_invoke_default_is_enabled() {
+    let cancel = CancellationToken::new();
+    let action_backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
+    let (handle, _snapshot_handle, join) =
+        ActionEmitter::spawn_with_backend(cancel.clone(), action_backend);
+    let recording = Arc::new(RecordingBackend::new());
+    let before = recording.events();
+    let element_id =
+        synapse_core::ElementId::parse("0x1000:0c0c010000000c00000022000000500000001400000007")
+            .expect("synthetic OCR element id must be valid");
+    println!(
+        "readback=act_click_ocr_element_route edge=before event_count:{} element_id={element_id}",
+        before.len()
+    );
+
+    let response = match act_click_with_handle(
+        handle,
+        Some(Arc::clone(&recording)),
+        ActClickParams {
+            target: ActClickTarget::Element(super::schema::ActClickElementTarget { element_id }),
+            button: default_click_button(),
+            clicks: default_click_count(),
+            modifiers: Vec::new(),
+            velocity_profile: default_click_velocity_profile(),
+            duration_ms: default_click_duration_ms(),
+            hold_ms: super::schema::default_click_hold_ms(),
+            backend: default_click_backend(),
+            use_invoke_pattern: default_use_invoke_pattern(),
+            verify_delta: false,
+            verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+            deprecated_curve_alias_used: false,
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => panic!("OCR element click should use coordinate route: {error}"),
+    };
+
+    let after = recording.events();
+    println!(
+        "readback=act_click_ocr_element_route edge=after ok:{} used_invoke:{} backend_used:{} events={after:?}",
+        response.ok, response.used_invoke_pattern, response.backend_used
+    );
+    assert!(response.ok);
+    assert!(!response.used_invoke_pattern);
+    assert_eq!(response.backend_used, "software");
+    assert!(matches!(
+        after.first(),
+        Some(RecordedInput::MouseMove {
+            to: MouseTarget::Screen {
+                point: Point { x: 52, y: 44 }
+            },
+            ..
+        })
+    ));
+    cancel.cancel();
+    let _ = join.await;
+}
+
+#[tokio::test]
+async fn browser_ocr_element_click_rejects_empty_ocr_bbox_before_uia_resolution() {
+    let cancel = CancellationToken::new();
+    let action_backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
+    let (handle, _snapshot_handle, join) =
+        ActionEmitter::spawn_with_backend(cancel.clone(), action_backend);
+    let element_id =
+        synapse_core::ElementId::parse("0x1000:0c0c010000000c00000022000000000000001400000007")
+            .expect("synthetic OCR element id must be valid");
+    println!("readback=act_click_ocr_element_route edge=empty_bbox_before element_id={element_id}");
+
+    let error = match act_click_with_handle(
+        handle,
+        Some(Arc::new(RecordingBackend::new())),
+        ActClickParams {
+            target: ActClickTarget::Element(super::schema::ActClickElementTarget { element_id }),
+            button: default_click_button(),
+            clicks: default_click_count(),
+            modifiers: Vec::new(),
+            velocity_profile: default_click_velocity_profile(),
+            duration_ms: default_click_duration_ms(),
+            hold_ms: super::schema::default_click_hold_ms(),
+            backend: default_click_backend(),
+            use_invoke_pattern: default_use_invoke_pattern(),
+            verify_delta: false,
+            verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+            deprecated_curve_alias_used: false,
+        },
+    )
+    .await
+    {
+        Ok(response) => panic!("empty OCR bbox should fail closed: {response:?}"),
+        Err(error) => error,
+    };
+    let code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(serde_json::Value::as_str);
+    println!(
+        "readback=act_click_ocr_element_route edge=empty_bbox_after code={code:?} message={}",
+        error.message
+    );
+    assert_eq!(code, Some(error_codes::ACTION_TARGET_INVALID));
+    assert!(error.message.contains("browser OCR element"));
+    cancel.cancel();
+    let _ = join.await;
 }
 
 #[test]

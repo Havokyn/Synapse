@@ -472,12 +472,36 @@ fn current_cursor_path_point() -> Result<PathPoint, ErrorData> {
 
 #[cfg(windows)]
 fn element_center(element_id: &ElementId, role: &'static str) -> Result<Point, ErrorData> {
-    let rect = synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
-        action_error_to_mcp(&ActionError::ElementNotResolved {
-            detail: format!("act_stroke {role} element {element_id} could not be resolved: {err}"),
-        })
-    })?;
+    let rect = if let Some(rect) = browser_ocr_rect_or_error(element_id, role)? {
+        rect
+    } else {
+        synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
+            action_error_to_mcp(&ActionError::ElementNotResolved {
+                detail: format!(
+                    "act_stroke {role} element {element_id} could not be resolved: {err}"
+                ),
+            })
+        })?
+    };
     center_from_rect(rect).map_err(|error| action_error_to_mcp(&error))
+}
+
+#[cfg(windows)]
+fn browser_ocr_rect_or_error(
+    element_id: &ElementId,
+    role: &'static str,
+) -> Result<Option<Rect>, ErrorData> {
+    match crate::m1::browser_ocr_rect_from_element_id(element_id) {
+        Some(rect) => Ok(Some(rect)),
+        None if crate::m1::is_browser_ocr_element_id(element_id) => {
+            Err(action_error_to_mcp(&ActionError::TargetInvalid {
+                detail: format!(
+                    "act_stroke {role} browser OCR element {element_id} does not contain a valid non-empty bbox"
+                ),
+            }))
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(not(windows))]
