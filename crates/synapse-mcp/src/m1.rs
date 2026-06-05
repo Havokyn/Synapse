@@ -511,6 +511,8 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
 const BROWSER_OCR_CHROME_TOP_PX: i32 = 96;
 const BROWSER_OCR_TILE_HEIGHT_PX: i32 = 600;
 const BROWSER_OCR_MAX_TILES: usize = 8;
+const BROWSER_OVERLAY_OCR_MIN_ACTION_TOKENS: usize = 2;
+const BROWSER_OVERLAY_OCR_MIN_NEW_TOKENS_WITH_ACTION: usize = 3;
 const OCR_RUNTIME_RECT_PREFIX: &str = "0c0c01";
 
 /// Recovers browser page text through screen OCR when CDP did not yield a DOM
@@ -518,11 +520,52 @@ const OCR_RUNTIME_RECT_PREFIX: &str = "0c0c01";
 /// nodes and upgrades `web_path` to `ocr` only when OCR actually returned text.
 #[cfg(windows)]
 pub fn enrich_input_with_browser_ocr(input: &mut ObservationInput, max_nodes: usize) {
-    use synapse_core::{SensorStatus, WebPerceptionPath};
-
-    if max_nodes == 0 || !should_attempt_browser_ocr(input) {
+    if max_nodes == 0 {
         return;
     }
+    let should_full_ocr = should_attempt_browser_ocr(input);
+    let should_overlay_ocr = should_attempt_browser_overlay_ocr(input);
+    log_browser_ocr_guard(input, should_full_ocr, should_overlay_ocr);
+    if should_full_ocr {
+        enrich_input_with_full_browser_ocr(input, max_nodes);
+    } else if should_overlay_ocr {
+        enrich_input_with_overlay_browser_ocr(input, max_nodes);
+    }
+}
+
+#[cfg(windows)]
+fn log_browser_ocr_guard(
+    input: &ObservationInput,
+    should_full_ocr: bool,
+    should_overlay_ocr: bool,
+) {
+    use synapse_core::WebPerceptionPath;
+
+    if input.web_path != Some(WebPerceptionPath::UiaOnly)
+        && !browser_ocr_cdp_failed(input)
+        && !synapse_a11y::is_chromium_family(&input.foreground.process_name)
+    {
+        return;
+    }
+    let has_main_pane_uia = has_chromium_main_pane_uia_content(input);
+    tracing::info!(
+        code = "A11Y_BROWSER_OCR_GUARD_EVALUATED",
+        hwnd = input.foreground.hwnd,
+        process_name = %input.foreground.process_name,
+        web_path = ?input.web_path,
+        cdp_failed = browser_ocr_cdp_failed(input),
+        has_main_pane_uia,
+        should_full_ocr,
+        should_overlay_ocr,
+        element_count = input.elements.len(),
+        "browser OCR guard evaluated"
+    );
+}
+
+#[cfg(windows)]
+fn enrich_input_with_full_browser_ocr(input: &mut ObservationInput, max_nodes: usize) {
+    use synapse_core::{SensorStatus, WebPerceptionPath};
+
     if !matches!(
         input.capture_status,
         SensorStatus::Healthy | SensorStatus::DegradedLatency { .. }
@@ -596,11 +639,118 @@ pub fn enrich_input_with_browser_ocr(input: &mut ObservationInput, max_nodes: us
     );
 }
 
+#[cfg(windows)]
+fn enrich_input_with_overlay_browser_ocr(input: &mut ObservationInput, max_nodes: usize) {
+    use synapse_core::{SensorStatus, WebPerceptionPath};
+
+    if !matches!(
+        input.capture_status,
+        SensorStatus::Healthy | SensorStatus::DegradedLatency { .. }
+    ) {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_OVERLAY_SKIPPED_CAPTURE_UNAVAILABLE",
+            hwnd = input.foreground.hwnd,
+            capture_status = ?input.capture_status,
+            "browser overlay OCR probe skipped because screen capture is not available"
+        );
+        return;
+    }
+    let Some(content_region) = browser_content_region(input.foreground.window_bounds) else {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_OVERLAY_SKIPPED_EMPTY_REGION",
+            hwnd = input.foreground.hwnd,
+            window_bounds = ?input.foreground.window_bounds,
+            "browser overlay OCR probe skipped because the browser content region is empty"
+        );
+        return;
+    };
+    let Some(probe_region) = browser_overlay_probe_region(content_region) else {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_OVERLAY_SKIPPED_EMPTY_PROBE",
+            hwnd = input.foreground.hwnd,
+            content_region = ?content_region,
+            "browser overlay OCR probe skipped because the modal probe region is empty"
+        );
+        return;
+    };
+
+    let started = std::time::Instant::now();
+    let words = match synapse_perception::read_text(probe_region) {
+        Ok(words) => words,
+        Err(error) => {
+            input.sensor_latency_ms.insert(
+                "ocr_overlay".to_owned(),
+                started.elapsed().as_secs_f32() * 1000.0,
+            );
+            tracing::debug!(
+                code = error.code(),
+                hwnd = input.foreground.hwnd,
+                probe_region = ?probe_region,
+                error = %error,
+                "browser overlay OCR probe produced no text"
+            );
+            return;
+        }
+    };
+    input.sensor_latency_ms.insert(
+        "ocr_overlay".to_owned(),
+        started.elapsed().as_secs_f32() * 1000.0,
+    );
+
+    let BrowserOverlayOcrGap {
+        words: unexposed_words,
+        new_token_count,
+        new_action_token_count,
+        cluster_region,
+    } = browser_overlay_ocr_gap(input, words, probe_region);
+    if !browser_overlay_ocr_gap_is_actionable(
+        new_token_count,
+        new_action_token_count,
+        cluster_region,
+        probe_region,
+    ) {
+        tracing::debug!(
+            code = "A11Y_BROWSER_OCR_OVERLAY_NO_UNEXPOSED_TEXT",
+            hwnd = input.foreground.hwnd,
+            probe_region = ?probe_region,
+            cluster_region = ?cluster_region,
+            new_token_count,
+            new_action_token_count,
+            "browser overlay OCR probe found no actionable visible text missing from UIA"
+        );
+        return;
+    }
+
+    let added = apply_browser_ocr_words(input, unexposed_words, max_nodes);
+    if added == 0 {
+        tracing::warn!(
+            code = "A11Y_BROWSER_OCR_OVERLAY_NO_USABLE_NODES",
+            hwnd = input.foreground.hwnd,
+            probe_region = ?probe_region,
+            new_token_count,
+            new_action_token_count,
+            "browser overlay OCR probe found missing text but produced no usable OCR nodes"
+        );
+        return;
+    }
+    tracing::info!(
+        code = "A11Y_BROWSER_OCR_OVERLAY_ATTACHED",
+        hwnd = input.foreground.hwnd,
+        probe_region = ?probe_region,
+        node_count = added,
+        new_token_count,
+        new_action_token_count,
+        cluster_region = ?cluster_region,
+        web_path = %WebPerceptionPath::Ocr.as_str(),
+        "browser overlay OCR added visible top-layer text omitted by UIA"
+    );
+}
+
 #[cfg(not(windows))]
 pub fn enrich_input_with_browser_ocr(_input: &mut ObservationInput, _max_nodes: usize) {}
 
 fn should_attempt_browser_ocr(input: &ObservationInput) -> bool {
-    use synapse_core::{CdpStatus, WebPerceptionPath};
+    use synapse_core::WebPerceptionPath;
 
     if input.web_path != Some(WebPerceptionPath::UiaOnly) {
         return false;
@@ -608,12 +758,234 @@ fn should_attempt_browser_ocr(input: &ObservationInput) -> bool {
     if has_chromium_main_pane_uia_content(input) {
         return false;
     }
+    browser_ocr_cdp_failed(input)
+}
+
+fn should_attempt_browser_overlay_ocr(input: &ObservationInput) -> bool {
+    use synapse_core::WebPerceptionPath;
+
+    if input.web_path != Some(WebPerceptionPath::UiaOnly) {
+        return false;
+    }
+    if !has_chromium_main_pane_uia_content(input) {
+        return false;
+    }
+    browser_ocr_cdp_failed(input)
+}
+
+fn browser_ocr_cdp_failed(input: &ObservationInput) -> bool {
+    use synapse_core::CdpStatus;
+
     input.cdp.as_ref().is_some_and(|diagnostics| {
         matches!(
             diagnostics.status,
             CdpStatus::Unreachable | CdpStatus::AttachFailed
         )
     })
+}
+
+struct BrowserOverlayOcrGap {
+    words: Vec<synapse_perception::TextRegion>,
+    new_token_count: usize,
+    new_action_token_count: usize,
+    cluster_region: Option<Rect>,
+}
+
+fn browser_overlay_ocr_gap(
+    input: &ObservationInput,
+    words: Vec<synapse_perception::TextRegion>,
+    probe_region: Rect,
+) -> BrowserOverlayOcrGap {
+    use std::collections::HashSet;
+
+    let exposed_tokens = browser_uia_tokens_in_region(input, probe_region);
+    let mut candidates = Vec::new();
+    let mut action_region = None;
+
+    for word in words {
+        if word.bbox.w <= 0 || word.bbox.h <= 0 || !rects_overlap(word.bbox, probe_region) {
+            continue;
+        }
+        let tokens: Vec<_> = meaningful_text_tokens(&word.text)
+            .into_iter()
+            .filter(|token| !exposed_tokens.contains(token))
+            .collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        if tokens
+            .iter()
+            .any(|token| browser_overlay_action_token(token))
+        {
+            action_region = Some(match action_region {
+                Some(current) => union_rect(current, word.bbox),
+                None => word.bbox,
+            });
+        }
+        candidates.push((word, tokens));
+    }
+
+    let Some(action_region) = action_region else {
+        return BrowserOverlayOcrGap {
+            words: Vec::new(),
+            new_token_count: 0,
+            new_action_token_count: 0,
+            cluster_region: None,
+        };
+    };
+    let candidate_region = browser_overlay_action_neighborhood(action_region, probe_region);
+    let mut new_tokens = HashSet::new();
+    let mut new_action_tokens = HashSet::new();
+    let mut unexposed_words = Vec::new();
+    let mut cluster_region = None;
+
+    for (word, tokens) in candidates {
+        if !rects_overlap(word.bbox, candidate_region) {
+            continue;
+        }
+        for token in tokens {
+            if browser_overlay_action_token(&token) {
+                new_action_tokens.insert(token.clone());
+            }
+            new_tokens.insert(token);
+        }
+        cluster_region = Some(match cluster_region {
+            Some(current) => union_rect(current, word.bbox),
+            None => word.bbox,
+        });
+        unexposed_words.push(word);
+    }
+
+    BrowserOverlayOcrGap {
+        words: unexposed_words,
+        new_token_count: new_tokens.len(),
+        new_action_token_count: new_action_tokens.len(),
+        cluster_region,
+    }
+}
+
+fn browser_overlay_ocr_gap_is_actionable(
+    new_token_count: usize,
+    new_action_token_count: usize,
+    cluster_region: Option<Rect>,
+    probe_region: Rect,
+) -> bool {
+    let Some(cluster_region) = cluster_region else {
+        return false;
+    };
+    browser_overlay_ocr_cluster_is_compact(cluster_region, probe_region)
+        && (new_action_token_count >= BROWSER_OVERLAY_OCR_MIN_ACTION_TOKENS
+            || (new_token_count >= BROWSER_OVERLAY_OCR_MIN_NEW_TOKENS_WITH_ACTION
+                && new_action_token_count > 0))
+}
+
+fn browser_overlay_ocr_cluster_is_compact(cluster_region: Rect, probe_region: Rect) -> bool {
+    if cluster_region.w <= 0 || cluster_region.h <= 0 || probe_region.w <= 0 || probe_region.h <= 0
+    {
+        return false;
+    }
+    let max_width = ((probe_region.w / 5).saturating_mul(4)).max(1);
+    let max_height = ((probe_region.h / 5).saturating_mul(3)).max(1);
+    cluster_region.w <= max_width && cluster_region.h <= max_height
+}
+
+fn browser_overlay_action_neighborhood(action_region: Rect, probe_region: Rect) -> Rect {
+    let pad_x = (probe_region.w / 10).clamp(80, 180);
+    let pad_y = (probe_region.h / 10).clamp(72, 160);
+    let left = action_region.x.saturating_sub(pad_x).max(probe_region.x);
+    let top = action_region.y.saturating_sub(pad_y).max(probe_region.y);
+    let right = action_region
+        .x
+        .saturating_add(action_region.w)
+        .saturating_add(pad_x)
+        .min(probe_region.x.saturating_add(probe_region.w));
+    let bottom = action_region
+        .y
+        .saturating_add(action_region.h)
+        .saturating_add(pad_y)
+        .min(probe_region.y.saturating_add(probe_region.h));
+    Rect {
+        x: left,
+        y: top,
+        w: right.saturating_sub(left),
+        h: bottom.saturating_sub(top),
+    }
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let left = a.x.min(b.x);
+    let top = a.y.min(b.y);
+    let right = a.x.saturating_add(a.w).max(b.x.saturating_add(b.w));
+    let bottom = a.y.saturating_add(a.h).max(b.y.saturating_add(b.h));
+    Rect {
+        x: left,
+        y: top,
+        w: right.saturating_sub(left),
+        h: bottom.saturating_sub(top),
+    }
+}
+
+fn browser_uia_tokens_in_region(
+    input: &ObservationInput,
+    region: Rect,
+) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    for node in &input.elements {
+        if node
+            .automation_id
+            .as_deref()
+            .is_some_and(|automation_id| automation_id.starts_with("ocr:"))
+        {
+            continue;
+        }
+        if node.bbox.w <= 0 || node.bbox.h <= 0 || !rects_overlap(node.bbox, region) {
+            continue;
+        }
+        tokens.extend(meaningful_text_tokens(&node.name));
+        if let Some(value) = &node.value {
+            tokens.extend(meaningful_text_tokens(value));
+        }
+    }
+    tokens
+}
+
+fn meaningful_text_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(|part| {
+            let token = part.trim().to_lowercase();
+            if token.chars().count() < 3 || token.chars().all(|ch| ch.is_ascii_digit()) {
+                None
+            } else {
+                Some(token)
+            }
+        })
+        .collect()
+}
+
+fn browser_overlay_action_token(token: &str) -> bool {
+    matches!(
+        token,
+        "allow"
+            | "authorize"
+            | "cancel"
+            | "close"
+            | "compose"
+            | "confirm"
+            | "continue"
+            | "create"
+            | "delete"
+            | "discard"
+            | "done"
+            | "post"
+            | "publish"
+            | "remove"
+            | "reply"
+            | "save"
+            | "send"
+            | "share"
+            | "submit"
+            | "update"
+    )
 }
 
 fn has_chromium_main_pane_uia_content(input: &ObservationInput) -> bool {
@@ -780,6 +1152,35 @@ fn browser_main_pane_region(window_bounds: Rect) -> Option<Rect> {
         y: content.y,
         w: content.w.saturating_sub(left_inset),
         h: content.h,
+    })
+}
+
+fn browser_overlay_probe_region(content_region: Rect) -> Option<Rect> {
+    if content_region.w <= 0 || content_region.h <= 0 {
+        return None;
+    }
+    let width = if content_region.w >= 640 {
+        content_region.w / 2
+    } else {
+        content_region.w
+    }
+    .clamp(1, content_region.w);
+    let height = if content_region.h >= 480 {
+        content_region.h / 2
+    } else {
+        content_region.h
+    }
+    .clamp(1, content_region.h);
+
+    Some(Rect {
+        x: content_region
+            .x
+            .saturating_add((content_region.w - width) / 2),
+        y: content_region
+            .y
+            .saturating_add((content_region.h - height) / 2),
+        w: width,
+        h: height,
     })
 }
 
@@ -1591,33 +1992,341 @@ mod tests {
     #[test]
     fn browser_ocr_skips_when_main_pane_uia_content_is_present() {
         let mut input = chromium_ocr_input();
-        input.elements.push(AccessibleNode {
-            element_id: synapse_core::element_id(0x2200, "0000002a00000042"),
-            parent: None,
-            name: "Force Renderer Complete Button".to_owned(),
-            role: "button".to_owned(),
-            automation_id: Some("probe-button".to_owned()),
-            value: None,
-            bbox: Rect {
+        input.elements.push(chromium_uia_node(
+            "Force Renderer Complete Button",
+            "button",
+            Rect {
                 x: 420,
                 y: 180,
                 w: 320,
                 h: 34,
             },
-            enabled: true,
-            focused: false,
-            patterns: vec![synapse_core::UiaPattern::Invoke],
-            children_count: 0,
-            depth: 2,
-        });
+            "0000002a00000042",
+        ));
 
         println!(
-            "readback=browser_ocr edge=main_pane_uia after_has_content:{} after_should_ocr:{}",
+            "readback=browser_ocr edge=main_pane_uia after_has_content:{} after_should_full_ocr:{} after_should_overlay_ocr:{}",
             has_chromium_main_pane_uia_content(&input),
-            should_attempt_browser_ocr(&input)
+            should_attempt_browser_ocr(&input),
+            should_attempt_browser_overlay_ocr(&input)
         );
         assert!(has_chromium_main_pane_uia_content(&input));
         assert!(!should_attempt_browser_ocr(&input));
+        assert!(should_attempt_browser_overlay_ocr(&input));
+    }
+
+    #[test]
+    fn browser_overlay_ocr_accepts_new_visible_text_missing_from_uia() {
+        let mut input = chromium_ocr_input();
+        input.elements.push(chromium_uia_node(
+            "Timeline item loaded",
+            "text",
+            Rect {
+                x: 440,
+                y: 280,
+                w: 360,
+                h: 36,
+            },
+            "0000002a00000044",
+        ));
+        let probe_region = browser_overlay_probe_region(
+            browser_content_region(input.foreground.window_bounds)
+                .expect("test browser content region exists"),
+        )
+        .expect("test overlay probe region exists");
+
+        let gap = browser_overlay_ocr_gap(
+            &input,
+            vec![
+                ocr_word("Compose", 520, 340),
+                ocr_word("hidden", 520, 388),
+                ocr_word("modal", 618, 388),
+                ocr_word("draft", 702, 388),
+                ocr_word("Post", 520, 454),
+                ocr_word("Cancel", 610, 454),
+            ],
+            probe_region,
+        );
+
+        println!(
+            "readback=browser_overlay_ocr edge=missing_modal before_path:{:?} probe:{probe_region:?} cluster:{:?} new_tokens:{} action_tokens:{} attach:{}",
+            input.web_path,
+            gap.cluster_region,
+            gap.new_token_count,
+            gap.new_action_token_count,
+            browser_overlay_ocr_gap_is_actionable(
+                gap.new_token_count,
+                gap.new_action_token_count,
+                gap.cluster_region,
+                probe_region
+            )
+        );
+        assert!(should_attempt_browser_overlay_ocr(&input));
+        assert_eq!(gap.new_token_count, 6);
+        assert_eq!(gap.new_action_token_count, 3);
+        assert_eq!(
+            gap.cluster_region,
+            Some(Rect {
+                x: 520,
+                y: 340,
+                w: 260,
+                h: 140,
+            })
+        );
+        assert!(browser_overlay_ocr_gap_is_actionable(
+            gap.new_token_count,
+            gap.new_action_token_count,
+            gap.cluster_region,
+            probe_region
+        ));
+
+        let added = apply_browser_ocr_words(&mut input, gap.words, 8);
+        assert_eq!(added, 6);
+        assert_eq!(input.web_path, Some(WebPerceptionPath::Ocr));
+        assert!(input.elements.iter().any(|node| node.name == "Post"));
+        assert!(input.elements.iter().any(|node| {
+            node.automation_id
+                .as_deref()
+                .is_some_and(|automation_id| automation_id.starts_with("ocr:word:"))
+        }));
+    }
+
+    #[test]
+    fn browser_overlay_ocr_rejects_text_already_exposed_by_uia() {
+        let input = {
+            let mut input = chromium_ocr_input();
+            input.elements.push(chromium_uia_node(
+                "Compose hidden modal draft Post Cancel",
+                "text",
+                Rect {
+                    x: 440,
+                    y: 280,
+                    w: 560,
+                    h: 160,
+                },
+                "0000002a00000045",
+            ));
+            input
+        };
+        let probe_region = browser_overlay_probe_region(
+            browser_content_region(input.foreground.window_bounds)
+                .expect("test browser content region exists"),
+        )
+        .expect("test overlay probe region exists");
+
+        let gap = browser_overlay_ocr_gap(
+            &input,
+            vec![
+                ocr_word("Compose", 520, 340),
+                ocr_word("hidden", 520, 388),
+                ocr_word("modal", 618, 388),
+                ocr_word("draft", 702, 388),
+                ocr_word("Post", 520, 454),
+                ocr_word("Cancel", 610, 454),
+            ],
+            probe_region,
+        );
+
+        println!(
+            "readback=browser_overlay_ocr edge=already_exposed probe:{probe_region:?} cluster:{:?} new_tokens:{} action_tokens:{} attach:{}",
+            gap.cluster_region,
+            gap.new_token_count,
+            gap.new_action_token_count,
+            browser_overlay_ocr_gap_is_actionable(
+                gap.new_token_count,
+                gap.new_action_token_count,
+                gap.cluster_region,
+                probe_region
+            )
+        );
+        assert!(should_attempt_browser_overlay_ocr(&input));
+        assert_eq!(gap.new_token_count, 0);
+        assert_eq!(gap.new_action_token_count, 0);
+        assert_eq!(gap.cluster_region, None);
+        assert!(gap.words.is_empty());
+        assert!(!browser_overlay_ocr_gap_is_actionable(
+            gap.new_token_count,
+            gap.new_action_token_count,
+            gap.cluster_region,
+            probe_region
+        ));
+    }
+
+    #[test]
+    fn browser_overlay_ocr_rejects_scattered_page_noise_without_modal_actions() {
+        let mut input = chromium_ocr_input();
+        input.elements.push(chromium_uia_node(
+            "Share Mode starts after workspace ready",
+            "text",
+            Rect {
+                x: 420,
+                y: 260,
+                w: 520,
+                h: 42,
+            },
+            "0000002a00000046",
+        ));
+        let probe_region = browser_overlay_probe_region(
+            browser_content_region(input.foreground.window_bounds)
+                .expect("test browser content region exists"),
+        )
+        .expect("test overlay probe region exists");
+
+        let gap = browser_overlay_ocr_gap(
+            &input,
+            vec![
+                ocr_word("Start", 910, 320),
+                ocr_word("Turn", 880, 460),
+                ocr_word("month", 930, 660),
+                ocr_word("queue", 540, 650),
+                ocr_word("private", 500, 330),
+            ],
+            probe_region,
+        );
+
+        println!(
+            "readback=browser_overlay_ocr edge=scattered_noise probe:{probe_region:?} cluster:{:?} new_tokens:{} action_tokens:{} attach:{}",
+            gap.cluster_region,
+            gap.new_token_count,
+            gap.new_action_token_count,
+            browser_overlay_ocr_gap_is_actionable(
+                gap.new_token_count,
+                gap.new_action_token_count,
+                gap.cluster_region,
+                probe_region
+            )
+        );
+        assert_eq!(gap.new_action_token_count, 0);
+        assert!(!browser_overlay_ocr_gap_is_actionable(
+            gap.new_token_count,
+            gap.new_action_token_count,
+            gap.cluster_region,
+            probe_region
+        ));
+    }
+
+    #[test]
+    fn browser_overlay_ocr_anchors_on_action_cluster_when_probe_includes_page_noise() {
+        let mut input = chromium_ocr_input();
+        input.foreground.window_bounds = Rect {
+            x: 1974,
+            y: 29,
+            w: 2976,
+            h: 1936,
+        };
+        input.elements.extend([
+            chromium_uia_node(
+                "Main timeline control surface",
+                "heading",
+                Rect {
+                    x: 2658,
+                    y: 421,
+                    w: 1294,
+                    h: 59,
+                },
+                "0000002a00000047",
+            ),
+            chromium_uia_node(
+                "Refresh timeline",
+                "button",
+                Rect {
+                    x: 2658,
+                    y: 609,
+                    w: 261,
+                    h: 66,
+                },
+                "0000002a00000048",
+            ),
+            chromium_uia_node(
+                "Underlying state ready for OCR overlay verification.",
+                "text",
+                Rect {
+                    x: 2680,
+                    y: 718,
+                    w: 684,
+                    h: 33,
+                },
+                "0000002a00000049",
+            ),
+            chromium_uia_node(
+                "Open settings",
+                "link",
+                Rect {
+                    x: 2658,
+                    y: 795,
+                    w: 230,
+                    h: 66,
+                },
+                "0000002a0000004a",
+            ),
+        ]);
+        let probe_region = browser_overlay_probe_region(
+            browser_content_region(input.foreground.window_bounds)
+                .expect("observed browser content region exists"),
+        )
+        .expect("observed overlay probe region exists");
+
+        let gap = browser_overlay_ocr_gap(
+            &input,
+            vec![
+                ocr_sized_word("fresh", 2719, 631, 64, 22),
+                ocr_sized_word("timeline", 2794, 631, 102, 22),
+                ocr_sized_word("derlying", 2719, 724, 103, 28),
+                ocr_sized_word("state", 2833, 725, 63, 21),
+                ocr_sized_word("ready", 2907, 724, 73, 28),
+                ocr_sized_word("for", 2989, 724, 35, 22),
+                ocr_sized_word("OCR", 3033, 724, 65, 22),
+                ocr_sized_word("overlay", 3108, 724, 95, 28),
+                ocr_sized_word("verification.", 3212, 724, 149, 22),
+                ocr_sized_word("en", 2718, 823, 34, 16),
+                ocr_sized_word("settings", 2763, 817, 102, 28),
+                ocr_sized_word("Compose", 3028, 856, 322, 67),
+                ocr_sized_word("Visible", 3025, 980, 147, 37),
+                ocr_sized_word("Modal", 3192, 980, 132, 37),
+                ocr_sized_word("Alpha", 3341, 980, 129, 47),
+                ocr_sized_word("Top", 3025, 1058, 80, 47),
+                ocr_sized_word("layer", 3124, 1058, 108, 47),
+                ocr_sized_word("pixels", 3249, 1058, 125, 47),
+                ocr_sized_word("only", 3392, 1058, 92, 47),
+                ocr_sized_word("Post", 3073, 1242, 107, 37),
+                ocr_sized_word("Cancel", 3425, 1241, 163, 38),
+            ],
+            probe_region,
+        );
+
+        println!(
+            "readback=browser_overlay_ocr edge=action_anchor_noise probe:{probe_region:?} cluster:{:?} new_tokens:{} action_tokens:{} attach:{}",
+            gap.cluster_region,
+            gap.new_token_count,
+            gap.new_action_token_count,
+            browser_overlay_ocr_gap_is_actionable(
+                gap.new_token_count,
+                gap.new_action_token_count,
+                gap.cluster_region,
+                probe_region
+            )
+        );
+        assert_eq!(
+            probe_region,
+            Rect {
+                x: 2718,
+                y: 585,
+                w: 1488,
+                h: 920,
+            }
+        );
+        assert_eq!(gap.new_action_token_count, 3);
+        assert!(gap.words.iter().any(|word| word.text == "Compose"));
+        assert!(gap.words.iter().any(|word| word.text == "Post"));
+        assert!(gap.words.iter().any(|word| word.text == "Cancel"));
+        assert!(!gap.words.iter().any(|word| word.text == "fresh"));
+        assert!(!gap.words.iter().any(|word| word.text == "derlying"));
+        assert!(browser_overlay_ocr_gap_is_actionable(
+            gap.new_token_count,
+            gap.new_action_token_count,
+            gap.cluster_region,
+            probe_region
+        ));
     }
 
     #[test]
@@ -1712,6 +2421,35 @@ mod tests {
         ));
         input.web_path = Some(WebPerceptionPath::UiaOnly);
         input
+    }
+
+    fn chromium_uia_node(name: &str, role: &str, bbox: Rect, runtime_id: &str) -> AccessibleNode {
+        AccessibleNode {
+            element_id: synapse_core::element_id(0x2200, runtime_id),
+            parent: None,
+            name: name.to_owned(),
+            role: role.to_owned(),
+            automation_id: Some(format!("test-{runtime_id}")),
+            value: None,
+            bbox,
+            enabled: true,
+            focused: false,
+            patterns: vec![synapse_core::UiaPattern::Invoke],
+            children_count: 0,
+            depth: 2,
+        }
+    }
+
+    fn ocr_word(text: &str, x: i32, y: i32) -> TextRegion {
+        ocr_sized_word(text, x, y, 78, 26)
+    }
+
+    fn ocr_sized_word(text: &str, x: i32, y: i32, w: i32, h: i32) -> TextRegion {
+        TextRegion {
+            text: text.to_owned(),
+            bbox: Rect { x, y, w, h },
+            confidence: 0.95,
+        }
     }
 
     fn profile_with_mode(mode: PerceptionMode) -> Profile {
