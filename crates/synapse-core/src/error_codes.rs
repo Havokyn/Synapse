@@ -56,6 +56,7 @@ pub const SAFETY_OPERATOR_HOTKEY_FIRED: &str = "SAFETY_OPERATOR_HOTKEY_FIRED";
 // is a single shared resource leased per MCP session. Background tiers never take it.
 pub const ACTION_FOREGROUND_LEASE_BUSY: &str = "ACTION_FOREGROUND_LEASE_BUSY";
 pub const ACTION_FOREGROUND_LEASE_NOT_HELD: &str = "ACTION_FOREGROUND_LEASE_NOT_HELD";
+pub const ACTION_ELEMENT_VALUE_READ_ONLY: &str = "ACTION_ELEMENT_VALUE_READ_ONLY";
 
 // === Reflex (06 section 8.3) ===
 pub const REFLEX_CAP_REACHED: &str = "REFLEX_CAP_REACHED";

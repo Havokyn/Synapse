@@ -269,6 +269,10 @@ pub struct ReadTextParams {
     pub region: Option<Rect>,
     #[serde(default)]
     pub element_id: Option<ElementId>,
+    /// Explicit per-call window override (HWND). Takes precedence over the
+    /// session's active target when resolving a focused OCR region.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
     #[serde(default)]
     pub backend: OcrBackend,
     #[serde(default)]
@@ -1987,6 +1991,7 @@ mod tests {
                 lang_hint: Some(" en-US ".to_owned()),
                 ..ReadTextParams::default()
             },
+            None,
         )
         .expect("focused fallback should resolve");
 
@@ -2016,6 +2021,7 @@ mod tests {
                 backend: OcrBackend::Crnn,
                 ..ReadTextParams::default()
             },
+            None,
         )
         .expect_err("unwired CRNN backend must not silently fall through");
 
@@ -2066,6 +2072,7 @@ mod tests {
                     backend: OcrBackend::Winrt,
                     ..ReadTextParams::default()
                 },
+                None,
             )
             .expect_err("empty OCR regions must fail closed");
             assert_eq!(

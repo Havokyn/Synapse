@@ -322,7 +322,14 @@ fn single_window_match(
             window_summaries(observed_windows),
             None,
         )),
-        1 => Ok(matches.into_iter().next().expect("len checked")),
+        1 => matches.into_iter().next().ok_or_else(|| {
+            window_not_found_error(
+                reason_prefix,
+                target,
+                window_summaries(observed_windows),
+                None,
+            )
+        }),
         _ => Err(window_ambiguous_error(target, &matches)),
     }
 }

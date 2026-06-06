@@ -1473,6 +1473,7 @@ mod scope_gate_tests {
                     h: 40,
                 }),
                 element_id: None,
+                window_hwnd: None,
                 backend: synapse_core::OcrBackend::Winrt,
                 lang_hint: None,
             }))

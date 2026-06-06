@@ -2,7 +2,7 @@ use rmcp::ErrorData;
 use synapse_core::{OcrBackend, OcrResult, OcrWord, Rect, error_codes};
 use synapse_perception::{TextRegion, read_text as platform_read_text, read_text_with_provider};
 
-use crate::m1::{M1State, ReadTextParams, current_input, mcp_error};
+use crate::m1::{M1State, ReadTextParams, current_input, mcp_error, window_input_from_hwnd};
 
 #[derive(Clone, Debug)]
 pub struct ResolvedReadTextRequest {
@@ -28,8 +28,9 @@ impl ResolvedReadTextRequest {
 pub fn resolve_read_text_request(
     state: &M1State,
     params: &ReadTextParams,
+    target_hwnd: Option<i64>,
 ) -> Result<ResolvedReadTextRequest, ErrorData> {
-    let region = text_region(state, params)?;
+    let region = text_region(state, params, target_hwnd)?;
     validate_ocr_region(region)?;
     Ok(ResolvedReadTextRequest {
         region,
@@ -135,7 +136,11 @@ pub fn ocr_result_from_web_bitmap(
     Ok(ocr_result_from_text_regions(words, &request))
 }
 
-fn text_region(state: &M1State, params: &ReadTextParams) -> Result<Rect, ErrorData> {
+fn text_region(
+    state: &M1State,
+    params: &ReadTextParams,
+    target_hwnd: Option<i64>,
+) -> Result<Rect, ErrorData> {
     if let Some(region) = params.region {
         return Ok(region);
     }
@@ -162,7 +167,11 @@ fn text_region(state: &M1State, params: &ReadTextParams) -> Result<Rect, ErrorDa
             });
     }
 
-    let input = current_input(state, 2)?;
+    let input = if let Some(hwnd) = params.window_hwnd.or(target_hwnd) {
+        window_input_from_hwnd(hwnd, 2, state.perception_mode)?
+    } else {
+        current_input(state, 2)?
+    };
     input.focused.map(|focused| focused.bbox).ok_or_else(|| {
         mcp_error(
             error_codes::OCR_NO_TEXT,

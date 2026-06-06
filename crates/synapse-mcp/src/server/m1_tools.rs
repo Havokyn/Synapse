@@ -172,9 +172,11 @@ impl SynapseService {
                 .await
                 .map(Json);
         }
+        let target_hwnd =
+            self.session_target_hwnd(crate::http::current_mcp_session_id().as_deref());
         let request = {
             let state = self.m1_state()?;
-            resolve_read_text_request(&state, &params.0)?
+            resolve_read_text_request(&state, &params.0, target_hwnd)?
         };
         self.read_text_request_with_cache(request).map(Json)
     }
