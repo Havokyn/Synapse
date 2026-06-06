@@ -246,6 +246,7 @@ async fn execute_cdp_click(
     let title_hint = synapse_a11y::foreground_context(hwnd)
         .map(|context| context.window_title)
         .unwrap_or_default();
+    let target_id_hint = synapse_a11y::cdp_target_from_element_id(&element.element_id);
     let button = match params.button {
         MouseButton::Left => synapse_a11y::CdpMouseButton::Left,
         MouseButton::Right => synapse_a11y::CdpMouseButton::Right,
@@ -269,6 +270,7 @@ async fn execute_cdp_click(
     synapse_a11y::cdp_click_node(
         &endpoint,
         &title_hint,
+        target_id_hint.as_deref(),
         backend_node_id,
         button,
         i64::from(params.clicks),

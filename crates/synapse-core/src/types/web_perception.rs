@@ -128,6 +128,21 @@ pub struct CdpDiagnostics {
     /// Number of DOM/AX nodes surfaced into `elements` from the attached tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_node_count: Option<u32>,
+    /// CDP TargetID selected for the DOM snapshot. Present after a successful
+    /// attach so agents can prove which existing tab was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_target_id: Option<String>,
+    /// CDP flat-session id used for the selected target. Present after a
+    /// successful attach; safe to surface because it is an ephemeral CDP handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_session_id: Option<String>,
+    /// Why Synapse chose this target, e.g. `url_hint`, `foreground_title`, or
+    /// `fallback_first_page`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_selection_reason: Option<String>,
+    /// Number of live page targets considered for selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_candidate_count: Option<u32>,
 }
 
 impl CdpDiagnostics {
@@ -144,6 +159,10 @@ impl CdpDiagnostics {
             detail: None,
             capabilities: Vec::new(),
             attached_node_count: None,
+            selected_target_id: None,
+            selected_session_id: None,
+            target_selection_reason: None,
+            target_candidate_count: None,
         }
     }
 
@@ -160,6 +179,10 @@ impl CdpDiagnostics {
             detail: None,
             capabilities: Vec::new(),
             attached_node_count: None,
+            selected_target_id: None,
+            selected_session_id: None,
+            target_selection_reason: None,
+            target_candidate_count: None,
         }
     }
 
@@ -186,6 +209,10 @@ impl CdpDiagnostics {
             detail: Some(detail.into()),
             capabilities: Vec::new(),
             attached_node_count: None,
+            selected_target_id: None,
+            selected_session_id: None,
+            target_selection_reason: None,
+            target_candidate_count: None,
         }
     }
 }

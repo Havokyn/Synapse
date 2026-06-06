@@ -165,6 +165,10 @@ fn ok_diagnostics(process_name: &str, port: u16, checked_ports: Vec<u16>) -> Cdp
         detail: None,
         capabilities: cdp_capabilities(),
         attached_node_count: None,
+        selected_target_id: None,
+        selected_session_id: None,
+        target_selection_reason: None,
+        target_candidate_count: None,
     }
 }
 

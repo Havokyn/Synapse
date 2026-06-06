@@ -218,11 +218,17 @@ async fn execute_cdp_scroll(
     let title_hint = synapse_a11y::foreground_context(hwnd)
         .map(|context| context.window_title)
         .unwrap_or_default();
+    let target_id_hint = synapse_a11y::cdp_target_from_element_id(element_id);
     let before = if params.verify_delta {
         Some(
-            synapse_a11y::cdp_node_scroll_state(&endpoint, &title_hint, backend_node_id)
-                .await
-                .map_err(|err| mcp_error(err.code(), err.to_string()))?,
+            synapse_a11y::cdp_node_scroll_state(
+                &endpoint,
+                &title_hint,
+                target_id_hint.as_deref(),
+                backend_node_id,
+            )
+            .await
+            .map_err(|err| mcp_error(err.code(), err.to_string()))?,
         )
     } else {
         None
@@ -232,6 +238,7 @@ async fn execute_cdp_scroll(
     let point = synapse_a11y::cdp_scroll_node(
         &endpoint,
         &title_hint,
+        target_id_hint.as_deref(),
         backend_node_id,
         deltas,
         if params.smooth {
@@ -244,9 +251,14 @@ async fn execute_cdp_scroll(
     .map_err(|err| mcp_error(err.code(), err.to_string()))?;
     let postcondition = if let Some(before) = before {
         tokio::time::sleep(Duration::from_millis(u64::from(params.verify_timeout_ms))).await;
-        let after = synapse_a11y::cdp_node_scroll_state(&endpoint, &title_hint, backend_node_id)
-            .await
-            .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+        let after = synapse_a11y::cdp_node_scroll_state(
+            &endpoint,
+            &title_hint,
+            target_id_hint.as_deref(),
+            backend_node_id,
+        )
+        .await
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
         let postcondition = verify_cdp_scroll_delta(params.verify_timeout_ms, &before, &after)?;
         tracing::info!(
             code = "M2_ACT_SCROLL_CDP_WHEEL",

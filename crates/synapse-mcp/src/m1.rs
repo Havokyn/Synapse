@@ -466,8 +466,11 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
     };
     let hwnd = input.foreground.hwnd;
     let title = input.foreground.window_title.clone();
+    let url_hint = foreground_web_url_hint(input);
 
-    match synapse_a11y::fetch_dom_snapshot(&endpoint, hwnd, &title, max_nodes).await {
+    match synapse_a11y::fetch_dom_snapshot(&endpoint, hwnd, &title, url_hint.as_deref(), max_nodes)
+        .await
+    {
         Ok(snapshot) => {
             let count = u32::try_from(snapshot.nodes.len()).unwrap_or(u32::MAX);
             for mut node in snapshot.nodes {
@@ -480,12 +483,21 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
             input.web_path = Some(WebPerceptionPath::Cdp);
             if let Some(diagnostics) = input.cdp.as_mut() {
                 diagnostics.attached_node_count = Some(count);
+                diagnostics.selected_target_id = Some(snapshot.target_id.clone());
+                diagnostics.selected_session_id = Some(snapshot.session_id.clone());
+                diagnostics.target_selection_reason =
+                    Some(snapshot.target_selection_reason.clone());
+                diagnostics.target_candidate_count = Some(snapshot.target_candidate_count);
             }
             tracing::info!(
                 code = "A11Y_CDP_DOM_ATTACHED",
                 endpoint = %endpoint,
                 hwnd,
                 page_url = %snapshot.page_url,
+                target_id = %snapshot.target_id,
+                session_id = %snapshot.session_id,
+                target_candidate_count = snapshot.target_candidate_count,
+                target_selection_reason = %snapshot.target_selection_reason,
                 node_count = count,
                 total_ax_nodes = snapshot.total_ax_nodes,
                 "attached CDP DOM tree into observation elements"
@@ -506,6 +518,39 @@ pub async fn enrich_input_with_cdp(input: &mut ObservationInput, max_depth: u32,
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn foreground_web_url_hint(input: &ObservationInput) -> Option<String> {
+    input
+        .elements
+        .iter()
+        .filter(|node| {
+            node.role.eq_ignore_ascii_case("document")
+                || node.automation_id.as_deref() == Some("RootWebArea")
+        })
+        .find_map(|node| {
+            node.value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| is_browser_url(value))
+                .map(ToOwned::to_owned)
+        })
+}
+
+#[cfg(windows)]
+fn is_browser_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "file://",
+        "chrome://",
+        "edge://",
+        "about:",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 const BROWSER_OCR_CHROME_TOP_PX: i32 = 96;
@@ -1978,6 +2023,10 @@ mod tests {
             detail: None,
             capabilities: Vec::new(),
             attached_node_count: None,
+            selected_target_id: None,
+            selected_session_id: None,
+            target_selection_reason: None,
+            target_candidate_count: None,
         });
         assert!(!should_attempt_browser_ocr(&input));
 

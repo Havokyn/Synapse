@@ -92,6 +92,7 @@ impl CdpMouseButton {
 pub async fn cdp_click_node(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
     button: CdpMouseButton,
     click_count: i64,
@@ -99,6 +100,7 @@ pub async fn cdp_click_node(
     with_node_center(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page, center| async move {
             page.execute(mouse_event(
@@ -139,6 +141,7 @@ pub async fn cdp_click_node(
 pub async fn cdp_type_node(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
     text: &str,
 ) -> A11yResult<()> {
@@ -148,6 +151,7 @@ pub async fn cdp_type_node(
     with_node_center(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page, center| async move {
             // Click to place the caret, then focus and insert text.
@@ -193,6 +197,7 @@ pub async fn cdp_type_node(
 pub async fn cdp_scroll_node(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
     deltas: Vec<CdpWheelDelta>,
     interval_ms: u32,
@@ -200,6 +205,7 @@ pub async fn cdp_scroll_node(
     with_node_center(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page, center| async move {
             page.execute(mouse_event(
@@ -236,11 +242,13 @@ pub async fn cdp_scroll_node(
 pub async fn cdp_node_value(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<String> {
     with_node_page(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page| async move {
             let resolve = ResolveNodeParams::builder()
@@ -297,11 +305,13 @@ pub async fn cdp_node_value(
 pub async fn cdp_node_scroll_state(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<CdpScrollState> {
     with_node_page(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page| async move {
             let state = read_node_scroll_state(&page, backend_node_id).await?;
@@ -327,11 +337,13 @@ pub async fn cdp_node_scroll_state(
 pub async fn cdp_node_viewport_center(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<CdpActionPoint> {
     with_node_center(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |_page, center| async move { Ok(center) },
     )
@@ -346,11 +358,13 @@ pub async fn cdp_node_viewport_center(
 pub async fn cdp_aim_node(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<CdpActionPoint> {
     with_node_center(
         endpoint,
         page_title_hint,
+        target_id_hint,
         backend_node_id,
         |page, center| async move {
             page.execute(mouse_event(
@@ -396,6 +410,7 @@ pub struct CdpNodeBitmap {
 pub async fn cdp_capture_node_bgra(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<CdpNodeBitmap> {
     let (browser, mut handler) =
@@ -407,7 +422,8 @@ pub async fn cdp_capture_node_bgra(
     let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let result = async {
-        let page = resolve_owning_page(&browser, page_title_hint, backend_node_id).await?;
+        let page =
+            resolve_owning_page(&browser, page_title_hint, target_id_hint, backend_node_id).await?;
         let rect = node_content_rect(&page, backend_node_id).await?;
         // getBoxModel is viewport-relative (the click path dispatches at its
         // centre as viewport coords and lands correctly); captureScreenshot with
@@ -512,6 +528,7 @@ async fn wait_for_pages(browser: &chromiumoxide::Browser) -> A11yResult<Vec<chro
 async fn with_node_center<A, Fut, T>(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
     action: A,
 ) -> A11yResult<T>
@@ -528,7 +545,8 @@ where
     let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let result = async {
-        let page = resolve_owning_page(&browser, page_title_hint, backend_node_id).await?;
+        let page =
+            resolve_owning_page(&browser, page_title_hint, target_id_hint, backend_node_id).await?;
         let rect = node_content_rect(&page, backend_node_id).await?;
         let center = CdpActionPoint {
             x: f64::from(rect.x) + f64::from(rect.w) / 2.0,
@@ -545,6 +563,7 @@ where
 async fn with_node_page<A, Fut, T>(
     endpoint: &str,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
     action: A,
 ) -> A11yResult<T>
@@ -561,7 +580,8 @@ where
     let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let result = async {
-        let page = resolve_owning_page(&browser, page_title_hint, backend_node_id).await?;
+        let page =
+            resolve_owning_page(&browser, page_title_hint, target_id_hint, backend_node_id).await?;
         action(page).await
     }
     .await;
@@ -581,11 +601,31 @@ where
 async fn resolve_owning_page(
     browser: &chromiumoxide::Browser,
     page_title_hint: &str,
+    target_id_hint: Option<&str>,
     backend_node_id: i64,
 ) -> A11yResult<chromiumoxide::Page> {
-    use chromiumoxide::cdp::browser_protocol::dom::GetDocumentParams;
-
     let pages = wait_for_pages(browser).await?;
+    if let Some(target_id_hint) = target_id_hint.filter(|hint| !hint.trim().is_empty()) {
+        let target_id_hint = target_id_hint.trim();
+        let page = pages
+            .into_iter()
+            .find(|page| page.target_id().inner().eq_ignore_ascii_case(target_id_hint))
+            .ok_or_else(|| A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "selected target {target_id_hint} is no longer present for backendNodeId {backend_node_id}"
+                ),
+            })?;
+        return if page_owns_backend_node(&page, backend_node_id).await {
+            Ok(page)
+        } else {
+            Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "selected target {target_id_hint} does not own backendNodeId {backend_node_id}"
+                ),
+            })
+        };
+    }
+
     let mut ordered = Vec::with_capacity(pages.len());
     let mut tail = Vec::new();
     for page in pages {
@@ -602,18 +642,24 @@ async fn resolve_owning_page(
     ordered.extend(tail);
 
     for page in ordered {
-        let prime = GetDocumentParams::builder().depth(-1).pierce(true).build();
-        let _ = page.execute(prime).await;
-        let scroll = ScrollIntoViewIfNeededParams::builder()
-            .backend_node_id(BackendNodeId::new(backend_node_id))
-            .build();
-        if page.execute(scroll).await.is_ok() {
+        if page_owns_backend_node(&page, backend_node_id).await {
             return Ok(page);
         }
     }
     Err(A11yError::CdpAxtreeFailed {
         detail: format!("no attached page owns backendNodeId {backend_node_id}"),
     })
+}
+
+async fn page_owns_backend_node(page: &chromiumoxide::Page, backend_node_id: i64) -> bool {
+    use chromiumoxide::cdp::browser_protocol::dom::GetDocumentParams;
+
+    let prime = GetDocumentParams::builder().depth(-1).pierce(true).build();
+    let _ = page.execute(prime).await;
+    let scroll = ScrollIntoViewIfNeededParams::builder()
+        .backend_node_id(BackendNodeId::new(backend_node_id))
+        .build();
+    page.execute(scroll).await.is_ok()
 }
 
 /// Resolves a web node's live content-box rectangle in viewport-CSS pixels.

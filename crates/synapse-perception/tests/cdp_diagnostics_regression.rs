@@ -155,6 +155,10 @@ fn attached_cdp_surfaces_ok_status_and_dom_elements() {
         detail: None,
         capabilities: vec![CdpCapability::AccessibilityFullAxTree],
         attached_node_count: Some(1),
+        selected_target_id: Some("target-1".to_owned()),
+        selected_session_id: Some("session-1".to_owned()),
+        target_selection_reason: Some("url_hint".to_owned()),
+        target_candidate_count: Some(1),
     });
     input.web_path = Some(WebPerceptionPath::Cdp);
 
@@ -177,11 +181,21 @@ fn attached_cdp_surfaces_ok_status_and_dom_elements() {
         .any(|node| node.role == "button" && node.name == "Apply");
 
     println!(
-        "readback=cdp_contract edge=attached after=cdp.status:{:?} web_path:{:?} dom_button_present:{dom_present}",
-        cdp.status, observation.diagnostics.web_path
+        "readback=cdp_contract edge=attached after=cdp.status:{:?} web_path:{:?} dom_button_present:{dom_button_present} target:{:?} session:{:?} reason:{:?} candidates:{:?}",
+        cdp.status,
+        observation.diagnostics.web_path,
+        cdp.selected_target_id,
+        cdp.selected_session_id,
+        cdp.target_selection_reason,
+        cdp.target_candidate_count,
+        dom_button_present = dom_present
     );
 
     assert_eq!(cdp.status, CdpStatus::Ok);
+    assert_eq!(cdp.selected_target_id.as_deref(), Some("target-1"));
+    assert_eq!(cdp.selected_session_id.as_deref(), Some("session-1"));
+    assert_eq!(cdp.target_selection_reason.as_deref(), Some("url_hint"));
+    assert_eq!(cdp.target_candidate_count, Some(1));
     assert_eq!(
         observation.diagnostics.web_path,
         Some(WebPerceptionPath::Cdp)

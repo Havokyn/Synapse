@@ -121,26 +121,43 @@ async fn cdp_type_into_element(
     let title_hint = synapse_a11y::foreground_context(hwnd)
         .map(|context| context.window_title)
         .unwrap_or_default();
+    let target_id_hint = synapse_a11y::cdp_target_from_element_id(element_id);
     let before = if verify_delta {
         Some(
-            synapse_a11y::cdp_node_value(&endpoint, &title_hint, backend_node_id)
-                .await
-                .map_err(|err| mcp_error(err.code(), err.to_string()))?,
+            synapse_a11y::cdp_node_value(
+                &endpoint,
+                &title_hint,
+                target_id_hint.as_deref(),
+                backend_node_id,
+            )
+            .await
+            .map_err(|err| mcp_error(err.code(), err.to_string()))?,
         )
     } else {
         None
     };
-    synapse_a11y::cdp_type_node(&endpoint, &title_hint, backend_node_id, emitted)
-        .await
-        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+    synapse_a11y::cdp_type_node(
+        &endpoint,
+        &title_hint,
+        target_id_hint.as_deref(),
+        backend_node_id,
+        emitted,
+    )
+    .await
+    .map_err(|err| mcp_error(err.code(), err.to_string()))?;
     let postcondition = if let Some(before) = before {
         tokio::time::sleep(std::time::Duration::from_millis(u64::from(
             verify_timeout_ms,
         )))
         .await;
-        let after = synapse_a11y::cdp_node_value(&endpoint, &title_hint, backend_node_id)
-            .await
-            .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+        let after = synapse_a11y::cdp_node_value(
+            &endpoint,
+            &title_hint,
+            target_id_hint.as_deref(),
+            backend_node_id,
+        )
+        .await
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
         verify_cdp_type_delta(verify_timeout_ms, emitted, before, after)?
     } else {
         postcondition_not_requested("act_type", "cdp_node.value")

@@ -812,9 +812,15 @@ async fn execute_cdp_aim(
         let title_hint = synapse_a11y::foreground_context(hwnd)
             .map(|context| context.window_title)
             .unwrap_or_default();
-        let landed = synapse_a11y::cdp_aim_node(&endpoint, &title_hint, cdp_aim.backend_node_id)
-            .await
-            .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+        let target_id_hint = synapse_a11y::cdp_target_from_element_id(&cdp_aim.element_id);
+        let landed = synapse_a11y::cdp_aim_node(
+            &endpoint,
+            &title_hint,
+            target_id_hint.as_deref(),
+            cdp_aim.backend_node_id,
+        )
+        .await
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
         tracing::info!(
             code = "M2_ACT_STROKE_CDP_AIM_MOVED",
             element_id = %cdp_aim.element_id,

@@ -645,14 +645,20 @@ impl SynapseService {
         let title_hint = synapse_a11y::foreground_context(hwnd)
             .map(|context| context.window_title)
             .unwrap_or_default();
-        let bitmap = synapse_a11y::cdp_capture_node_bgra(&endpoint, &title_hint, backend_node_id)
-            .await
-            .map_err(|err| {
-                mcp_error(
-                    err.code(),
-                    format!("web element OCR capture failed for {element_id}: {err}"),
-                )
-            })?;
+        let target_id_hint = synapse_a11y::cdp_target_from_element_id(element_id);
+        let bitmap = synapse_a11y::cdp_capture_node_bgra(
+            &endpoint,
+            &title_hint,
+            target_id_hint.as_deref(),
+            backend_node_id,
+        )
+        .await
+        .map_err(|err| {
+            mcp_error(
+                err.code(),
+                format!("web element OCR capture failed for {element_id}: {err}"),
+            )
+        })?;
         crate::m1::ocr_result_from_web_bitmap(
             bitmap.width,
             bitmap.height,
