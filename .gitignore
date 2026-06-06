@@ -1,4 +1,4 @@
-.claude/
+.claude/settings.local.json
 docs2/
 
 # CI workflows, internal agent doctrine, and private working state are not
