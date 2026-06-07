@@ -1,0 +1,68 @@
+# Multi-Agent Capability Matrix
+
+This matrix is the checked-in closure artifact for #803 under the #717 multi-agent epic. It is not Full State Verification. D1 still requires manual MCP calls and separate Source-of-Truth reads before accepting any shipped behavior.
+
+The matrix covers the general computer-use action, perception, session, target, lease, reflex, and diagnostic MCP tools. Domain-specific profile, storage, audit-export, replay, and EverQuest tools are outside this matrix unless they directly own foreground, cursor, target, or background computer-control state.
+
+Status values:
+
+- `background-pass`: current implementation has a background or per-session path that does not need global foreground or cursor.
+- `conditional-pass`: current implementation has a background path for some target forms and a declared leased foreground path for the rest.
+- `foreground-lease`: current implementation intentionally uses the shared foreground resource and must be lease-gated.
+- `gap-linked`: current implementation has a known multi-agent/background gap, and the follow-up issue is named here.
+- `control`: session, lease, reflex, or target control surface with no direct foreground action.
+- `diagnostic`: test-only operational diagnostic surface, not a user workflow primitive.
+- `sessionless`: no window or cursor state is used, but the resource is not session-owned.
+
+Research basis:
+
+- Microsoft UI Automation control patterns expose semantic behavior such as Invoke, Scroll, Value, Text, and Window through client/provider interfaces, which is the correct background-first path before coordinate input: https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview
+- Chrome DevTools Protocol `Target.createTarget` has `background`, `hidden`, and `focus` fields, and `Target.closeTarget` closes a target by id without activating it: https://chromedevtools.github.io/devtools-protocol/tot/Target/
+- Chrome DevTools Protocol `Input.dispatchKeyEvent`, `Input.dispatchMouseEvent`, and `Input.insertText` are per-page input surfaces, while `Page.navigate` navigates the current page target: https://chromedevtools.github.io/devtools-protocol/tot/Input/ and https://chromedevtools.github.io/devtools-protocol/tot/Page/
+
+| Tool | Class | Target source | Background path | Lease policy | Status | Follow-up | Manual source of truth |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| act_click | action | element target, explicit coordinate, or observed target root | UIA Invoke, Toggle, SelectionItem, ExpandCollapse, LegacyIAccessible, CDP, then HWND PostMessage for child window coordinates | coordinates require foreground lease when semantic tiers cannot deliver | conditional-pass | #718 #725 | CF_ACTION_LOG backend_tier_used and required_foreground plus target UI delta |
+| act_clipboard | action | system clipboard | read is background; write and clear use host clipboard | write and clear require foreground/session lease today | gap-linked | #799 #778 | clipboard bytes before and after plus CF_ACTION_LOG |
+| act_combo | action | timed act_press key steps | reflex timed sequence only | foreground keyboard lease gap through lowered act_press steps | gap-linked | #718 #782 #801 | CF_ACTION_LOG plus reflex history and foreground/cursor samples |
+| act_focus_window | action | exact hwnd, unique title_regex, or unique pid | none because the tool intentionally activates a window | requires foreground input lease and GetForegroundWindow readback | foreground-lease | #774 #777 | GetForegroundWindow before and after plus CF_ACTION_LOG |
+| act_keymap | action | foreground keyboard target | none for current backend | requires foreground input lease through SendInput tier | gap-linked | #782 | CF_ACTION_LOG required_foreground plus foreground/cursor samples |
+| act_launch | action | allowlisted executable target | hidden launch mode and CDP setup can run without visible activation | visible window launch may surface UI; hidden mode is required for background agent work | conditional-pass | #721 #776 | process table, launch process history row, window state, CF_ACTION_LOG |
+| act_pad | action | virtual gamepad backend | ViGEm or configured gamepad backend without foreground or cursor | no foreground lease; virtual device is not yet session-owned | sessionless | #801 | backend state snapshot and CF_ACTION_LOG |
+| act_press | action | foreground keyboard target | none for current backend | requires foreground input lease through SendInput tier | gap-linked | #782 | CF_ACTION_LOG required_foreground plus foreground/cursor samples |
+| act_run_shell | action | allowlisted executable child process | child process execution does not need foreground or cursor | no foreground lease; per-session env, cwd, and process tree isolation remain open | gap-linked | #802 | process table, file/process output, idempotency rows, CF_ACTION_LOG |
+| act_scroll | action | element target, point target, or current pointer | CDP wheel and element/point routing for supported targets | current-pointer and unsupported tiers require foreground lease today | gap-linked | #785 | target scroll value or DOM scroll position plus CF_ACTION_LOG |
+| act_set_value | action | UIA element target | UIA ValuePattern.SetValue with separate UIA value readback | no foreground lease for ValuePattern path | gap-linked | #784 #786 | UIA value before and after plus CF_ACTION_LOG |
+| act_spawn_agent | action | hidden terminal primary agent session | hidden pwsh launch, token injection, MCP registration, optional per-session target bind | no foreground lease when hidden launch succeeds | background-pass | #721 #801 | session_list row, process table, log files, CF_ACTION_LOG |
+| act_stroke | action | CDP element aim, coordinate, point, or path | CDP element aim can dispatch without foreground | coordinate, drag, and path tiers require foreground lease today | gap-linked | #729 #718 | target DOM/UI delta, cursor samples, CF_ACTION_LOG |
+| act_type | action | element target or foreground keyboard target | CDP insertText, native HWND text message, or UIA ValuePattern for into_element | no-into_element path requires foreground keyboard lease | gap-linked | #783 #786 | target text before and after plus CF_ACTION_LOG |
+| action_diagnostic_queue_full_setup | diagnostic | real action queue | saturates real queue using diagnostic confirmation token | no foreground lease unless backend queue work requires it | diagnostic | none | action queue snapshot and CF_ACTION_LOG |
+| action_diagnostic_rate_limit_override | diagnostic | real action backend token bucket | mutates diagnostic token bucket TTL with confirmation token | no foreground lease | diagnostic | none | token bucket before and after plus CF_ACTION_LOG |
+| audio_tail | perception | audio event ring | reads stored audio events | no foreground lease | sessionless | none | audio ring rows and response tail |
+| audio_transcribe | perception | audio file path or captured audio input | STT pipeline and file/audio bytes | no foreground lease | sessionless | none | transcript output and audio file bytes |
+| capture_screenshot | perception | current foreground window or explicit screen region | explicit screen region capture only | no lease, but session target is not honored today | gap-linked | #787 #789 | image file metadata and pixels plus foreground/window readback |
+| cdp_close_tab | browser action | CDP target id owned by this MCP session | Target.closeTarget on owned target id | no foreground lease and refuses cross-session ownership | background-pass | #722 #752 | CDP Target.getTargets readback and CF_ACTION_LOG |
+| cdp_open_tab | browser action | explicit browser window_hwnd or existing session target | Target.createTarget with background=true and session ownership | no foreground lease and no implicit foreground browser fallback | background-pass | #722 #790 #752 | CDP Target.getTargets readback, session target, CF_ACTION_LOG |
+| clear_target | target control | current MCP session id | per-session target registry clear | no foreground lease | control | #720 | get_target readback and session target registry |
+| control_lease_acquire | lease control | current MCP session id | shared lease registry mutation | lease acquisition is the operation | control | #719 #798 | control_lease_status before and after |
+| control_lease_release | lease control | current MCP session id | shared lease registry mutation | releases only held lease state | control | #719 #798 | control_lease_status before and after |
+| control_lease_status | lease control | lease registry | read-only lease registry read | no foreground lease | control | #719 | control_lease_status response and lease rows |
+| find | perception | explicit window_hwnd, session target, or compatibility foreground | UIA tree plus CDP and browser OCR enrichment | no foreground lease | background-pass | #720 #789 | returned element set and target hwnd/title readback |
+| get_target | target control | current MCP session id | per-session target registry read | no foreground lease | control | #720 | returned session id and current target |
+| observe | perception | explicit window_hwnd, session target, or compatibility foreground | UIA/WGC snapshot plus CDP and browser OCR enrichment | no foreground lease | background-pass | #720 #789 | Observation.foreground, elements, diagnostics, CF_OBSERVATIONS |
+| observe_delta | perception | reality baseline head and profile id | delta row read and coalescing against stored baseline | no foreground lease | conditional-pass | #536 | reality baseline/delta rows and rebase decision |
+| read_text | perception | element id, session target hwnd, or screen region | CDP clipped web element OCR and target hwnd-aware UIA region resolution | no foreground lease, but screen-region OCR is not per-window today | gap-linked | #788 #789 | OCR result plus captured region/window bytes |
+| reality_audit | perception | stored reality baseline and current observed state | drift audit over stored baseline/delta rows | no foreground lease | conditional-pass | #536 | reality audit row and drift verdict |
+| reality_baseline | perception | current observed profile and requested source | baseline row capture or read | no foreground lease | conditional-pass | #536 | reality baseline rows and returned head_seq |
+| reflex_cancel | reflex control | reflex id | registry cancel | no foreground lease | control | #801 | reflex_history or reflex_list readback |
+| reflex_history | reflex control | reflex runtime storage | read-only reflex history | no foreground lease | control | #801 | reflex history rows |
+| reflex_list | reflex control | reflex runtime registry | read-only reflex registry | no foreground lease | control | #801 | reflex registry rows |
+| reflex_register | reflex control | reflex definition and action steps | background registration of timed action sequence | registered actions may later need foreground/resource leases | gap-linked | #718 #801 | reflex_list and reflex_history rows |
+| release_all | action control | current held input/resource state | best-effort release through configured backends | no foreground lease; affects global held inputs today | control | #801 | action backend state snapshot and CF_ACTION_LOG |
+| session_list | session control | daemon session registry | read-only session registry | no foreground lease | control | #801 | session registry rows |
+| session_status | session control | current or named session id | read-only session registry lookup | no foreground lease | control | #801 | session registry row |
+| set_capture_target | perception control | process-global capture config | config state mutation | no foreground lease, but not session scoped today | gap-linked | #720 | capture target config state |
+| set_perception_mode | perception control | process-global perception config | config state mutation | no foreground lease, but not session scoped today | gap-linked | #720 | perception mode config state |
+| set_target | target control | current MCP session id plus validated HWND or owned CDP target | per-session target registry set | no foreground lease | background-pass | #720 #797 | get_target readback, validated window title/process |
+| subscribe | perception control | SSE event bus and optional a11y bridge | per-subscription event queue | no foreground lease, but event bridge is process-global | gap-linked | #720 | subscription id, health subscriber count, event bus state |
+| subscribe_cancel | perception control | subscription id | event bus unsubscribe | no foreground lease | control | #720 | health subscriber count and cancellation readback |
