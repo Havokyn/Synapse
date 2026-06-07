@@ -128,8 +128,11 @@ pub(crate) async fn act_click_with_handle_and_lease(
         )]
     } else {
         let mut tier_attempts = Vec::new();
-        let _lease_guard =
-            acquire_click_foreground_lease(foreground_lease_session_id, &mut tier_attempts)?;
+        let _lease_guard = acquire_click_foreground_lease(
+            foreground_lease_session_id,
+            params.hold_ms,
+            &mut tier_attempts,
+        )?;
         match record::execute_actor_actions(handle, actions, double_click_timing).await {
             Ok(()) => {
                 tier_attempts.push(click_tier_delivered(
@@ -477,9 +480,14 @@ pub(crate) fn click_reason_for_error_code(error_code: &str) -> &'static str {
 
 pub(super) fn acquire_click_foreground_lease(
     foreground_lease_session_id: Option<&str>,
+    hold_ms: u32,
     tier_attempts: &mut Vec<ActClickTierAttempt>,
 ) -> Result<crate::m2::ForegroundInputLeaseGuard, ErrorData> {
-    match crate::m2::acquire_foreground_input_lease("act_click", foreground_lease_session_id) {
+    match crate::m2::acquire_foreground_input_lease_with_ttl(
+        "act_click",
+        foreground_lease_session_id,
+        crate::m2::foreground_input_lease_ttl_for_hold_ms(hold_ms),
+    ) {
         Ok(guard) => Ok(guard),
         Err(error) => {
             let error_code = click_error_data_code(&error)

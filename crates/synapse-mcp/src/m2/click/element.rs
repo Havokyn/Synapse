@@ -443,8 +443,11 @@ async fn execute_coordinate_element_click(
         ));
         backend_used_name(params.backend).to_owned()
     } else {
-        let _lease_guard =
-            acquire_click_foreground_lease(foreground_lease_session_id, &mut tier_attempts)?;
+        let _lease_guard = acquire_click_foreground_lease(
+            foreground_lease_session_id,
+            params.hold_ms,
+            &mut tier_attempts,
+        )?;
         match record::execute_actor_actions(handle, actions, timing).await {
             Ok(()) => {
                 tier_attempts.push(click_tier_delivered(

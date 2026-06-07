@@ -14,6 +14,7 @@ mod type_text;
 use std::{
     fmt,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use rmcp::{ErrorData, model::ErrorCode};
@@ -26,6 +27,14 @@ use synapse_action::{
 use synapse_core::{Point, error_codes};
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+const FOREGROUND_RESTORE_STABILITY_SAMPLES: usize = 6;
+const FOREGROUND_RESTORE_STABILITY_INTERVAL_MS: u64 = 250;
+const FOREGROUND_RESTORE_LEASE_MARGIN_MS: u64 = 1_000;
+pub(crate) const FOREGROUND_CONTEXT_RESTORE_STABILITY_MS: u64 =
+    FOREGROUND_RESTORE_STABILITY_INTERVAL_MS * FOREGROUND_RESTORE_STABILITY_SAMPLES as u64;
+const FOREGROUND_RESTORE_STABILITY_INTERVAL: Duration =
+    Duration::from_millis(FOREGROUND_RESTORE_STABILITY_INTERVAL_MS);
 
 #[allow(unused_imports)]
 pub use click::{ActClickParams, ActClickPostcondition, ActClickResponse, act_click_with_handle};
@@ -141,6 +150,8 @@ impl Drop for ForegroundInputLeaseGuard {
 struct ForegroundInputContextSnapshot {
     cursor: Option<Point>,
     foreground_hwnd: Option<i64>,
+    foreground_pid: Option<u32>,
+    foreground_process_started_at_100ns: Option<u64>,
     foreground_title: Option<String>,
     cursor_capture_error: Option<String>,
     foreground_capture_error: Option<String>,
@@ -155,14 +166,28 @@ impl ForegroundInputContextSnapshot {
             Ok(point) => (Some(point), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        let (foreground_hwnd, foreground_title, foreground_capture_error) = match foreground_read {
-            Ok(context) => (Some(context.hwnd), Some(context.window_title), None),
-            Err(error) => (None, None, Some(error.to_string())),
+        let (
+            foreground_hwnd,
+            foreground_pid,
+            foreground_process_started_at_100ns,
+            foreground_title,
+            foreground_capture_error,
+        ) = match foreground_read {
+            Ok(context) => (
+                Some(context.hwnd),
+                Some(context.pid),
+                process_started_at_100ns(context.pid),
+                Some(context.window_title),
+                None,
+            ),
+            Err(error) => (None, None, None, None, Some(error.to_string())),
         };
 
         let snapshot = Self {
             cursor,
             foreground_hwnd,
+            foreground_pid,
+            foreground_process_started_at_100ns,
             foreground_title,
             cursor_capture_error,
             foreground_capture_error,
@@ -181,6 +206,8 @@ impl ForegroundInputContextSnapshot {
                     cursor_x = cursor.x,
                     cursor_y = cursor.y,
                     foreground_hwnd = ?self.foreground_hwnd,
+                    foreground_pid = ?self.foreground_pid,
+                    foreground_process_started_at_100ns = ?self.foreground_process_started_at_100ns,
                     foreground_title = ?self.foreground_title,
                     "readback=foreground_input_context outcome=captured"
                 );
@@ -195,6 +222,8 @@ impl ForegroundInputContextSnapshot {
             reason_code = self.capture_reason_code(),
             cursor = ?self.cursor,
             foreground_hwnd = ?self.foreground_hwnd,
+            foreground_pid = ?self.foreground_pid,
+            foreground_process_started_at_100ns = ?self.foreground_process_started_at_100ns,
             cursor_error = ?self.cursor_capture_error,
             foreground_error = ?self.foreground_capture_error,
             "foreground input context capture incomplete"
@@ -269,30 +298,131 @@ impl ForegroundInputContextSnapshot {
             );
             return "skipped";
         };
-
-        if !foreground_window_is_alive(hwnd) {
+        let Some(expected_pid) = self.foreground_pid else {
             tracing::warn!(
                 code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_SKIPPED,
                 tool,
                 session_id,
-                reason_code = "prior_foreground_closed",
+                reason_code = "foreground_pid_capture_unavailable",
                 foreground_hwnd = hwnd,
                 foreground_title = ?self.foreground_title,
-                "foreground window restore skipped because prior HWND is gone"
+                "foreground window restore skipped because prior owner pid was not captured"
+            );
+            return "skipped";
+        };
+        let Some(expected_process_started_at_100ns) = self.foreground_process_started_at_100ns
+        else {
+            tracing::warn!(
+                code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_SKIPPED,
+                tool,
+                session_id,
+                reason_code = "foreground_process_identity_capture_unavailable",
+                foreground_hwnd = hwnd,
+                expected_pid,
+                foreground_title = ?self.foreground_title,
+                "foreground window restore skipped because prior owner process identity was not captured"
+            );
+            return "skipped";
+        };
+
+        let readiness = foreground_window_restore_readiness(
+            hwnd,
+            expected_pid,
+            expected_process_started_at_100ns,
+        );
+        if !readiness.alive {
+            tracing::warn!(
+                code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_SKIPPED,
+                tool,
+                session_id,
+                reason_code = readiness.reason_code,
+                foreground_hwnd = hwnd,
+                expected_pid,
+                actual_pid = ?readiness.actual_pid,
+                expected_process_started_at_100ns,
+                actual_process_started_at_100ns = ?readiness.actual_process_started_at_100ns,
+                exit_code = ?readiness.exit_code,
+                wait_status = ?readiness.wait_status,
+                foreground_title = ?self.foreground_title,
+                "foreground window restore skipped because prior HWND/PID is not restorable"
             );
             return "skipped";
         }
 
         match synapse_a11y::focus_window(hwnd) {
             Ok(()) => match synapse_a11y::current_foreground_context() {
-                Ok(after) if after.hwnd == hwnd => {
+                Ok(after) if after.hwnd == hwnd && after.pid == expected_pid => {
+                    for sample in 1..=FOREGROUND_RESTORE_STABILITY_SAMPLES {
+                        std::thread::sleep(FOREGROUND_RESTORE_STABILITY_INTERVAL);
+                        let stable = foreground_window_restore_readiness(
+                            hwnd,
+                            expected_pid,
+                            expected_process_started_at_100ns,
+                        );
+                        if !stable.alive {
+                            tracing::warn!(
+                                code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_SKIPPED,
+                                tool,
+                                session_id,
+                                reason_code = stable.reason_code,
+                                foreground_hwnd = hwnd,
+                                expected_pid,
+                                actual_pid = ?stable.actual_pid,
+                                expected_process_started_at_100ns,
+                                actual_process_started_at_100ns = ?stable.actual_process_started_at_100ns,
+                                exit_code = ?stable.exit_code,
+                                wait_status = ?stable.wait_status,
+                                foreground_title = ?self.foreground_title,
+                                stability_sample = sample,
+                                "foreground window restore skipped because prior HWND/PID closed during restore"
+                            );
+                            return "skipped";
+                        }
+                        match synapse_a11y::current_foreground_context() {
+                            Ok(stable_after)
+                                if stable_after.hwnd == hwnd
+                                    && stable_after.pid == expected_pid => {}
+                            Ok(stable_after) => {
+                                tracing::error!(
+                                    code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_FAILED,
+                                    tool,
+                                    session_id,
+                                    reason_code = "foreground_stability_readback_mismatch",
+                                    requested_hwnd = hwnd,
+                                    expected_pid,
+                                    actual_hwnd = stable_after.hwnd,
+                                    actual_pid = stable_after.pid,
+                                    actual_title = %stable_after.window_title,
+                                    stability_sample = sample,
+                                    "foreground window restore stability readback mismatch"
+                                );
+                                return "failed";
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    code = error_codes::ACTION_FOREGROUND_CONTEXT_RESTORE_FAILED,
+                                    tool,
+                                    session_id,
+                                    reason_code = "foreground_stability_readback_failed",
+                                    foreground_hwnd = hwnd,
+                                    expected_pid,
+                                    detail = %error,
+                                    stability_sample = sample,
+                                    "foreground window restore stability readback failed"
+                                );
+                                return "failed";
+                            }
+                        }
+                    }
                     tracing::info!(
                         code = "INPUT_LEASE_CONTEXT_FOREGROUND_RESTORED",
                         tool,
                         session_id,
                         foreground_hwnd = hwnd,
+                        foreground_pid = expected_pid,
                         foreground_title = ?self.foreground_title,
                         after_hwnd = after.hwnd,
+                        after_pid = after.pid,
                         after_title = %after.window_title,
                         "readback=foreground_window outcome=restored"
                     );
@@ -305,7 +435,9 @@ impl ForegroundInputContextSnapshot {
                         session_id,
                         reason_code = "foreground_readback_mismatch",
                         requested_hwnd = hwnd,
+                        expected_pid,
                         actual_hwnd = after.hwnd,
+                        actual_pid = after.pid,
                         actual_title = %after.window_title,
                         "foreground window restore readback mismatch"
                     );
@@ -331,6 +463,7 @@ impl ForegroundInputContextSnapshot {
                     session_id,
                     reason_code = "foreground_restore_failed",
                     foreground_hwnd = hwnd,
+                    foreground_pid = expected_pid,
                     foreground_title = ?self.foreground_title,
                     detail = %error,
                     "foreground window restore failed"
@@ -350,42 +483,203 @@ impl ForegroundInputContextSnapshot {
     }
 }
 
+#[derive(Debug)]
+struct ForegroundWindowRestoreReadiness {
+    alive: bool,
+    reason_code: &'static str,
+    actual_pid: Option<u32>,
+    actual_process_started_at_100ns: Option<u64>,
+    exit_code: Option<u32>,
+    wait_status: Option<&'static str>,
+}
+
 #[cfg(windows)]
-fn foreground_window_is_alive(hwnd: i64) -> bool {
+fn foreground_window_restore_readiness(
+    hwnd: i64,
+    expected_pid: u32,
+    expected_process_started_at_100ns: u64,
+) -> ForegroundWindowRestoreReadiness {
     use std::ffi::c_void;
 
     use windows::Win32::{
-        Foundation::{CloseHandle, HWND},
-        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        Foundation::{CloseHandle, FILETIME, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        },
         UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow},
     };
 
-    const STILL_ACTIVE_EXIT_CODE: u32 = 259;
-
     let hwnd = HWND(hwnd as *mut c_void);
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        return false;
+        return ForegroundWindowRestoreReadiness {
+            alive: false,
+            reason_code: "prior_foreground_closed",
+            actual_pid: None,
+            actual_process_started_at_100ns: None,
+            exit_code: None,
+            wait_status: None,
+        };
     }
 
     let mut process_id = 0_u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process_id)) };
     if process_id == 0 {
-        return false;
+        return ForegroundWindowRestoreReadiness {
+            alive: false,
+            reason_code: "prior_foreground_owner_unavailable",
+            actual_pid: None,
+            actual_process_started_at_100ns: None,
+            exit_code: None,
+            wait_status: None,
+        };
     }
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
-    else {
-        return false;
+    if process_id != expected_pid {
+        return ForegroundWindowRestoreReadiness {
+            alive: false,
+            reason_code: "prior_foreground_owner_changed",
+            actual_pid: Some(process_id),
+            actual_process_started_at_100ns: None,
+            exit_code: None,
+            wait_status: None,
+        };
+    }
+    let Ok(handle) = (unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            process_id,
+        )
+    }) else {
+        return ForegroundWindowRestoreReadiness {
+            alive: false,
+            reason_code: "prior_foreground_process_unavailable",
+            actual_pid: Some(process_id),
+            actual_process_started_at_100ns: None,
+            exit_code: None,
+            wait_status: None,
+        };
     };
     let mut exit_code = 0_u32;
-    let alive = unsafe { GetExitCodeProcess(handle, &raw mut exit_code) }.is_ok()
-        && exit_code == STILL_ACTIVE_EXIT_CODE;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let actual_process_started_at_100ns = unsafe {
+        GetProcessTimes(
+            handle,
+            std::ptr::addr_of_mut!(creation),
+            std::ptr::addr_of_mut!(exit),
+            std::ptr::addr_of_mut!(kernel),
+            std::ptr::addr_of_mut!(user),
+        )
+    }
+    .is_ok()
+    .then_some(filetime_ticks(creation));
+    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
+    let exit_code = unsafe { GetExitCodeProcess(handle, &raw mut exit_code) }
+        .is_ok()
+        .then_some(exit_code);
     let _ = unsafe { CloseHandle(handle) };
-    alive
+
+    let (alive, reason_code, wait_status) = if actual_process_started_at_100ns.is_none() {
+        (
+            false,
+            "prior_foreground_process_identity_unavailable",
+            Some("identity_read_failed"),
+        )
+    } else if actual_process_started_at_100ns != Some(expected_process_started_at_100ns) {
+        (
+            false,
+            "prior_foreground_process_identity_changed",
+            Some("identity_mismatch"),
+        )
+    } else if wait_result == WAIT_TIMEOUT {
+        (true, "prior_foreground_alive", Some("timeout_nonsignaled"))
+    } else if wait_result == WAIT_OBJECT_0 {
+        (
+            false,
+            "prior_foreground_process_exited",
+            Some("object_signaled"),
+        )
+    } else {
+        (
+            false,
+            "prior_foreground_process_wait_failed",
+            Some("unexpected_wait_result"),
+        )
+    };
+    ForegroundWindowRestoreReadiness {
+        alive,
+        reason_code,
+        actual_pid: Some(process_id),
+        actual_process_started_at_100ns,
+        exit_code,
+        wait_status,
+    }
+}
+
+#[cfg(windows)]
+fn process_started_at_100ns(pid: u32) -> Option<u64> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, FILETIME},
+        System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let started_at_100ns = unsafe {
+        GetProcessTimes(
+            handle,
+            std::ptr::addr_of_mut!(creation),
+            std::ptr::addr_of_mut!(exit),
+            std::ptr::addr_of_mut!(kernel),
+            std::ptr::addr_of_mut!(user),
+        )
+    }
+    .is_ok()
+    .then_some(filetime_ticks(creation));
+    let _ = unsafe { CloseHandle(handle) };
+    started_at_100ns
+}
+
+#[cfg(windows)]
+fn filetime_ticks(value: windows::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
 }
 
 #[cfg(not(windows))]
-fn foreground_window_is_alive(_hwnd: i64) -> bool {
-    false
+fn foreground_window_restore_readiness(
+    _hwnd: i64,
+    _expected_pid: u32,
+    _expected_process_started_at_100ns: u64,
+) -> ForegroundWindowRestoreReadiness {
+    ForegroundWindowRestoreReadiness {
+        alive: false,
+        reason_code: "foreground_restore_unsupported_platform",
+        actual_pid: None,
+        actual_process_started_at_100ns: None,
+        exit_code: None,
+        wait_status: None,
+    }
+}
+
+#[cfg(not(windows))]
+fn process_started_at_100ns(_pid: u32) -> Option<u64> {
+    None
+}
+
+pub(crate) fn foreground_input_lease_ttl_for_hold_ms(hold_ms: u32) -> u64 {
+    synapse_action::DEFAULT_LEASE_TTL_MS
+        .max(
+            u64::from(hold_ms)
+                .saturating_add(FOREGROUND_CONTEXT_RESTORE_STABILITY_MS)
+                .saturating_add(FOREGROUND_RESTORE_LEASE_MARGIN_MS),
+        )
+        .min(synapse_action::MAX_LEASE_TTL_MS)
 }
 
 pub(crate) fn acquire_foreground_input_lease(

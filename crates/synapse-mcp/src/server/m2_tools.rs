@@ -967,9 +967,7 @@ fn acquire_tool_foreground_input_lease_with_ttl(
 }
 
 fn lease_ttl_for_hold_ms(hold_ms: u32) -> u64 {
-    synapse_action::DEFAULT_LEASE_TTL_MS
-        .max(u64::from(hold_ms).saturating_add(250))
-        .min(synapse_action::MAX_LEASE_TTL_MS)
+    crate::m2::foreground_input_lease_ttl_for_hold_ms(hold_ms)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2378,7 +2376,7 @@ mod tests {
             lease_ttl_for_hold_ms(1),
             synapse_action::DEFAULT_LEASE_TTL_MS
         );
-        assert_eq!(lease_ttl_for_hold_ms(6_000), 6_250);
+        assert_eq!(lease_ttl_for_hold_ms(6_000), 8_500);
         assert_eq!(
             lease_ttl_for_hold_ms(u32::MAX),
             synapse_action::MAX_LEASE_TTL_MS
