@@ -179,6 +179,67 @@ impl Db {
             })
     }
 
+    /// Applies key deletes and key/value writes to one column family in a
+    /// single synchronous `RocksDB` batch while bypassing pressure shedding.
+    ///
+    /// This is reserved for bounded coordination-state rewrites where readers
+    /// must never observe a release gap between deleting one owner row and
+    /// writing another.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::WriteFailed`] when the column family is missing
+    /// or `RocksDB` rejects the write batch.
+    #[tracing::instrument(skip_all, fields(cf_name))]
+    pub fn mutate_batch_pressure_bypass<D, K, P, PK, PV>(
+        &self,
+        cf_name: &str,
+        deletes: D,
+        puts: P,
+    ) -> StorageResult<()>
+    where
+        D: IntoIterator<Item = K>,
+        K: Into<Vec<u8>>,
+        P: IntoIterator<Item = (PK, PV)>,
+        PK: Into<Vec<u8>>,
+        PV: Into<Vec<u8>>,
+    {
+        let cf = self
+            .inner
+            .cf_handle(cf_name)
+            .ok_or_else(|| StorageError::WriteFailed {
+                cf_name: cf_name.to_owned(),
+                detail: "column family handle missing".to_owned(),
+            })?;
+        let deletes = deletes.into_iter().map(Into::into).collect::<Vec<_>>();
+        let puts = puts
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect::<Vec<_>>();
+        if deletes.is_empty() && puts.is_empty() {
+            return Ok(());
+        }
+        let mut batch = WriteBatch::default();
+        for key in deletes {
+            batch.delete_cf(&cf, key);
+        }
+        for (key, value) in puts {
+            batch.put_cf(&cf, key, value);
+        }
+        self.inner
+            .write(batch)
+            .map_err(|source| StorageError::WriteFailed {
+                cf_name: cf_name.to_owned(),
+                detail: source.to_string(),
+            })?;
+        self.inner
+            .flush_cf(&cf)
+            .map_err(|source| StorageError::WriteFailed {
+                cf_name: cf_name.to_owned(),
+                detail: source.to_string(),
+            })
+    }
+
     /// Deletes key rows from one column family and flushes them immediately.
     ///
     /// Deletions are allowed under disk pressure because they reduce retained

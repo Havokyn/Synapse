@@ -12,7 +12,10 @@
 //! own session id; a missing session id is a fail-loud `TOOL_PARAMS_INVALID`.
 
 use super::{
-    ErrorData, Json, Parameters, SynapseService, empty_input_schema, mcp_error, tool, tool_router,
+    ErrorData, Json, Parameters, SynapseService, empty_input_schema, mcp_error,
+    session_registry::{SessionRegistryRead, unix_time_ms_now},
+    session_tools::validate_session_id,
+    tool, tool_router,
 };
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use schemars::JsonSchema;
@@ -28,6 +31,18 @@ pub struct ControlLeaseAcquireParams {
     /// renewed on every leased action and on a repeat acquire by the holder, so
     /// a short TTL is the safety floor against a crashed holder, not a hard cap
     /// on how long real work can take.
+    #[serde(default = "default_lease_ttl_ms")]
+    #[schemars(default = "default_lease_ttl_ms", range(min = 100, max = 30000))]
+    pub ttl_ms: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ControlLeaseHandoffParams {
+    /// Live MCP session id that should receive the foreground input lease.
+    pub to_session: String,
+    /// Fresh lease lifetime in milliseconds for the recipient. Clamped to
+    /// [100, 30000] like `control_lease_acquire`.
     #[serde(default = "default_lease_ttl_ms")]
     #[schemars(default = "default_lease_ttl_ms", range(min = 100, max = 30000))]
     pub ttl_ms: u64,
@@ -126,6 +141,53 @@ impl SynapseService {
         self.restore_session_lease_if_needed(&session_id)?;
         let response = release_lease_for_session(&session_id)?;
         self.delete_persisted_session_lease(&session_id)?;
+        Ok(Json(response))
+    }
+
+    #[tool(
+        description = "Atomically hand off the input lease from this MCP session to a named live peer without releasing it into a race. The caller must be the current holder; the recipient must be a live registered MCP session. Stale, closed, unknown, malformed, or self recipients fail closed."
+    )]
+    pub async fn control_lease_handoff(
+        &self,
+        params: Parameters<ControlLeaseHandoffParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ControlLeaseResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "control_lease_handoff",
+            "tool.invocation kind=control_lease_handoff"
+        );
+        let session_id = require_lease_session_id(&request_context)?;
+        self.restore_session_lease_if_needed(&session_id)?;
+        let to_session = params.0.to_session;
+        self.ensure_handoff_recipient_live(&session_id, &to_session)?;
+        let handoff = handoff_lease_for_session(&session_id, &to_session, params.0.ttl_ms)?;
+        let response =
+            ControlLeaseResponse::from_status("handed_off", session_id.clone(), &handoff.current);
+        let persist_readback =
+            match self.persist_session_lease_handoff(&session_id, &to_session, &handoff.current) {
+                Ok(readback) => readback,
+                Err(error) => {
+                    self.rollback_handoff_after_persist_failure(
+                        &session_id,
+                        &to_session,
+                        &handoff.prior,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            };
+        tracing::info!(
+            code = "INPUT_LEASE_HANDOFF_COMMITTED",
+            from_session_id = session_id,
+            to_session_id = to_session,
+            from_row_existed_before = persist_readback.from_row_existed_before,
+            from_row_exists_after = persist_readback.from_row_exists_after,
+            from_row_deleted = persist_readback.from_row_deleted,
+            to_row_exists_after = persist_readback.to_row_exists_after,
+            to_row_session_id = ?persist_readback.to_row_session_id,
+            "readback=input_lease edge=handoff_committed"
+        );
         Ok(Json(response))
     }
 
@@ -234,9 +296,120 @@ fn release_lease_for_session(session_id: &str) -> Result<ControlLeaseResponse, E
     }
 }
 
+fn handoff_lease_for_session(
+    from_session_id: &str,
+    to_session_id: &str,
+    ttl_ms: u64,
+) -> Result<synapse_action::LeaseHandoff, ErrorData> {
+    match lease::handoff(from_session_id, to_session_id, lease::ttl_from_ms(ttl_ms)) {
+        Ok(handoff) => {
+            tracing::info!(
+                code = "INPUT_LEASE_HANDED_OFF",
+                from_session_id,
+                to_session_id,
+                prior = ?handoff.prior,
+                current = ?handoff.current,
+                "readback=input_lease outcome=handed_off"
+            );
+            Ok(handoff)
+        }
+        Err(error) => Err(lease_not_held_error(from_session_id, &error)),
+    }
+}
+
 fn lease_status_for_session(session_id: &str) -> ControlLeaseResponse {
     let status = lease::status();
     ControlLeaseResponse::from_status("status", session_id.to_owned(), &status)
+}
+
+impl SynapseService {
+    fn ensure_handoff_recipient_live(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+    ) -> Result<(), ErrorData> {
+        validate_session_id(to_session_id)?;
+        if from_session_id == to_session_id {
+            return Err(ErrorData::new(
+                ErrorCode(-32099),
+                "control_lease_handoff requires a different recipient session",
+                Some(json!({
+                    "code": error_codes::TOOL_PARAMS_INVALID,
+                    "from_session_id": from_session_id,
+                    "to_session_id": to_session_id,
+                })),
+            ));
+        }
+        let now_unix_ms = unix_time_ms_now();
+        let recipient = {
+            let guard = self.session_registry_ref().lock().map_err(|_error| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "session registry lock poisoned while validating lease handoff recipient",
+                )
+            })?;
+            guard
+                .reads(now_unix_ms)
+                .into_iter()
+                .find(|entry| entry.session_id == to_session_id)
+        };
+        match recipient.as_ref() {
+            Some(read) if read.lifecycle == "live" => Ok(()),
+            _ => Err(recipient_unknown_error(
+                from_session_id,
+                to_session_id,
+                recipient.as_ref(),
+            )),
+        }
+    }
+
+    fn rollback_handoff_after_persist_failure(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        prior: &LeaseStatus,
+        error: &ErrorData,
+    ) {
+        let rollback_ttl_ms = prior
+            .expires_in_ms
+            .or(prior.ttl_ms)
+            .unwrap_or(synapse_action::DEFAULT_LEASE_TTL_MS);
+        match lease::handoff(
+            to_session_id,
+            from_session_id,
+            lease::ttl_from_ms(rollback_ttl_ms),
+        ) {
+            Ok(rollback) => {
+                let rollback_persist = self.persist_session_lease_handoff(
+                    to_session_id,
+                    from_session_id,
+                    &rollback.current,
+                );
+                tracing::error!(
+                    code = error_codes::TOOL_INTERNAL_ERROR,
+                    from_session_id,
+                    to_session_id,
+                    rollback_persisted = rollback_persist.is_ok(),
+                    rollback_persist_error = ?rollback_persist.as_ref().err(),
+                    original_error = ?error,
+                    rollback = ?rollback,
+                    "input lease handoff failed durability write; rolled memory back to prior holder"
+                );
+            }
+            Err(rollback_error) => {
+                let recipient_released = lease::release_if_owner(to_session_id);
+                tracing::error!(
+                    code = error_codes::TOOL_INTERNAL_ERROR,
+                    from_session_id,
+                    to_session_id,
+                    recipient_released,
+                    rollback_error = ?rollback_error,
+                    original_error = ?error,
+                    "input lease handoff failed durability write and memory rollback could not restore prior holder"
+                );
+            }
+        }
+    }
 }
 
 /// Resolves the calling session id, failing loud when absent. The lease is
@@ -291,6 +464,24 @@ fn lease_cleanup_pending_error(
     )
 }
 
+fn recipient_unknown_error(
+    from_session_id: &str,
+    to_session_id: &str,
+    recipient: Option<&SessionRegistryRead>,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!("lease handoff recipient session {to_session_id:?} is not live"),
+        Some(json!({
+            "code": error_codes::RECIPIENT_UNKNOWN,
+            "from_session_id": from_session_id,
+            "to_session_id": to_session_id,
+            "recipient": recipient,
+            "resolution": "start or reconnect the recipient agent so it registers a live MCP session, then retry handoff",
+        })),
+    )
+}
+
 fn lease_not_held_error(session_id: &str, error: &synapse_action::LeaseError) -> ErrorData {
     let holder = match error {
         synapse_action::LeaseError::NotHeld { holder, .. } => holder.clone(),
@@ -308,7 +499,10 @@ fn lease_not_held_error(session_id: &str, error: &synapse_action::LeaseError) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_lease_for_session, lease_status_for_session, release_lease_for_session};
+    use super::{
+        acquire_lease_for_session, handoff_lease_for_session, lease_status_for_session,
+        release_lease_for_session,
+    };
     use crate::test_support;
     use synapse_core::error_codes;
 
@@ -389,6 +583,41 @@ mod tests {
         println!(
             "readback=input_lease step=busy requesting={contender} holder={:?}",
             status.owner_session_id
+        );
+        test_support::reset_lease(TEST_RESET_REASON);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_handoff_transfers_to_recipient_and_prior_owner_is_busy() -> anyhow::Result<()> {
+        let _serial = test_support::lease_serial(TEST_RESET_REASON);
+        let owner = "fsv-tool-handoff-owner";
+        let recipient = "fsv-tool-handoff-recipient";
+        let _held = acquire_lease_for_session(owner, 5_000)
+            .map_err(|error| anyhow::anyhow!("owner acquire failed: {error:?}"))?;
+
+        let handoff = handoff_lease_for_session(owner, recipient, 6_000)
+            .map_err(|error| anyhow::anyhow!("handoff failed: {error:?}"))?;
+        assert_eq!(handoff.prior.owner_session_id.as_deref(), Some(owner));
+        assert_eq!(handoff.current.owner_session_id.as_deref(), Some(recipient));
+
+        let recipient_status = lease_status_for_session(recipient);
+        assert!(recipient_status.is_owner);
+        assert_eq!(
+            recipient_status.owner_session_id.as_deref(),
+            Some(recipient)
+        );
+        let owner_error = match acquire_lease_for_session(owner, 5_000) {
+            Ok(response) => anyhow::bail!("prior owner unexpectedly reacquired: {response:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error_code(&owner_error).as_deref(),
+            Some(error_codes::ACTION_FOREGROUND_LEASE_BUSY)
+        );
+        println!(
+            "readback=input_lease step=handoff owner_before={:?} owner_after={:?}",
+            handoff.prior.owner_session_id, recipient_status.owner_session_id
         );
         test_support::reset_lease(TEST_RESET_REASON);
         Ok(())

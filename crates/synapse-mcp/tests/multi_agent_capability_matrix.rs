@@ -6,7 +6,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 47] = [
+const EXPECTED_MATRIX_TOOLS: [&str; 51] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -33,6 +33,7 @@ const EXPECTED_MATRIX_TOOLS: [&str; 47] = [
     "cdp_open_tab",
     "clear_target",
     "control_lease_acquire",
+    "control_lease_handoff",
     "control_lease_release",
     "control_lease_status",
     "find",
@@ -54,6 +55,9 @@ const EXPECTED_MATRIX_TOOLS: [&str; 47] = [
     "set_target",
     "subscribe",
     "subscribe_cancel",
+    "target_claim",
+    "target_claim_status",
+    "target_release",
 ];
 
 const ALLOWED_STATUS: [&str; 7] = [
@@ -269,6 +273,7 @@ fn is_matrix_scope_tool(name: &str) -> bool {
         || name.starts_with("cdp_")
         || name.starts_with("control_lease_")
         || name.starts_with("reflex_")
+        || name.starts_with("target_")
         || matches!(
             name,
             "capture_screenshot"

@@ -380,7 +380,7 @@ fn session_target_wire(target: &SessionTarget) -> TargetWire {
     }
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), ErrorData> {
+pub(crate) fn validate_session_id(session_id: &str) -> Result<(), ErrorData> {
     if session_id.trim().is_empty() {
         return Err(ErrorData::new(
             ErrorCode(-32099),

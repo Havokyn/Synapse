@@ -110,6 +110,42 @@ fn batch_edges_empty_single_byte_and_size_boundary() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn mutate_batch_pressure_bypass_deletes_and_puts_atomically() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;
+    db.put_batch_pressure_bypass(
+        cf::CF_SESSIONS,
+        [
+            (b"lease/owner-a".to_vec(), br#"{"session":"a"}"#.to_vec()),
+            (b"lease/neighbor".to_vec(), br#"{"session":"n"}"#.to_vec()),
+        ],
+    )?;
+
+    let before = db.scan_cf(cf::CF_SESSIONS)?;
+    println!(
+        "regression_state=cf_scan case=mutate_batch before_count={} observed={:?}",
+        before.len(),
+        printable_rows(&before)
+    );
+    db.mutate_batch_pressure_bypass(
+        cf::CF_SESSIONS,
+        [b"lease/owner-a".to_vec()],
+        [(b"lease/owner-b".to_vec(), br#"{"session":"b"}"#.to_vec())],
+    )?;
+
+    let after = db.scan_cf(cf::CF_SESSIONS)?;
+    println!(
+        "regression_state=cf_scan case=mutate_batch after_count={} observed={:?}",
+        after.len(),
+        printable_rows(&after)
+    );
+    assert!(!after.iter().any(|(key, _value)| key == b"lease/owner-a"));
+    assert!(after.iter().any(|(key, _value)| key == b"lease/owner-b"));
+    assert!(after.iter().any(|(key, _value)| key == b"lease/neighbor"));
+    Ok(())
+}
+
+#[test]
 fn batch_throughput_10k_events_under_200ms() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;

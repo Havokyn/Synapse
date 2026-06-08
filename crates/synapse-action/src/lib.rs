@@ -59,7 +59,7 @@ pub use invoke::{
     CoordinateFallbackPlan, ElementClickOutcome, click_element_or_fallback, invoke_element,
 };
 pub use lease::{
-    DEFAULT_LEASE_TTL_MS, LeaseError, LeaseOutcome, LeaseStatus, MAX_LEASE_TTL_MS,
+    DEFAULT_LEASE_TTL_MS, LeaseError, LeaseHandoff, LeaseOutcome, LeaseStatus, MAX_LEASE_TTL_MS,
     MIN_LEASE_TTL_MS, OPERATOR_LEASE_OWNER_SESSION_ID, OPERATOR_PREEMPT_LEASE_TTL_MS,
     complete_expired_cleanup as complete_expired_input_lease_cleanup,
     expired_cleanup_snapshot as expired_input_lease_cleanup_snapshot,

@@ -120,6 +120,13 @@ pub enum LeaseOutcome {
     },
 }
 
+/// Before/after snapshots from an atomic holder-to-peer handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseHandoff {
+    pub prior: LeaseStatus,
+    pub current: LeaseStatus,
+}
+
 /// Error returned by [`renew`]/[`release`] when the caller is not the holder.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LeaseError {
@@ -324,6 +331,39 @@ pub fn release(session_id: &str) -> Result<LeaseStatus, LeaseError> {
     result
 }
 
+/// Transfers the currently held lease from `from_session_id` directly to
+/// `to_session_id` without releasing it into the free pool.
+///
+/// # Errors
+///
+/// Returns [`LeaseError::NotHeld`] when `from_session_id` does not currently
+/// hold the lease. Lapsed holders are expired before the check, so a handoff
+/// cannot revive an expired lease without the normal held-input cleanup path.
+pub fn handoff(
+    from_session_id: &str,
+    to_session_id: &str,
+    ttl: Duration,
+) -> Result<LeaseHandoff, LeaseError> {
+    let now = Instant::now();
+    let mut guard = lock();
+    let _expired = expire_if_lapsed(&mut guard, now);
+    match guard.as_mut() {
+        Some(lease) if lease.owner_session_id == from_session_id => {
+            let prior = lease.status(now);
+            lease.owner_session_id = to_session_id.to_owned();
+            lease.acquired_at = now;
+            lease.renewed_at = now;
+            lease.ttl = ttl;
+            let current = lease.status(now);
+            Ok(LeaseHandoff { prior, current })
+        }
+        other => Err(LeaseError::NotHeld {
+            session_id: from_session_id.to_owned(),
+            holder: other.map(|lease| lease.owner_session_id.clone()),
+        }),
+    }
+}
+
 /// Releases the lease iff `session_id` currently holds it. Infallible; for
 /// session-disconnect/expiry cleanup where a non-owner call must be a no-op.
 ///
@@ -471,6 +511,51 @@ mod tests {
             try_acquire(next, ttl_from_ms(5_000)),
             LeaseOutcome::Acquired(_)
         ));
+        reset();
+    }
+
+    #[test]
+    fn handoff_transfers_without_unheld_gap() {
+        let _serial = serial();
+        let owner = "fsv-handoff-owner";
+        let recipient = "fsv-handoff-recipient";
+        let _held = try_acquire(owner, ttl_from_ms(5_000));
+
+        let handoff = handoff(owner, recipient, ttl_from_ms(7_000)).unwrap();
+        assert_eq!(handoff.prior.owner_session_id.as_deref(), Some(owner));
+        assert_eq!(handoff.current.owner_session_id.as_deref(), Some(recipient));
+        assert_eq!(handoff.current.ttl_ms, Some(7_000));
+
+        let after = status();
+        assert!(after.held);
+        assert_eq!(after.owner_session_id.as_deref(), Some(recipient));
+        match try_acquire(owner, ttl_from_ms(5_000)) {
+            LeaseOutcome::Busy { holder, .. } => {
+                assert_eq!(holder.owner_session_id.as_deref(), Some(recipient));
+            }
+            other => panic!("expected prior owner to be busy after handoff, got {other:?}"),
+        }
+        println!(
+            "readback=input_lease edge=handoff owner_before={:?} owner_after={:?}",
+            handoff.prior.owner_session_id, after.owner_session_id
+        );
+        reset();
+    }
+
+    #[test]
+    fn handoff_requires_current_owner() {
+        let _serial = serial();
+        let owner = "fsv-handoff-owner";
+        let intruder = "fsv-handoff-intruder";
+        let recipient = "fsv-handoff-recipient";
+        let _held = try_acquire(owner, ttl_from_ms(5_000));
+
+        assert!(matches!(
+            handoff(intruder, recipient, ttl_from_ms(5_000)),
+            Err(LeaseError::NotHeld { .. })
+        ));
+        let after = status();
+        assert_eq!(after.owner_session_id.as_deref(), Some(owner));
         reset();
     }
 

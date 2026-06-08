@@ -51,6 +51,15 @@ pub(crate) struct LeaseContinuityCleanupReadback {
     pub row_deleted: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LeaseHandoffContinuityReadback {
+    pub from_row_existed_before: bool,
+    pub from_row_exists_after: bool,
+    pub from_row_deleted: bool,
+    pub to_row_exists_after: bool,
+    pub to_row_session_id: Option<String>,
+}
+
 impl SynapseService {
     pub(super) fn persist_session_target(
         &self,
@@ -209,6 +218,111 @@ impl SynapseService {
             "persisted active input lease intent to CF_SESSIONS"
         );
         Ok(())
+    }
+
+    pub(super) fn persist_session_lease_handoff(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        status: &LeaseStatus,
+    ) -> Result<LeaseHandoffContinuityReadback, ErrorData> {
+        let ttl_ms = status.ttl_ms.ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "cannot persist handoff input lease: missing ttl_ms",
+            )
+        })?;
+        let expires_in_ms = status.expires_in_ms.ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "cannot persist handoff input lease: missing expires_in_ms",
+            )
+        })?;
+        if status.owner_session_id.as_deref() != Some(to_session_id) {
+            return Err(mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!(
+                    "cannot persist input lease handoff to {to_session_id}: status owner is {:?}",
+                    status.owner_session_id
+                ),
+            ));
+        }
+        let now = unix_ms_now();
+        let row = PersistedSessionLease {
+            schema_version: 1,
+            session_id: to_session_id.to_owned(),
+            stored_at_unix_ms: now,
+            renewed_at_unix_ms: now.saturating_sub(status.renewed_at_ms_ago.unwrap_or_default()),
+            ttl_ms,
+            expires_at_unix_ms: now.saturating_add(expires_in_ms),
+        };
+        let encoded = synapse_storage::encode_json(&row).map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!("encode persisted session lease handoff failed: {error}"),
+            )
+        })?;
+        let db = self.session_continuity_db()?;
+        let from_key = session_lease_key(from_session_id);
+        let to_key = session_lease_key(to_session_id);
+        let from_row_existed_before = cf_row_exists(&db, &from_key)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        db.mutate_batch_pressure_bypass(
+            cf::CF_SESSIONS,
+            [from_key.clone()],
+            [(to_key.clone(), encoded)],
+        )
+        .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let from_row_exists_after = cf_row_exists(&db, &from_key)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let to_row = db
+            .scan_cf_prefix(cf::CF_SESSIONS, &to_key)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?
+            .into_iter()
+            .find(|(row_key, _value)| row_key == &to_key);
+        let to_row_exists_after = to_row.is_some();
+        let to_row_session_id = to_row
+            .map(|(_key, value)| {
+                synapse_storage::decode_json::<PersistedSessionLease>(&value)
+                    .map(|lease| lease.session_id)
+                    .map_err(|error| {
+                        mcp_error(
+                            error.code(),
+                            format!(
+                                "decode persisted session lease handoff failed for {to_session_id}: {error}"
+                            ),
+                        )
+                    })
+            })
+            .transpose()?;
+        if from_row_exists_after
+            || !to_row_exists_after
+            || to_row_session_id.as_deref() != Some(to_session_id)
+        {
+            return Err(mcp_error(
+                error_codes::STORAGE_CORRUPTED,
+                format!(
+                    "persisted session lease handoff readback mismatch from={from_session_id} to={to_session_id}: from_after={from_row_exists_after} to_after={to_row_exists_after} to_row_session_id={to_row_session_id:?}"
+                ),
+            ));
+        }
+        let readback = LeaseHandoffContinuityReadback {
+            from_row_existed_before,
+            from_row_exists_after,
+            from_row_deleted: from_row_existed_before && !from_row_exists_after,
+            to_row_exists_after,
+            to_row_session_id,
+        };
+        tracing::info!(
+            code = "MCP_SESSION_LEASE_HANDOFF_PERSISTED",
+            from_session_id,
+            to_session_id,
+            readback = ?readback,
+            ttl_ms,
+            expires_at_unix_ms = row.expires_at_unix_ms,
+            "readback=CF_SESSIONS after=session_lease_handoff_persisted"
+        );
+        Ok(readback)
     }
 
     pub(super) fn delete_persisted_session_lease(&self, session_id: &str) -> Result<(), ErrorData> {
