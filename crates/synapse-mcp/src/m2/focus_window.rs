@@ -86,6 +86,11 @@ struct FocusVerification {
     method: &'static str,
 }
 
+struct FocusActivation {
+    attempts: u32,
+    method: &'static str,
+}
+
 const fn default_focus_stable_ms() -> u32 {
     DEFAULT_FOCUS_STABLE_MS
 }
@@ -101,7 +106,8 @@ pub async fn act_focus_window(
     let before = synapse_a11y::current_foreground_context()
         .map_err(|error| a11y_error_to_focus_mcp("before_foreground_read", error, None))?;
     let matched = resolve_focus_target(&requested)?;
-    let verification = verify_focus_window(&params, &before, &matched, &target_readback).await?;
+    let activation = activate_focus_window_once(&before, &matched)?;
+    let verification = verify_focus_window(&params, &matched, &target_readback, activation).await?;
     let before_signature = hash_json(&before)?;
     let after_signature = hash_json(&verification.after)?;
     let changed = before.hwnd != verification.after.hwnd;
@@ -346,36 +352,28 @@ fn single_window_match(
 
 async fn verify_focus_window(
     params: &ActFocusWindowParams,
-    before: &ForegroundContext,
     matched: &ForegroundContext,
     target: &FocusWindowTargetReadback,
+    activation: FocusActivation,
 ) -> Result<FocusVerification, ErrorData> {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(u64::from(params.verify_timeout_ms));
     let stable_for = Duration::from_millis(u64::from(params.stable_ms));
     let mut stable_since: Option<Instant> = None;
-    let mut focus_attempts = 0_u32;
     let mut last_error: Option<String> = None;
     let mut last_foreground: Option<ForegroundContext> = None;
-    let method = if before.hwnd == matched.hwnd {
-        METHOD_ALREADY_FOREGROUND
-    } else {
-        METHOD_SET_FOREGROUND
-    };
 
     loop {
         let now = Instant::now();
-        let mut current_matches_target = false;
         match synapse_a11y::current_foreground_context() {
             Ok(context) if context.hwnd == matched.hwnd => {
-                current_matches_target = true;
                 let stable_since = *stable_since.get_or_insert(now);
                 last_foreground = Some(context.clone());
                 if now.duration_since(stable_since) >= stable_for {
                     return Ok(FocusVerification {
                         after: context,
-                        attempts: focus_attempts,
-                        method,
+                        attempts: activation.attempts,
+                        method: activation.method,
                     });
                 }
             }
@@ -397,18 +395,6 @@ async fn verify_focus_window(
             break;
         }
 
-        if !current_matches_target
-            && let Err(error) = synapse_a11y::focus_window_with_intent(
-                matched.hwnd,
-                synapse_a11y::ForegroundActivationIntent::OperatorRequested { caller: TOOL },
-            )
-        {
-            stable_since = None;
-            last_error = Some(error.to_string());
-            focus_attempts = focus_attempts.saturating_add(1);
-        } else if !current_matches_target {
-            focus_attempts = focus_attempts.saturating_add(1);
-        }
         tokio::time::sleep(Duration::from_millis(FOCUS_WINDOW_POLL_MS)).await;
     }
 
@@ -418,8 +404,51 @@ async fn verify_focus_window(
         matched,
         last_foreground,
         last_error,
-        focus_attempts,
+        activation.attempts,
     ))
+}
+
+fn activate_focus_window_once(
+    before: &ForegroundContext,
+    matched: &ForegroundContext,
+) -> Result<FocusActivation, ErrorData> {
+    let plan = focus_activation_plan(before.hwnd, matched.hwnd);
+    if plan.attempts == 0 {
+        return Ok(plan);
+    }
+
+    synapse_a11y::focus_window_with_intent(
+        matched.hwnd,
+        synapse_a11y::ForegroundActivationIntent::OperatorRequested { caller: TOOL },
+    )
+    .map_err(|error| {
+        a11y_error_to_focus_mcp(
+            "set_foreground_window",
+            error,
+            Some(json!({
+                "before_foreground": before,
+                "matched_window": matched,
+                "attempts": plan.attempts,
+                "method": plan.method,
+            })),
+        )
+    })?;
+
+    Ok(plan)
+}
+
+fn focus_activation_plan(before_hwnd: i64, matched_hwnd: i64) -> FocusActivation {
+    if before_hwnd == matched_hwnd {
+        FocusActivation {
+            attempts: 0,
+            method: METHOD_ALREADY_FOREGROUND,
+        }
+    } else {
+        FocusActivation {
+            attempts: 1,
+            method: METHOD_SET_FOREGROUND,
+        }
+    }
 }
 
 fn postcondition_verified_state(
@@ -600,4 +629,28 @@ fn window_summaries(contexts: &[ForegroundContext]) -> Vec<WindowSummary> {
             window_title: context.window_title.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{METHOD_ALREADY_FOREGROUND, METHOD_SET_FOREGROUND, focus_activation_plan};
+
+    #[test]
+    fn focus_activation_plan_is_zero_or_one_activation() {
+        let already = focus_activation_plan(0x1001, 0x1001);
+        println!(
+            "readback=focus_activation_plan edge=already before_hwnd=0x1001 matched_hwnd=0x1001 after_attempts={} method={}",
+            already.attempts, already.method
+        );
+        assert_eq!(already.attempts, 0);
+        assert_eq!(already.method, METHOD_ALREADY_FOREGROUND);
+
+        let different = focus_activation_plan(0x1001, 0x2002);
+        println!(
+            "readback=focus_activation_plan edge=different before_hwnd=0x1001 matched_hwnd=0x2002 after_attempts={} method={}",
+            different.attempts, different.method
+        );
+        assert_eq!(different.attempts, 1);
+        assert_eq!(different.method, METHOD_SET_FOREGROUND);
+    }
 }
