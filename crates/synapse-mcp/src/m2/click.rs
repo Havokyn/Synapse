@@ -253,22 +253,6 @@ async fn execute_cdp_click(
             )
         })?
         .hwnd;
-    let endpoint = synapse_a11y::endpoint_for_window(hwnd).ok_or_else(|| {
-        let detail = format!(
-            "no reachable CDP endpoint for web element {} (browser closed or debug port gone)",
-            element.element_id
-        );
-        attach_click_tier_attempts(
-            mcp_error(error_codes::A11Y_CDP_UNREACHABLE, detail.clone()),
-            vec![click_tier_failed(
-                CLICK_TIER_CDP,
-                CLICK_REASON_BACKEND_UNAVAILABLE,
-                error_codes::A11Y_CDP_UNREACHABLE,
-                false,
-                detail,
-            )],
-        )
-    })?;
     // Foreground window title disambiguates which tab owns the per-document node.
     let title_hint = synapse_a11y::foreground_context(hwnd)
         .map(|context| context.window_title)
@@ -294,28 +278,64 @@ async fn execute_cdp_click(
         }
     };
 
-    synapse_a11y::cdp_click_node(
-        &endpoint,
-        &title_hint,
-        target_id_hint.as_deref(),
-        backend_node_id,
-        button,
-        i64::from(params.clicks),
-    )
-    .await
-    .map_err(|err| {
-        let error = action_error_to_mcp(&a11y_to_action_error(&err));
-        attach_click_tier_attempts(
-            error,
-            vec![click_tier_failed(
-                CLICK_TIER_CDP,
-                click_reason_for_error_code(err.code()),
-                err.code(),
-                false,
-                err.to_string(),
-            )],
+    if let Some(endpoint) = synapse_a11y::endpoint_for_window(hwnd) {
+        synapse_a11y::cdp_click_node(
+            &endpoint,
+            &title_hint,
+            target_id_hint.as_deref(),
+            backend_node_id,
+            button,
+            i64::from(params.clicks),
         )
-    })?;
+        .await
+        .map_err(|err| {
+            let error = action_error_to_mcp(&a11y_to_action_error(&err));
+            attach_click_tier_attempts(
+                error,
+                vec![click_tier_failed(
+                    CLICK_TIER_CDP,
+                    click_reason_for_error_code(err.code()),
+                    err.code(),
+                    false,
+                    err.to_string(),
+                )],
+            )
+        })?;
+    } else {
+        let bridge_button = match button {
+            synapse_a11y::CdpMouseButton::Left => {
+                crate::chrome_debugger_bridge::ChromeDebuggerMouseButton::Left
+            }
+            synapse_a11y::CdpMouseButton::Right => {
+                crate::chrome_debugger_bridge::ChromeDebuggerMouseButton::Right
+            }
+            synapse_a11y::CdpMouseButton::Middle => {
+                crate::chrome_debugger_bridge::ChromeDebuggerMouseButton::Middle
+            }
+        };
+        crate::chrome_debugger_bridge::click_node(
+            hwnd,
+            &title_hint,
+            target_id_hint.as_deref(),
+            backend_node_id,
+            bridge_button,
+            i64::from(params.clicks),
+        )
+        .await
+        .map_err(|err| {
+            let detail = format!("Chrome debugger extension click failed: {}", err.detail());
+            attach_click_tier_attempts(
+                mcp_error(err.code(), detail.clone()),
+                vec![click_tier_failed(
+                    CLICK_TIER_CDP,
+                    click_reason_for_error_code(err.code()),
+                    err.code(),
+                    false,
+                    detail,
+                )],
+            )
+        })?;
+    }
 
     Ok(ActClickResponse {
         ok: true,

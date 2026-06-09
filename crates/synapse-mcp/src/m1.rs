@@ -720,18 +720,81 @@ pub async fn enrich_input_with_cdp_for_target(
     let Some(cdp) = input.cdp.clone() else {
         return;
     };
-    if cdp.status != CdpStatus::Ok {
-        return;
-    }
-    let Some(endpoint) = cdp.endpoint.clone() else {
-        return;
-    };
     let hwnd = input.foreground.hwnd;
     let title = input.foreground.window_title.clone();
     let url_hint = foreground_web_url_hint(input);
 
-    match synapse_a11y::fetch_dom_snapshot(
-        &endpoint,
+    if cdp.status == CdpStatus::Ok {
+        let Some(endpoint) = cdp.endpoint.clone() else {
+            return;
+        };
+        match synapse_a11y::fetch_dom_snapshot(
+            &endpoint,
+            hwnd,
+            &title,
+            url_hint.as_deref(),
+            target_id_hint,
+            max_nodes,
+        )
+        .await
+        {
+            Ok(snapshot) => {
+                let count = u32::try_from(snapshot.nodes.len()).unwrap_or(u32::MAX);
+                for mut node in snapshot.nodes {
+                    // Clamp web-node depth to the requested observe depth so deeply
+                    // nested DOM elements still survive the element depth filter;
+                    // parent links keep the true hierarchy.
+                    node.depth = node.depth.min(max_depth);
+                    input.elements.push(node);
+                }
+                input.web_path = Some(WebPerceptionPath::Cdp);
+                if let Some(diagnostics) = input.cdp.as_mut() {
+                    diagnostics.attached_node_count = Some(count);
+                    diagnostics.selected_target_id = Some(snapshot.target_id.clone());
+                    diagnostics.selected_session_id = Some(snapshot.session_id.clone());
+                    diagnostics.target_selection_reason =
+                        Some(snapshot.target_selection_reason.clone());
+                    diagnostics.target_candidate_count = Some(snapshot.target_candidate_count);
+                }
+                tracing::info!(
+                    code = "A11Y_CDP_DOM_ATTACHED",
+                    endpoint = %endpoint,
+                    hwnd,
+                    page_url = %snapshot.page_url,
+                    target_id = %snapshot.target_id,
+                    session_id = %snapshot.session_id,
+                    requested_target_id = target_id_hint.unwrap_or_default(),
+                    target_candidate_count = snapshot.target_candidate_count,
+                    target_selection_reason = %snapshot.target_selection_reason,
+                    node_count = count,
+                    total_ax_nodes = snapshot.total_ax_nodes,
+                    "attached CDP DOM tree into observation elements"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    code = error.code(),
+                    endpoint = %endpoint,
+                    hwnd,
+                    requested_target_id = target_id_hint.unwrap_or_default(),
+                    error = %error,
+                    "CDP DOM snapshot failed; web content not exposed (web_path stays uia_only)"
+                );
+                if let Some(diagnostics) = input.cdp.as_mut() {
+                    diagnostics.status = CdpStatus::AttachFailed;
+                    diagnostics.reason_code = Some(error.code().to_owned());
+                    diagnostics.detail = Some(error.to_string());
+                }
+            }
+        }
+        return;
+    }
+
+    if cdp.status != CdpStatus::Unreachable {
+        return;
+    }
+
+    match crate::chrome_debugger_bridge::fetch_dom_snapshot(
         hwnd,
         &title,
         url_hint.as_deref(),
@@ -743,14 +806,19 @@ pub async fn enrich_input_with_cdp_for_target(
         Ok(snapshot) => {
             let count = u32::try_from(snapshot.nodes.len()).unwrap_or(u32::MAX);
             for mut node in snapshot.nodes {
-                // Clamp web-node depth to the requested observe depth so deeply
-                // nested DOM elements still survive the element depth filter;
-                // parent links keep the true hierarchy.
                 node.depth = node.depth.min(max_depth);
                 input.elements.push(node);
             }
             input.web_path = Some(WebPerceptionPath::Cdp);
             if let Some(diagnostics) = input.cdp.as_mut() {
+                diagnostics.status = CdpStatus::Ok;
+                diagnostics.endpoint = Some(format!(
+                    "chrome-extension://{}/chrome.debugger",
+                    snapshot.extension_id
+                ));
+                diagnostics.reason_code = None;
+                diagnostics.detail = None;
+                diagnostics.capabilities = crate::chrome_debugger_bridge::cdp_capabilities();
                 diagnostics.attached_node_count = Some(count);
                 diagnostics.selected_target_id = Some(snapshot.target_id.clone());
                 diagnostics.selected_session_id = Some(snapshot.session_id.clone());
@@ -759,8 +827,7 @@ pub async fn enrich_input_with_cdp_for_target(
                 diagnostics.target_candidate_count = Some(snapshot.target_candidate_count);
             }
             tracing::info!(
-                code = "A11Y_CDP_DOM_ATTACHED",
-                endpoint = %endpoint,
+                code = "A11Y_CDP_EXTENSION_DOM_ATTACHED",
                 hwnd,
                 page_url = %snapshot.page_url,
                 target_id = %snapshot.target_id,
@@ -770,22 +837,22 @@ pub async fn enrich_input_with_cdp_for_target(
                 target_selection_reason = %snapshot.target_selection_reason,
                 node_count = count,
                 total_ax_nodes = snapshot.total_ax_nodes,
-                "attached CDP DOM tree into observation elements"
+                extension_id = %snapshot.extension_id,
+                "attached Chrome debugger extension DOM tree into observation elements"
             );
         }
         Err(error) => {
-            tracing::error!(
+            tracing::warn!(
                 code = error.code(),
-                endpoint = %endpoint,
                 hwnd,
                 requested_target_id = target_id_hint.unwrap_or_default(),
-                error = %error,
-                "CDP DOM snapshot failed; web content not exposed (web_path stays uia_only)"
+                detail = %error.detail(),
+                "Chrome debugger extension DOM snapshot failed"
             );
             if let Some(diagnostics) = input.cdp.as_mut() {
-                diagnostics.status = CdpStatus::AttachFailed;
+                diagnostics.status = error.cdp_status();
                 diagnostics.reason_code = Some(error.code().to_owned());
-                diagnostics.detail = Some(error.to_string());
+                diagnostics.detail = Some(error.detail().to_owned());
             }
         }
     }
@@ -1095,7 +1162,7 @@ fn browser_ocr_cdp_failed(input: &ObservationInput) -> bool {
     input.cdp.as_ref().is_some_and(|diagnostics| {
         matches!(
             diagnostics.status,
-            CdpStatus::Unreachable | CdpStatus::AttachFailed
+            CdpStatus::Unreachable | CdpStatus::AttachFailed | CdpStatus::ExtensionUnavailable
         )
     })
 }

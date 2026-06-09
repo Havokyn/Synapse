@@ -335,6 +335,18 @@ fn router(
         .route("/shutdown", post(shutdown))
         .route("/events", get(events).post(publish_event))
         .route("/events/stats", get(event_stats))
+        .route(
+            "/chrome-debugger/native/register",
+            post(crate::chrome_debugger_bridge::http_register),
+        )
+        .route(
+            "/chrome-debugger/native/message",
+            post(crate::chrome_debugger_bridge::http_message),
+        )
+        .route(
+            "/chrome-debugger/native/next",
+            get(crate::chrome_debugger_bridge::http_next),
+        )
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(
             session_request,

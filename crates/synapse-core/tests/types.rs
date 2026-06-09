@@ -64,6 +64,10 @@ fn cdp_status_json_uses_diagnostic_error_codes() -> Result<(), Box<dyn std::erro
         (CdpStatus::Ok, "\"ok\""),
         (CdpStatus::NotChromium, "\"not_chromium\""),
         (CdpStatus::Unreachable, "\"A11Y_CDP_UNREACHABLE\""),
+        (
+            CdpStatus::ExtensionUnavailable,
+            "\"A11Y_CDP_EXTENSION_UNAVAILABLE\"",
+        ),
         (CdpStatus::AttachFailed, "\"A11Y_CDP_ATTACH_FAILED\""),
     ];
 

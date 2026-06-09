@@ -41,6 +41,7 @@
         clippy::unwrap_used
     )
 )]
+mod chrome_debugger_bridge;
 mod connect;
 mod daemon_lifecycle;
 mod doctor;
@@ -77,6 +78,8 @@ enum Mode {
     Http,
     /// Thin stdio<->HTTP bridge to the shared daemon (for stdio-only clients).
     Connect,
+    /// Chrome native-messaging host for the bundled debugger extension.
+    ChromeNativeHost,
     /// Enumerate/classify synapse-mcp processes; with --kill-stray, clean them.
     Doctor,
 }
@@ -152,6 +155,13 @@ struct Cli {
         help = "Inline await budget for act_run_shell before it returns a durable job handle. Set 0 to background every direct shell request."
     )]
     run_shell_inline_await_limit_ms: u64,
+    #[arg(
+        long,
+        env = "SYNAPSE_CHROME_NATIVE_ORIGIN",
+        default_value = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/",
+        help = "Origin used only for explicit --mode chrome-native-host diagnostics. Chrome native messaging normally passes the real origin as argv[1]."
+    )]
+    chrome_native_origin: String,
 }
 
 impl Cli {
@@ -210,6 +220,18 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<ExitCode> {
+    if let Some(invocation) =
+        chrome_debugger_bridge::native_host_invocation_from_args(std::env::args_os().skip(1))
+    {
+        let bind = std::env::var("SYNAPSE_BIND").unwrap_or_else(|_| "127.0.0.1:7700".to_owned());
+        let telemetry_guard = configure_telemetry_from_level(
+            &std::env::var("SYNAPSE_LOG_LEVEL").unwrap_or_else(|_| "info".to_owned()),
+        )?;
+        let result = chrome_debugger_bridge::run_native_host(&bind, invocation).await;
+        drop(telemetry_guard);
+        return result;
+    }
+
     let cli = Cli::parse();
 
     let telemetry_guard = configure_telemetry(&cli)?;
@@ -225,6 +247,18 @@ async fn run() -> anyhow::Result<ExitCode> {
         let code = doctor::run_doctor(cli.kill_stray, cli.db.as_deref());
         drop(telemetry_guard);
         return Ok(code);
+    }
+    if matches!(cli.mode, Mode::ChromeNativeHost) {
+        let result = chrome_debugger_bridge::run_native_host(
+            &cli.bind,
+            chrome_debugger_bridge::NativeHostInvocation {
+                origin: cli.chrome_native_origin.clone(),
+                parent_window: None,
+            },
+        )
+        .await;
+        drop(telemetry_guard);
+        return result;
     }
 
     let dpi_awareness = synapse_capture::init_process_dpi_awareness()
@@ -287,17 +321,22 @@ async fn run() -> anyhow::Result<ExitCode> {
             drop(telemetry_guard);
             Ok(code)
         }
-        Mode::Connect | Mode::Doctor => {
-            unreachable!("connect and doctor modes are handled before daemon setup")
+        Mode::Connect | Mode::ChromeNativeHost | Mode::Doctor => {
+            unreachable!(
+                "connect, chrome-native-host, and doctor modes are handled before daemon setup"
+            )
         }
     }
 }
 
 fn configure_telemetry(cli: &Cli) -> anyhow::Result<TelemetryGuard> {
-    let level = cli
-        .log_level
+    configure_telemetry_from_level(&cli.log_level)
+}
+
+fn configure_telemetry_from_level(log_level: &str) -> anyhow::Result<TelemetryGuard> {
+    let level = log_level
         .parse::<LevelFilter>()
-        .with_context(|| format!("invalid log level {}", cli.log_level))?;
+        .with_context(|| format!("invalid log level {log_level}"))?;
     let log_dir = std::env::var_os("SYNAPSE_LOG_DIR").map(PathBuf::from);
     init_tracing(TelemetryConfig {
         log_dir,

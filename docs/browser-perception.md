@@ -21,8 +21,10 @@ nodes into the normal element list. Those nodes are queryable through `find` and
 actionable by `act_click`, `act_type`, and `act_stroke`.
 
 When no endpoint is reachable, Synapse does not silently pretend the DOM was
-observed. The UIA tree is still returned, but it is the browser shell, not the
-page DOM.
+observed. For the user's normal Chrome profile, Synapse next tries the bundled
+Chrome debugger extension/native-messaging bridge. If that bridge is not
+installed, connected, or allowed by Chrome, the UIA tree is still returned, but
+it is the browser shell, not the page DOM.
 
 ## Diagnostics
 
@@ -39,8 +41,15 @@ Browser observations carry diagnostics so agents can tell the difference between
   family, but no probed debug port accepted a connection. The diagnostics
   include the exact localhost ports/endpoints checked and a detail string that
   distinguishes raw CDP HTTP attach from Chrome's newer auto-connect permission
-  flow. Synapse then attempts OCR over tiled browser content. If readable text is
-  found,
+  flow. If the Chrome debugger extension bridge is connected, Synapse can still
+  upgrade this observation to `diagnostics.cdp.status = "ok"` and
+  `diagnostics.web_path = "cdp"` through `chrome.debugger`.
+- `diagnostics.cdp.status = "A11Y_CDP_EXTENSION_UNAVAILABLE"` with matching
+  `reason_code = "A11Y_CDP_EXTENSION_UNAVAILABLE"`: raw CDP was unreachable and
+  the normal-profile Chrome extension/native host is not connected. The detail
+  field names the bundled extension directory, native host name, expected
+  extension ID, and registration script. Synapse then attempts OCR over tiled
+  browser content. If readable text is found,
   `diagnostics.web_path = "ocr"` and OCR text nodes appear in `elements`; if OCR
   has no usable text or capture is unavailable, `web_path` remains `uia_only`.
 - CDP attach errors use the same diagnostics object with
@@ -52,9 +61,12 @@ Browser observations carry diagnostics so agents can tell the difference between
 
 The intended strategy ladder is:
 
-1. CDP DOM and accessibility tree for Chromium page content.
-2. OCR/capture over tiled browser content when CDP is down or attach fails.
-3. Explicit `uia_only` for browser chrome/native UI when neither DOM nor OCR
+1. Raw CDP DOM and accessibility tree for Chromium page content when a real
+   loopback debug endpoint exists.
+2. Chrome debugger extension/native-messaging CDP for the user's normal Chrome
+   profile when raw CDP is unreachable.
+3. OCR/capture over tiled browser content when CDP is down or attach fails.
+4. Explicit `uia_only` for browser chrome/native UI when neither DOM nor OCR
    produced page content.
 
 ## Launching a Browser for DOM Access
@@ -91,7 +103,7 @@ separate automation profile in that case.
 Synapse cannot turn a loopback CDP socket on from outside an already-running
 Chrome/Edge process that was launched without remote debugging or without the
 browser's own local remote-debugging consent. For an existing authenticated
-browser session, the supported attach path is:
+Chrome session, the supported attach path is:
 
 1. Read `observe.diagnostics.cdp`.
 2. If it is `ok`, use `diagnostics.cdp.endpoint` and require
@@ -105,7 +117,13 @@ browser session, the supported attach path is:
 5. If Chrome's own UI supports enabling remote debugging for the running
    browser, treat that as the Chrome 144+ auto-connect permission flow. Do not
    expect it to make `/json/version` reachable through `SYNAPSE_CDP_PORTS`.
-6. If the current browser session still exposes no endpoint, fail closed with
+6. For the user's normal Chrome profile, install the bundled extension at
+   `extensions/synapse-chrome-debugger` and register the native host with
+   `scripts\install-synapse-chrome-debugger.ps1`. The stable extension ID is
+   `leoocgnkjnplbfdbklajepahofecgfbk`; the native host name is
+   `com.synapse.chrome_debugger`.
+7. If the current browser session still exposes no endpoint or extension bridge,
+   fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch
    is a user/session decision because it changes the authenticated browser
    process.

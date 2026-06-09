@@ -62,6 +62,10 @@ pub enum CdpStatus {
     /// reachable.
     #[serde(rename = "A11Y_CDP_UNREACHABLE")]
     Unreachable,
+    /// The normal-profile Chrome debugger extension/native host is not
+    /// connected, so no existing-profile CDP transport is available.
+    #[serde(rename = "A11Y_CDP_EXTENSION_UNAVAILABLE")]
+    ExtensionUnavailable,
     /// A debug port was reachable but the CDP client failed to attach or read
     /// the tree.
     #[serde(rename = "A11Y_CDP_ATTACH_FAILED")]
@@ -76,6 +80,7 @@ impl CdpStatus {
             Self::Ok => "ok",
             Self::NotChromium => "not_chromium",
             Self::Unreachable => "A11Y_CDP_UNREACHABLE",
+            Self::ExtensionUnavailable => "A11Y_CDP_EXTENSION_UNAVAILABLE",
             Self::AttachFailed => "A11Y_CDP_ATTACH_FAILED",
         }
     }
