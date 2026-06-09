@@ -40,6 +40,7 @@ const SW_HIDE: u16 = 0;
 #[cfg(windows)]
 const SW_SHOWNOACTIVATE: u16 = 4;
 const DEFAULT_AGENT_SPAWN_WAIT_TIMEOUT_MS: u64 = 120_000;
+pub const MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS: u64 = 1_800_000;
 const DEFAULT_AGENT_SPAWN_HOLD_OPEN_MS: u64 = 60_000;
 const MAX_AGENT_SPAWN_PROMPT_BYTES: usize = 128 * 1024;
 const MAX_SHELL_IDEMPOTENCY_KEY_BYTES: usize = 256;
@@ -695,9 +696,13 @@ pub struct ActSpawnAgentParams {
     #[serde(default = "default_agent_spawn_mcp_url")]
     #[schemars(default = "default_agent_spawn_mcp_url")]
     pub mcp_url: String,
-    /// Time to wait for a distinct MCP session/target registry readback.
+    /// Time to wait for distinct MCP session/target registry readback and
+    /// task-start readiness artifact readback.
     #[serde(default = "default_agent_spawn_wait_timeout_ms")]
-    #[schemars(default = "default_agent_spawn_wait_timeout_ms", range(min = 1))]
+    #[schemars(
+        default = "default_agent_spawn_wait_timeout_ms",
+        range(min = 1, max = 1_800_000)
+    )]
     pub wait_timeout_ms: u64,
     /// Provision-only agents hold the primary process open long enough for
     /// manual readback; task prompts may continue doing useful work during this
@@ -722,6 +727,7 @@ pub struct ActSpawnAgentResponse {
     pub launch_target_source: String,
     pub launched_at_unix_ms: u64,
     pub registered_at_unix_ms: u64,
+    pub task_started_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ActSpawnAgentTarget>,
     pub log_paths: ActSpawnAgentLogPaths,
@@ -736,6 +742,7 @@ pub struct ActSpawnAgentLogPaths {
     pub stderr_path: String,
     pub final_message_path: String,
     pub completion_status_path: String,
+    pub task_started_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -786,6 +793,12 @@ pub fn validate_agent_spawn_params(params: &ActSpawnAgentParams) -> Result<(), E
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             "act_spawn_agent wait_timeout_ms must be >= 1",
+        ));
+    }
+    if params.wait_timeout_ms > MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("act_spawn_agent wait_timeout_ms must be <= {MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS}"),
         ));
     }
     if let Some(prompt) = &params.prompt {

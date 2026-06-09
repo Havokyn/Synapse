@@ -3,10 +3,11 @@ use super::{
     ActRunShellCancelResponse, ActRunShellJobIdParams, ActRunShellParams, ActRunShellResponse,
     ActRunShellStartParams, ActRunShellStartResponse, ActRunShellStatusParams,
     ActRunShellStatusResponse, ActSpawnAgentCli, ActSpawnAgentLogPaths, ActSpawnAgentParams,
-    ActSpawnAgentResponse, ActSpawnAgentTarget, ErrorData, Json, LaunchWindowState, Parameters,
-    RunShellAuthorization, ShellExecutionContext, SynapseService, assign_owned_process_job,
-    authorize_run_shell, authorize_run_shell_start, cancel_shell_job, execute_combo, launch,
-    launch_process_history_row, launch_process_history_row_key, launch_request_details, mcp_error,
+    ActSpawnAgentResponse, ActSpawnAgentTarget, ErrorData, Json, LaunchWindowState,
+    MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS, Parameters, RunShellAuthorization, ShellExecutionContext,
+    SynapseService, assign_owned_process_job, authorize_run_shell, authorize_run_shell_start,
+    cancel_shell_job, execute_combo, launch, launch_process_history_row,
+    launch_process_history_row_key, launch_request_details, mcp_error,
     prepare_run_shell_params_for_context, prepare_run_shell_start_params_for_context,
     required_combo_permissions, run_authorized_shell, run_shell_idempotency_completed_row,
     run_shell_idempotency_replay, run_shell_idempotency_reservation_row,
@@ -333,7 +334,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Spawn a fully capable primary Codex or Claude agent as a hidden background process, wire it to the configured Synapse HTTP MCP daemon, require real MCP session registration, optionally bind a per-session target, and return only after session_list readback proves the spawned session exists."
+        description = "Spawn a fully capable primary Codex or Claude agent as a hidden background process, wire it to the configured Synapse HTTP MCP daemon, require real MCP session registration, optionally bind a per-session target, and return only after session_list readback plus a validated task-start readiness artifact prove the spawned prompt began executing."
     )]
     pub async fn act_spawn_agent(
         &self,
@@ -419,6 +420,7 @@ impl SynapseService {
         let before_session_ids = self.current_session_ids()?;
         let spawn_id = format!("agent-spawn-{}", new_reflex_id());
         let launched_at_unix_ms = unix_time_ms_now();
+        let wait_deadline = agent_spawn_wait_deadline(params.wait_timeout_ms)?;
         let files = prepare_agent_spawn_files(&spawn_id, &params, &working_dir)?;
         let script = agent_spawn_powershell_script(&params, &files, &working_dir)?;
         let launch_host = match resolve_agent_spawn_powershell_host() {
@@ -591,6 +593,7 @@ impl SynapseService {
                 launched_at_unix_ms,
                 launch_response.pid,
                 &files,
+                wait_deadline,
             )
             .await
         {
@@ -627,6 +630,61 @@ impl SynapseService {
                         "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "wait_error": error,
+                        "cleanup": cleanup,
+                        "completion_artifacts": completion_artifacts,
+                    }),
+                ));
+            }
+        };
+
+        let task_started = match self
+            .wait_for_spawned_agent_task_started(
+                &params,
+                &spawn_id,
+                &matched,
+                launch_response.pid,
+                &files,
+                wait_deadline,
+            )
+            .await
+        {
+            Ok(task_started) => task_started,
+            Err(error) => {
+                let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+                let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                    &files,
+                    &params,
+                    &spawn_id,
+                    "task_not_started",
+                    "spawned agent registered an MCP session but did not write a valid task-start readiness artifact before wait_timeout_ms",
+                    json!({
+                        "reason": "task_start_readiness_readback_failed",
+                        "wait_timeout_ms": params.wait_timeout_ms,
+                        "task_start_error": error,
+                        "session_id": matched.session_id,
+                        "cleanup": cleanup,
+                    }),
+                );
+                return Err(agent_spawn_tool_error(
+                    error_codes::ACTION_AGENT_SPAWN_TASK_NOT_STARTED,
+                    "act_spawn_agent observed the spawned session but did not observe task-start readiness before timeout; exact spawned PID cleanup was attempted",
+                    json!({
+                        "code": error_codes::ACTION_AGENT_SPAWN_TASK_NOT_STARTED,
+                        "reason": "task_start_readiness_readback_failed",
+                        "spawn_id": spawn_id,
+                        "cli": params.cli.as_str(),
+                        "launcher_process_id": launch_response.pid,
+                        "agent_process_id": matched.agent_process_id,
+                        "session_id": matched.session_id,
+                        "mcp_url": params.mcp_url,
+                        "wait_timeout_ms": params.wait_timeout_ms,
+                        "target": params.target,
+                        "log_dir": files.log_dir.display().to_string(),
+                        "task_started_path": files.task_started_path.display().to_string(),
+                        "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                        "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                        "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                        "task_start_error": error,
                         "cleanup": cleanup,
                         "completion_artifacts": completion_artifacts,
                     }),
@@ -733,6 +791,7 @@ impl SynapseService {
             launch_target_source: launch_host.source,
             launched_at_unix_ms,
             registered_at_unix_ms: matched.registered_at_unix_ms,
+            task_started_at_unix_ms: task_started.started_at_unix_ms,
             target: params.target,
             log_paths: files.to_response(),
         })
@@ -754,14 +813,13 @@ impl SynapseService {
         launched_at_unix_ms: u64,
         launcher_pid: u32,
         files: &AgentSpawnFiles,
+        deadline: Instant,
     ) -> Result<MatchedSpawnSession, serde_json::Value> {
-        let started = Instant::now();
-        let timeout = Duration::from_millis(params.wait_timeout_ms);
         let mut last_observed = json!({
             "reason": "no_matching_session_observed",
             "sessions": [],
         });
-        while started.elapsed() < timeout {
+        while !agent_spawn_deadline_remaining(deadline).is_zero() {
             let list = self.session_list_impl(true).map_err(|error| {
                 json!({
                     "reason": "session_list_read_failed",
@@ -816,9 +874,58 @@ impl SynapseService {
                     "last_observed": last_observed,
                 }));
             }
-            tokio::time::sleep(Duration::from_millis(AGENT_SPAWN_POLL_INTERVAL_MS)).await;
+            sleep_agent_spawn_poll(deadline).await;
         }
         Err(last_observed)
+    }
+
+    async fn wait_for_spawned_agent_task_started(
+        &self,
+        params: &ActSpawnAgentParams,
+        spawn_id: &str,
+        matched: &MatchedSpawnSession,
+        launcher_pid: u32,
+        files: &AgentSpawnFiles,
+        deadline: Instant,
+    ) -> Result<AgentSpawnTaskStartRead, serde_json::Value> {
+        let mut last_observed = json!({
+            "reason": "task_start_artifact_not_observed",
+            "task_started_path": files.task_started_path.display().to_string(),
+        });
+        while !agent_spawn_deadline_remaining(deadline).is_zero() {
+            match read_agent_spawn_task_start_artifact(files, params, spawn_id, matched)? {
+                Some(read) => return Ok(read),
+                None => {
+                    last_observed = json!({
+                        "reason": "task_start_artifact_not_observed",
+                        "task_started_path": files.task_started_path.display().to_string(),
+                        "completion_status": read_json_file_lossy(&files.completion_status_path),
+                        "stdout_bytes": file_len(&files.stdout_path),
+                        "stderr_bytes": file_len(&files.stderr_path),
+                        "final_message_bytes": file_len(&files.final_message_path),
+                    });
+                }
+            }
+
+            if process_has_exited(launcher_pid) {
+                return Err(json!({
+                    "reason": "launcher_process_exited_before_task_start",
+                    "launcher_process_id": launcher_pid,
+                    "task_started_path": files.task_started_path.display().to_string(),
+                    "completion_status": read_json_file_lossy(&files.completion_status_path),
+                    "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                    "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                    "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                    "last_observed": last_observed,
+                }));
+            }
+            sleep_agent_spawn_poll(deadline).await;
+        }
+        Err(json!({
+            "reason": "task_start_artifact_timeout",
+            "task_started_path": files.task_started_path.display().to_string(),
+            "last_observed": last_observed,
+        }))
     }
 
     fn record_spawned_agent_metadata(
@@ -845,6 +952,11 @@ struct MatchedSpawnSession {
 }
 
 #[derive(Debug)]
+struct AgentSpawnTaskStartRead {
+    started_at_unix_ms: u64,
+}
+
+#[derive(Debug)]
 struct AgentSpawnFiles {
     log_dir: PathBuf,
     prompt_path: PathBuf,
@@ -852,6 +964,7 @@ struct AgentSpawnFiles {
     stderr_path: PathBuf,
     final_message_path: PathBuf,
     completion_status_path: PathBuf,
+    task_started_path: PathBuf,
     debug_path: Option<PathBuf>,
     mcp_config_path: Option<PathBuf>,
 }
@@ -865,6 +978,7 @@ impl AgentSpawnFiles {
             stderr_path: self.stderr_path.display().to_string(),
             final_message_path: self.final_message_path.display().to_string(),
             completion_status_path: self.completion_status_path.display().to_string(),
+            task_started_path: self.task_started_path.display().to_string(),
             debug_path: self
                 .debug_path
                 .as_ref()
@@ -1242,6 +1356,7 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "stdout_path": files.stdout_path.display().to_string(),
         "stderr_path": files.stderr_path.display().to_string(),
         "completion_status_path": files.completion_status_path.display().to_string(),
+        "task_started_path": files.task_started_path.display().to_string(),
         "details": details,
     });
     let final_write = serde_json::to_vec_pretty(&final_message)
@@ -1291,6 +1406,8 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "completion_status_write_ok": status_write.is_ok(),
         "completion_status_write_error": status_write.err(),
         "completion_status_bytes_after": status_len,
+        "task_started_path": files.task_started_path.display().to_string(),
+        "task_started_bytes": file_len(&files.task_started_path),
     })
 }
 
@@ -1808,12 +1925,13 @@ fn prepare_agent_spawn_files(
     let stderr_path = log_dir.join("stderr.log");
     let final_message_path = log_dir.join("final-message.txt");
     let completion_status_path = log_dir.join("completion-status.json");
+    let task_started_path = log_dir.join("task-started.json");
     let debug_path =
         (params.cli == ActSpawnAgentCli::Claude).then(|| log_dir.join("claude-debug.log"));
     let mcp_config_path =
         (params.cli == ActSpawnAgentCli::Claude).then(|| log_dir.join("claude-mcp-config.json"));
 
-    let prompt = build_agent_spawn_prompt(spawn_id, params, working_dir)?;
+    let prompt = build_agent_spawn_prompt(spawn_id, params, working_dir, &task_started_path)?;
     fs::write(&prompt_path, prompt).map_err(|error| {
         mcp_error(
             error_codes::STORAGE_WRITE_FAILED,
@@ -1859,6 +1977,7 @@ fn prepare_agent_spawn_files(
         stderr_path,
         final_message_path,
         completion_status_path,
+        task_started_path,
         debug_path,
         mcp_config_path,
     })
@@ -1880,6 +1999,7 @@ fn build_agent_spawn_prompt(
     spawn_id: &str,
     params: &ActSpawnAgentParams,
     working_dir: &Path,
+    task_started_path: &Path,
 ) -> Result<String, ErrorData> {
     let target_instruction = match &params.target {
         Some(target) => {
@@ -1898,6 +2018,7 @@ fn build_agent_spawn_prompt(
         }
     };
     let assigned_prompt = params.prompt.as_deref().unwrap_or("").trim();
+    let assigned_prompt_present = !assigned_prompt.is_empty();
     let assigned_block = if assigned_prompt.is_empty() {
         "No additional task was provided; perform only the provisioning checks above.".to_owned()
     } else {
@@ -1912,6 +2033,13 @@ fn build_agent_spawn_prompt(
             "After the provisioning checks and assigned task, keep this primary process alive for at least {} ms using Start-Sleep -Milliseconds {}, then finish.",
             params.hold_open_ms, params.hold_open_ms
         )
+    };
+    let task_started_path_display = task_started_path.display().to_string();
+    let task_started_path_ps = ps_single_quoted_path(task_started_path);
+    let task_started_assigned_prompt_present = if assigned_prompt_present {
+        "$true"
+    } else {
+        "$false"
     };
     Ok(format!(
         "You are a primary {cli} agent spawned by Synapse act_spawn_agent.\n\
@@ -1930,7 +2058,16 @@ Mandatory provisioning checks:\n\
 2. Use the real Synapse MCP session_list tool through your normal configured MCP client.\n\
 {target_instruction}\n\
 5. If any Synapse MCP tool is missing or fails, stop and report the exact tool/error.\n\
-6. In your final response, include one compact JSON object containing spawn_id, health_ok, session_id, target_ok, and any error.\n\
+6. Before performing the assigned task or hold-open sleep, write the required task-start readiness artifact to: {task_started_path}\n\
+   Use one local PowerShell command equivalent to this, replacing <your_session_id> with this spawned MCP session id:\n\
+   $taskStartedPath = {task_started_path_ps}\n\
+   $taskStartedTempPath = \"$taskStartedPath.tmp.$PID\"\n\
+   $taskStarted = [ordered]@{{ schema_version = 1; spawn_id = '{spawn_id}'; cli = '{cli}'; session_id = '<your_session_id>'; status = 'started'; health_ok = $true; target_ok = $true; assigned_prompt_present = {task_started_assigned_prompt_present}; task_started_path = $taskStartedPath; started_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }}\n\
+   [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($taskStartedPath)) | Out-Null\n\
+   $taskStarted | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $taskStartedTempPath -Encoding UTF8\n\
+   Move-Item -LiteralPath $taskStartedTempPath -Destination $taskStartedPath -Force\n\
+   Then read the artifact back and verify the JSON fields match; if the artifact cannot be read back, stop and report the exact error.\n\
+7. In your final response, include one compact JSON object containing spawn_id, health_ok, session_id, target_ok, task_started_path, and any error.\n\
 \n\
 {assigned_block}\n\
 \n\
@@ -1939,6 +2076,9 @@ Mandatory provisioning checks:\n\
         spawn_id = spawn_id,
         working_dir = working_dir.display(),
         target_instruction = target_instruction,
+        task_started_path = task_started_path_display,
+        task_started_path_ps = task_started_path_ps,
+        task_started_assigned_prompt_present = task_started_assigned_prompt_present,
         assigned_block = assigned_block,
         hold_instruction = hold_instruction,
     ))
@@ -1954,6 +2094,7 @@ fn agent_spawn_powershell_script(
     let stderr_path = ps_single_quoted_path(&files.stderr_path);
     let final_message_path = ps_single_quoted_path(&files.final_message_path);
     let completion_status_path = ps_single_quoted_path(&files.completion_status_path);
+    let task_started_path = ps_single_quoted_path(&files.task_started_path);
     let working_dir = ps_single_quoted_path(working_dir);
     let command_body = match params.cli {
         ActSpawnAgentCli::Codex => {
@@ -2006,6 +2147,7 @@ $prompt | & claude @claudeArgs 1> {stdout_path} 2> {stderr_path}\n\
         &stderr_path,
         &final_message_path,
         &completion_status_path,
+        &task_started_path,
         &working_dir,
         &command_body,
     ))
@@ -2018,6 +2160,7 @@ fn agent_spawn_wrapper_powershell(
     stderr_path: &str,
     final_message_path: &str,
     completion_status_path: &str,
+    task_started_path: &str,
     working_dir: &str,
     command_body: &str,
 ) -> String {
@@ -2042,6 +2185,7 @@ $spawnStdoutPath = {stdout_path}\n\
 $spawnStderrPath = {stderr_path}\n\
 $spawnFinalMessagePath = {final_message_path}\n\
 $spawnCompletionStatusPath = {completion_status_path}\n\
+$spawnTaskStartedPath = {task_started_path}\n\
 $spawnStartedAtUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()\n\
 $spawnExitCode = 1\n\
 $spawnTerminalStatus = 'wrapper_error'\n\
@@ -2118,6 +2262,7 @@ function Write-SpawnFallbackFinalMessage([string]$Status, [int]$ExitCode, [strin
         stdout_path = $spawnStdoutPath\n\
         stderr_path = $spawnStderrPath\n\
         completion_status_path = $spawnCompletionStatusPath\n\
+        task_started_path = $spawnTaskStartedPath\n\
         stdout_line_count = $stdoutSummary.line_count\n\
         last_stdout_event_type = $stdoutSummary.last_event_type\n\
     }}\n\
@@ -2149,6 +2294,9 @@ function Write-SpawnCompletionStatus([string]$Status, [int]$ExitCode, [string]$E
         final_message_source = $spawnFinalMessageSource\n\
         recovered_final_message_written = $spawnRecoveredFinalMessageWritten\n\
         fallback_final_message_written = $FallbackFinalMessageWritten\n\
+        task_started_path = $spawnTaskStartedPath\n\
+        task_started_bytes = (Get-SpawnFileLength -Path $spawnTaskStartedPath)\n\
+        task_started_present = ((Get-SpawnFileLength -Path $spawnTaskStartedPath) -gt 0)\n\
         stdout_path = $spawnStdoutPath\n\
         stdout_line_count = $stdoutSummary.line_count\n\
         last_stdout_event_type = $stdoutSummary.last_event_type\n\
@@ -2209,6 +2357,7 @@ exit $spawnExitCode\n",
         stderr_path = stderr_path,
         final_message_path = final_message_path,
         completion_status_path = completion_status_path,
+        task_started_path = task_started_path,
         working_dir = working_dir,
         command_body = command_body,
     )
@@ -2224,6 +2373,143 @@ fn ps_single_quote(value: &str) -> String {
 
 fn toml_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+fn agent_spawn_wait_deadline(wait_timeout_ms: u64) -> Result<Instant, ErrorData> {
+    if wait_timeout_ms > MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("act_spawn_agent wait_timeout_ms must be <= {MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS}"),
+        ));
+    }
+    Instant::now()
+        .checked_add(Duration::from_millis(wait_timeout_ms))
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "act_spawn_agent wait_timeout_ms {wait_timeout_ms} is too large for this host clock"
+                ),
+            )
+        })
+}
+
+fn agent_spawn_deadline_remaining(deadline: Instant) -> Duration {
+    deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default()
+}
+
+async fn sleep_agent_spawn_poll(deadline: Instant) {
+    let remaining = agent_spawn_deadline_remaining(deadline);
+    if remaining.is_zero() {
+        return;
+    }
+    let poll = Duration::from_millis(AGENT_SPAWN_POLL_INTERVAL_MS);
+    tokio::time::sleep(if remaining < poll { remaining } else { poll }).await;
+}
+
+fn read_agent_spawn_task_start_artifact(
+    files: &AgentSpawnFiles,
+    params: &ActSpawnAgentParams,
+    spawn_id: &str,
+    matched: &MatchedSpawnSession,
+) -> Result<Option<AgentSpawnTaskStartRead>, serde_json::Value> {
+    let bytes = match fs::read(&files.task_started_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(json!({
+                "reason": "task_start_artifact_read_failed",
+                "task_started_path": files.task_started_path.display().to_string(),
+                "error": error.to_string(),
+            }));
+        }
+    };
+    if bytes.is_empty() {
+        return Err(json!({
+            "reason": "task_start_artifact_empty",
+            "task_started_path": files.task_started_path.display().to_string(),
+        }));
+    }
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+        json!({
+            "reason": "task_start_artifact_json_invalid",
+            "task_started_path": files.task_started_path.display().to_string(),
+            "bytes": bytes.len(),
+            "error": error.to_string(),
+            "text": String::from_utf8_lossy(&bytes).into_owned(),
+        })
+    })?;
+    let Some(object) = value.as_object() else {
+        return Err(json!({
+            "reason": "task_start_artifact_not_object",
+            "task_started_path": files.task_started_path.display().to_string(),
+            "artifact": value,
+        }));
+    };
+
+    let assigned_prompt_present = params
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.trim().is_empty());
+    let expected_path = files.task_started_path.display().to_string();
+    let mut validation_errors = Vec::new();
+
+    if object.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        validation_errors.push("schema_version must be 1");
+    }
+    if object.get("spawn_id").and_then(Value::as_str) != Some(spawn_id) {
+        validation_errors.push("spawn_id mismatch");
+    }
+    if object.get("cli").and_then(Value::as_str) != Some(params.cli.as_str()) {
+        validation_errors.push("cli mismatch");
+    }
+    if object.get("session_id").and_then(Value::as_str) != Some(matched.session_id.as_str()) {
+        validation_errors.push("session_id mismatch");
+    }
+    if object.get("status").and_then(Value::as_str) != Some("started") {
+        validation_errors.push("status must be started");
+    }
+    if object.get("health_ok").and_then(Value::as_bool) != Some(true) {
+        validation_errors.push("health_ok must be true");
+    }
+    if object.get("target_ok").and_then(Value::as_bool) != Some(true) {
+        validation_errors.push("target_ok must be true");
+    }
+    if object
+        .get("assigned_prompt_present")
+        .and_then(Value::as_bool)
+        != Some(assigned_prompt_present)
+    {
+        validation_errors.push("assigned_prompt_present mismatch");
+    }
+    if object.get("task_started_path").and_then(Value::as_str) != Some(expected_path.as_str()) {
+        validation_errors.push("task_started_path mismatch");
+    }
+    let started_at_unix_ms = match object.get("started_at_unix_ms").and_then(Value::as_u64) {
+        Some(value) if value > 0 => value,
+        _ => {
+            validation_errors.push("started_at_unix_ms must be a positive integer");
+            0
+        }
+    };
+
+    if !validation_errors.is_empty() {
+        return Err(json!({
+            "reason": "task_start_artifact_invalid",
+            "task_started_path": expected_path,
+            "validation_errors": validation_errors,
+            "artifact": value,
+        }));
+    }
+
+    Ok(Some(AgentSpawnTaskStartRead { started_at_unix_ms }))
+}
+
+fn read_json_file_lossy(path: &Path) -> Option<Value> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn spawn_session_candidate_matches(
@@ -2388,13 +2674,142 @@ mod tests {
     #[test]
     fn spawn_prompt_names_powershell_contract() {
         let dir = Path::new(r"C:\code\Synapse");
-        let prompt = build_agent_spawn_prompt("agent-spawn-test", &test_spawn_params(), dir)
-            .expect("build spawn prompt");
+        let task_started_path = dir.join("task-started.json");
+        let prompt = build_agent_spawn_prompt(
+            "agent-spawn-test",
+            &test_spawn_params(),
+            dir,
+            &task_started_path,
+        )
+        .expect("build spawn prompt");
 
         assert!(prompt.contains("PowerShell on Windows, not Bash"));
         assert!(prompt.contains("Do not use Bash heredocs"));
         assert!(prompt.contains("@'"));
         assert!(prompt.contains("Start-Sleep -Milliseconds 1234"));
+        assert!(prompt.contains("task-start readiness artifact"));
+        assert!(prompt.contains("task-started.json"));
+        assert!(prompt.contains("$taskStartedTempPath"));
+        assert!(prompt.contains("Move-Item -LiteralPath $taskStartedTempPath"));
+        assert!(prompt.contains("assigned_prompt_present = $true"));
+    }
+
+    #[test]
+    fn agent_spawn_wait_deadline_rejects_impossible_timeout() {
+        let error = agent_spawn_wait_deadline(MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS + 1)
+            .expect_err("over-limit deadline must fail closed");
+
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&json!(error_codes::TOOL_PARAMS_INVALID))
+        );
+        assert!(error.message.contains("must be <="));
+    }
+
+    #[test]
+    fn task_start_artifact_validation_rejects_wrong_session() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let files = AgentSpawnFiles {
+            log_dir: dir.path().to_path_buf(),
+            prompt_path: dir.path().join("prompt.txt"),
+            stdout_path: dir.path().join("stdout.jsonl"),
+            stderr_path: dir.path().join("stderr.log"),
+            final_message_path: dir.path().join("final-message.txt"),
+            completion_status_path: dir.path().join("completion-status.json"),
+            task_started_path: dir.path().join("task-started.json"),
+            debug_path: None,
+            mcp_config_path: None,
+        };
+        fs::write(
+            &files.task_started_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "spawn_id": "agent-spawn-test",
+                "cli": "codex",
+                "session_id": "wrong-session",
+                "status": "started",
+                "health_ok": true,
+                "target_ok": true,
+                "assigned_prompt_present": true,
+                "task_started_path": files.task_started_path.display().to_string(),
+                "started_at_unix_ms": 1234
+            }))
+            .expect("encode task start"),
+        )
+        .expect("write task start");
+        let matched = MatchedSpawnSession {
+            session_id: "expected-session".to_owned(),
+            registered_at_unix_ms: 1000,
+            agent_process_id: Some(42),
+        };
+        let error = read_agent_spawn_task_start_artifact(
+            &files,
+            &test_spawn_params(),
+            "agent-spawn-test",
+            &matched,
+        )
+        .expect_err("wrong session must fail");
+
+        assert_eq!(
+            error.get("reason").and_then(Value::as_str),
+            Some("task_start_artifact_invalid")
+        );
+        assert!(
+            error
+                .get("validation_errors")
+                .and_then(Value::as_array)
+                .expect("validation errors")
+                .iter()
+                .any(|entry| entry.as_str() == Some("session_id mismatch"))
+        );
+    }
+
+    #[test]
+    fn task_start_artifact_validation_accepts_matching_artifact() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let files = AgentSpawnFiles {
+            log_dir: dir.path().to_path_buf(),
+            prompt_path: dir.path().join("prompt.txt"),
+            stdout_path: dir.path().join("stdout.jsonl"),
+            stderr_path: dir.path().join("stderr.log"),
+            final_message_path: dir.path().join("final-message.txt"),
+            completion_status_path: dir.path().join("completion-status.json"),
+            task_started_path: dir.path().join("task-started.json"),
+            debug_path: None,
+            mcp_config_path: None,
+        };
+        fs::write(
+            &files.task_started_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "spawn_id": "agent-spawn-test",
+                "cli": "codex",
+                "session_id": "expected-session",
+                "status": "started",
+                "health_ok": true,
+                "target_ok": true,
+                "assigned_prompt_present": true,
+                "task_started_path": files.task_started_path.display().to_string(),
+                "started_at_unix_ms": 1234
+            }))
+            .expect("encode task start"),
+        )
+        .expect("write task start");
+        let matched = MatchedSpawnSession {
+            session_id: "expected-session".to_owned(),
+            registered_at_unix_ms: 1000,
+            agent_process_id: Some(42),
+        };
+        let read = read_agent_spawn_task_start_artifact(
+            &files,
+            &test_spawn_params(),
+            "agent-spawn-test",
+            &matched,
+        )
+        .expect("read task start")
+        .expect("task start present");
+
+        assert_eq!(read.started_at_unix_ms, 1234);
     }
 
     #[test]
@@ -2407,6 +2822,7 @@ mod tests {
             stderr_path: dir.path().join("stderr.log"),
             final_message_path: dir.path().join("final-message.txt"),
             completion_status_path: dir.path().join("completion-status.json"),
+            task_started_path: dir.path().join("task-started.json"),
             debug_path: None,
             mcp_config_path: None,
         };
@@ -2417,6 +2833,8 @@ mod tests {
         assert!(script.contains("$env:PYTHONIOENCODING = 'utf-8'"));
         assert!(script.contains("Remove-Item Env:PYTHONLEGACYWINDOWSSTDIO"));
         assert!(script.contains("wrapper_process_id = $spawnWrapperProcessId"));
+        assert!(script.contains("$spawnTaskStartedPath"));
+        assert!(script.contains("task_started_present"));
         assert!(script.contains("Get-Content -Raw -LiteralPath $spawnPromptPath -Encoding UTF8"));
     }
 
