@@ -22,9 +22,9 @@
 
 ## v0.1.0-m4 - 2026-05-28
 
-M4 adds the hardware-HID and first-game profile surface for the configured
-Windows host, with manual configured-host FSV remaining the release gate rather
-than GitHub Actions/CI.
+M4 adds the hardware-HID profile surface for the configured Windows host, with
+manual configured-host FSV remaining the release gate rather than GitHub
+Actions/CI.
 
 - Added the three M4 MCP tools: `act_combo`, `act_run_shell`, and
   `act_launch`, bringing the M4 baseline to 33 tools before later
@@ -36,11 +36,6 @@ than GitHub Actions/CI.
   configured.
 - Added `synapse-mcp hid identify` and `synapse-mcp hid flash` plus the bundled
   release firmware asset `scripts/release/firmware/pico-hid-0.1.0-m4.uf2`.
-- Added the `minecraft.java` single-player profile with `Profile.use_scope`,
-  HUD template-match declarations for hearts and hunger, XP OCR, keymap,
-  supported-use metadata, and `event_extensions` for game-specific derived
-  events; real Java runtime evidence remains gated on the configured host's
-  Microsoft sign-in/license boundary.
 - Added hardware-HID consent state in `%APPDATA%/synapse/agreement.json`,
   including supported-use scopes and the explicit
   `I AUTHORIZE HARDWARE INPUT` acknowledgement.
@@ -49,14 +44,9 @@ than GitHub Actions/CI.
   `HID_PROTOCOL_HANDSHAKE_FAILED`, `HID_FIRMWARE_VERSION_MISMATCH`,
   `HID_COMMAND_REJECTED`, `HID_LINK_TIMEOUT`,
   `SAFETY_SHELL_DENIED_BY_POLICY`, and `SAFETY_LAUNCH_DENIED_BY_POLICY`.
-- Recorded ADR-0008 through ADR-0012 for Synapse Pico VID/PID, HID gamepad vs
-  XInput, default detection model, aim-track EMA smoothing, and hardware
+- Recorded ADR-0008 through ADR-0012 for Synapse Pico VID/PID, HID controller
+  vs XInput, default detection model, aim-track EMA smoothing, and hardware
   action coalescing.
-- Added Luanti/Minetest as the local whole-system benchmark analogue so MCP,
-  profile-registry, audit-data, action, perception, and hardware-HID work can
-  be verified against physical process/window, world-file, SQLite, log, and
-  RocksDB sources of truth on this host.
-
 ## v0.1.0-m3 - 2026-05-25
 
 M3 adds the reflex, storage, profile, audio, replay, and HTTP/SSE runtime

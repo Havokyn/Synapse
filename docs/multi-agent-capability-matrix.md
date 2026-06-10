@@ -2,7 +2,7 @@
 
 This matrix is the checked-in closure artifact for #803 under the #717 multi-agent epic. It is not Full State Verification. D1 still requires manual MCP calls and separate Source-of-Truth reads before accepting any shipped behavior.
 
-The matrix covers the general computer-use action, perception, session, target, lease, reflex, and diagnostic MCP tools. Domain-specific profile, storage, audit-export, replay, and EverQuest tools are outside this matrix unless they directly own foreground, cursor, target, or background computer-control state.
+The matrix covers the general computer-use action, perception, session, target, lease, reflex, and diagnostic MCP tools. Domain-specific profile, storage, audit-export, and replay tools are outside this matrix unless they directly own foreground, cursor, target, or background computer-control state.
 
 Status values:
 
@@ -29,7 +29,7 @@ Research basis:
 | act_focus_window | action | exact hwnd, unique title_regex, or unique pid | none because the tool intentionally activates a window | requires foreground input lease and GetForegroundWindow readback | foreground-lease | #774 #777 | GetForegroundWindow before and after plus CF_ACTION_LOG |
 | act_keymap | action | foreground keyboard target | none for current backend | requires foreground input lease through SendInput tier | gap-linked | #782 | CF_ACTION_LOG required_foreground plus foreground/cursor samples |
 | act_launch | action | allowlisted executable target | hidden launch mode and CDP setup can run without visible activation | visible window launch may surface UI; hidden mode is required for background agent work | conditional-pass | #721 #776 | process table, launch process history row, window state, CF_ACTION_LOG |
-| act_pad | action | virtual gamepad backend | ViGEm or configured gamepad backend without foreground or cursor | no foreground lease; virtual device is not yet session-owned | sessionless | #801 | backend state snapshot and CF_ACTION_LOG |
+| act_pad | action | virtual controller backend | ViGEm or configured controller backend without foreground or cursor | no foreground lease; virtual device is not yet session-owned | sessionless | #801 | backend state snapshot and CF_ACTION_LOG |
 | act_press | action | foreground keyboard target | none for current backend | requires foreground input lease through SendInput tier | gap-linked | #782 | CF_ACTION_LOG required_foreground plus foreground/cursor samples |
 | act_run_shell | action | allowlisted executable child process | child process execution does not need foreground or cursor | no foreground lease; per-session env, cwd, and process tree isolation remain open | gap-linked | #802 | process table, file/process output, idempotency rows, CF_ACTION_LOG |
 | act_run_shell_cancel | action control | durable shell job id | exact recorded job-owned process tree termination plus persisted status readback | no foreground lease; destructive scope is limited to the job pid/process tree from status.json | control | none (#805) | job status.json before and after, process table, stdout/stderr logs, CF_ACTION_LOG |

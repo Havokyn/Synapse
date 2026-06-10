@@ -64,7 +64,7 @@ giant screenshot it has to squint at:
 - **Browser DOM mode** — Synapse-launched Chromium browsers can expose page
   nodes through CDP; see [Browser and Web Perception](docs/browser-perception.md).
 - **`read_text`** — OCR any region or element. Reads pixels directly, so it works
-  even where the accessibility API can't reach (games, canvases, custom UIs).
+  even where the accessibility API can't reach (canvases and custom UIs).
 - **`audio_tail` / `audio_transcribe`** — capture and transcribe system audio
   (Whisper) so the agent can *hear* what's happening.
 - **`set_perception_mode`** — switch between accessibility, raw-pixel, or hybrid
@@ -130,7 +130,7 @@ plain `observe`; see [Delta-First Reality Tool Boundary](docs/delta-reality.md).
 
 <img src="docs/assets/learning-moat.png" alt="Synapse compounds knowledge through a profile and audit flywheel" align="right" width="42%">
 
-Synapse ships **29 app/game profiles** that encode how to operate Notepad, Chrome,
+Synapse ships **29 application profiles** that encode how to operate Notepad, Chrome,
 Excel, Paint, Explorer, Terminal, and more — and it gets *better with use*:
 
 - Every action is logged to a local **RocksDB** audit trail.
@@ -143,20 +143,6 @@ Excel, Paint, Explorer, Terminal, and more — and it gets *better with use*:
 
 This is the compounding loop: *profile used → outcome audited → quality learned →
 profile improved → better profile distributed → more evidence.*
-
-<br clear="all">
-
-### 🎮 It plays games
-
-<img src="docs/assets/games.png" alt="Synapse can drive real games" align="left" width="42%">
-
-Pixel-perception, virtual controllers, and reflexes make Synapse a serious game
-agent. It ships a full **EverQuest** domain pack — 20+ tools spanning live state
-estimation, map sensing, hazard/safe-area memory, route planning, a planner
-guard, trajectory/episode export, a ContextGraph memory bridge, a transparent
-predictive model, and surprise detection — a complete
-**perceive → remember → plan → act → learn** loop, plus benchmark profiles for
-Minecraft and Luanti/Minetest.
 
 <br clear="all">
 
@@ -187,7 +173,7 @@ flowchart LR
         ST["💾 Storage<br/>RocksDB audit trail"]
         PR["🧩 Profiles + registry"]
     end
-    B <-->|sees & controls| W["🖥️ Your Windows desktop,<br/>apps & games"]
+    B <-->|sees & controls| W["🖥️ Your Windows desktop,<br/>apps"]
     P --- ST
     ACT --- ST
     RX --- ST
@@ -372,7 +358,6 @@ At a glance:
 | **Reflexes** | `reflex_register` · `reflex_cancel` · `reflex_list` · `reflex_history` |
 | **Profiles, registry & audit** | `profile_list` · `profile_activate` · `profile_quality_refresh` · `profile_authoring_decide` · `profile_registry_query` · `audit_intelligence_query` · `audit_export_bundle` |
 | **Storage & health** | `health` · `storage_inspect` · `storage_gc_once` · `storage_pressure_sample` · `replay_record` |
-| **EverQuest domain pack** | `everquest_*` — state, memory, planner guard, route plan, map sensor, trajectory/episode export, ContextGraph bridge, predictive model, surprise detection, scorecard |
 
 ---
 
@@ -429,7 +414,7 @@ Copyright © 2026 Chris Royse. See [LICENSE.md](LICENSE.md) for full terms.
 ## 💛 Support Synapse
 
 Synapse is built and maintained by one solo developer. If it's useful to you — or
-you'd like to help fund new app/game profiles, features, and ongoing development —
+you'd like to help fund new application profiles, features, and ongoing development —
 please consider sending a donation or a message of support.
 
 <p align="center">
@@ -440,7 +425,7 @@ please consider sending a donation or a message of support.
   👉 <strong><a href="https://www.paypal.com/paypalme/ChrisRoyseAI">paypal.me/ChrisRoyseAI</a></strong> — donate or send a message to help support Synapse.
 </p>
 
-Every contribution directly funds buying apps/games to profile, token costs for
+Every contribution directly funds buying applications to profile, token costs for
 testing, and the time to keep shipping. Thank you! 🙏
 
 ---

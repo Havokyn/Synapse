@@ -78,9 +78,9 @@ The firmware now exposes the Synapse Pico HID composite USB device:
 - USB VID/PID: `0x2E8A` / `0x1F50`
 - Manufacturer/product: `Synapse` / `Synapse Pico HID`
 - CDC ACM framed command channel
-- HID boot mouse, boot keyboard, and gamepad interfaces
+- HID boot mouse, boot keyboard, and controller interfaces
 
-The CDC dispatcher handles identity, mouse, keyboard, gamepad, release-all,
+The CDC dispatcher handles identity, mouse, keyboard, controller, release-all,
 watchdog, and telemetry commands. Runtime state drives HID reports, telemetry
 counters, firmware-side action-command timing, watchdog release-all behavior,
 and LED status. `GET_TELEMETRY` returns the base counters plus

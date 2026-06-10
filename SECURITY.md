@@ -1,7 +1,7 @@
 # Security Policy
 
 Synapse gives an AI agent a real local computer-use body: it can move the mouse,
-type, press keys, drive a virtual gamepad, run allowlisted shell commands, launch
+type, press keys, drive a virtual controller, run allowlisted shell commands, launch
 processes, capture the screen, and read accessibility trees. Treat it as a
 powerful, security-sensitive tool and run it only on machines and accounts where
 that level of control is acceptable.
@@ -33,7 +33,7 @@ made in good faith are welcome and appreciated.
 Because Synapse is designed to control the local machine, the following are
 **expected behavior**, not vulnerabilities, when configured by the operator:
 
-- Sending input (keyboard/mouse/gamepad) to the focused application.
+- Sending input (keyboard/mouse/controller) to the focused application.
 - Capturing the screen and reading UI Automation / accessibility data.
 - Running shell commands and launching processes that the operator has
   explicitly allowlisted.
