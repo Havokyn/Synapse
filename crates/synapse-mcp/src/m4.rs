@@ -611,11 +611,13 @@ pub struct ActLaunchParams {
     pub timeout_ms: u64,
     pub idempotency_key: Option<String>,
     /// Controls CDP debug-port injection for Chromium-family targets (#684).
-    /// `None` (default) = auto: inject `--remote-debugging-port=0` + a dedicated
-    /// `--user-data-dir` so `observe`/`find` can read the browser's DOM without
-    /// manual flags. `Some(false)` = opt out (launch the browser untouched).
-    /// `Some(true)` = force injection even if heuristics would skip it.
-    /// Ignored for non-Chromium targets.
+    /// `None` (default) = auto: inject `--remote-debugging-port=0`, a dedicated
+    /// `--user-data-dir`, `--silent-debugger-extension-api`, and
+    /// `--disable-extensions` so `observe`/`find` can read the browser's DOM
+    /// without loading user-profile extensions or surfacing debugger UI.
+    /// `Some(false)` = opt out (launch the browser untouched). `Some(true)` =
+    /// force injection even if heuristics would skip it. Ignored for
+    /// non-Chromium targets.
     #[serde(default)]
     #[schemars(default)]
     pub cdp_debug: Option<bool>,
@@ -2009,6 +2011,8 @@ fn chromium_cdp_launch(params: &ActLaunchParams) -> Option<ChromiumCdpLaunch> {
     let injected_args = vec![
         "--remote-debugging-port=0".to_owned(),
         format!("--user-data-dir={}", user_data_dir.display()),
+        "--silent-debugger-extension-api".to_owned(),
+        "--disable-extensions".to_owned(),
         "--no-first-run".to_owned(),
         "--no-default-browser-check".to_owned(),
     ];
@@ -2663,7 +2667,154 @@ fn validate_launch_params(params: &ActLaunchParams) -> Result<(), ErrorData> {
         })?;
     }
     validate_console_launch_visibility(params)?;
+    validate_chromium_debug_launch_policy(params)?;
     Ok(())
+}
+
+fn validate_chromium_debug_launch_policy(params: &ActLaunchParams) -> Result<(), ErrorData> {
+    let is_chromium = synapse_a11y::is_chromium_family(&launch_target_file_name(&params.target));
+    if !is_chromium && params.cdp_debug != Some(true) {
+        return Ok(());
+    }
+    if !has_remote_debugging_arg(&params.args) {
+        return Ok(());
+    }
+
+    let user_data_dir = user_data_dir_arg(&params.args);
+    let user_data_dir_state = user_data_dir
+        .as_deref()
+        .map(chromium_user_data_dir_safety)
+        .unwrap_or(ChromiumUserDataDirSafety::Missing);
+    let silent_debugger = params
+        .args
+        .iter()
+        .any(|arg| is_switch_arg(arg, "--silent-debugger-extension-api"));
+    let disable_extensions = params
+        .args
+        .iter()
+        .any(|arg| is_switch_arg(arg, "--disable-extensions"));
+    let loads_extensions = params.args.iter().any(|arg| {
+        is_switch_arg(arg, "--load-extension") || is_switch_arg(arg, "--disable-extensions-except")
+    });
+
+    if silent_debugger
+        && disable_extensions
+        && !loads_extensions
+        && matches!(user_data_dir_state, ChromiumUserDataDirSafety::Dedicated)
+    {
+        return Ok(());
+    }
+
+    Err(launch_tool_error(
+        error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+        "act_launch refused a Chromium remote-debugging launch that could surface Chrome debugger/native-host UI on an end-user profile",
+        json!({
+            "code": error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+            "reason": "chromium_remote_debugging_not_popup_safe",
+            "target": params.target,
+            "args": params.args,
+            "user_data_dir": user_data_dir,
+            "user_data_dir_state": user_data_dir_state.as_str(),
+            "has_silent_debugger_extension_api": silent_debugger,
+            "has_disable_extensions": disable_extensions,
+            "has_extension_loading_flags": loads_extensions,
+            "required_invariant": "remote-debugging Chromium launches must use a non-default dedicated user-data-dir, --silent-debugger-extension-api, --disable-extensions, and no extension-loading flags",
+            "remediation": "omit caller-supplied remote-debugging/profile flags so Synapse injects its isolated automation profile, or pass the required flags against a non-default automation profile; never debug the user's normal Chrome profile",
+        }),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChromiumUserDataDirSafety {
+    Missing,
+    DefaultProfile,
+    Dedicated,
+}
+
+impl ChromiumUserDataDirSafety {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::DefaultProfile => "default_profile",
+            Self::Dedicated => "dedicated",
+        }
+    }
+}
+
+fn chromium_user_data_dir_safety(path: &str) -> ChromiumUserDataDirSafety {
+    if path.trim().is_empty() {
+        return ChromiumUserDataDirSafety::Missing;
+    }
+    if is_default_chrome_user_data_dir(path) {
+        ChromiumUserDataDirSafety::DefaultProfile
+    } else {
+        ChromiumUserDataDirSafety::Dedicated
+    }
+}
+
+fn has_remote_debugging_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        is_switch_arg(arg, "--remote-debugging-port")
+            || is_switch_arg(arg, "--remote-debugging-pipe")
+    })
+}
+
+fn user_data_dir_arg(args: &[String]) -> Option<String> {
+    switch_arg_value(args, "--user-data-dir")
+}
+
+fn switch_arg_value(args: &[String], switch: &str) -> Option<String> {
+    for (index, arg) in args.iter().enumerate() {
+        if is_switch_arg(arg, switch) {
+            if let Some((_head, value)) = arg.split_once('=') {
+                return Some(trim_arg_quotes(value).to_owned());
+            }
+            if let Some(value) = args.get(index + 1) {
+                return Some(trim_arg_quotes(value).to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn is_switch_arg(arg: &str, switch: &str) -> bool {
+    let lower = trim_arg_quotes(arg).to_ascii_lowercase();
+    let switch = switch.to_ascii_lowercase();
+    lower == switch || lower.starts_with(&format!("{switch}="))
+}
+
+fn trim_arg_quotes(value: &str) -> &str {
+    value.trim().trim_matches('"')
+}
+
+fn is_default_chrome_user_data_dir(path: &str) -> bool {
+    let Some(default_dir) = default_chrome_user_data_dir() else {
+        return false;
+    };
+    let candidate = normalize_path_for_policy(path);
+    let default_dir = normalize_path_for_policy(default_dir.to_string_lossy().as_ref());
+    candidate == default_dir || candidate.starts_with(&format!("{default_dir}\\"))
+}
+
+fn default_chrome_user_data_dir() -> Option<std::path::PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(local_app_data)
+            .join("Google")
+            .join("Chrome")
+            .join("User Data"),
+    )
+}
+
+fn normalize_path_for_policy(path: &str) -> String {
+    let path = trim_arg_quotes(path);
+    let path = std::path::Path::new(path);
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
 }
 
 fn validate_console_launch_visibility(params: &ActLaunchParams) -> Result<(), ErrorData> {
@@ -5816,6 +5967,18 @@ mod tests {
                 .iter()
                 .any(|arg| arg.starts_with("--user-data-dir="))
         );
+        assert!(
+            launch
+                .injected_args
+                .iter()
+                .any(|arg| arg == "--silent-debugger-extension-api")
+        );
+        assert!(
+            launch
+                .injected_args
+                .iter()
+                .any(|arg| arg == "--disable-extensions")
+        );
         // The dedicated profile must be non-default (Chrome 136+ requirement).
         assert!(
             launch
@@ -5849,16 +6012,45 @@ mod tests {
     }
 
     #[test]
-    fn chromium_cdp_launch_defers_to_caller_supplied_flags() {
+    fn chromium_cdp_launch_defers_to_popup_safe_caller_supplied_flags() {
         let with_port = launch_params("msedge.exe", vec!["--remote-debugging-port=9222"], 10_000);
         println!(
             "readback=cdp_launch edge=caller_port before=args:{:?}",
             with_port.args
         );
         assert!(chromium_cdp_launch(&with_port).is_none());
+        let error = validate_launch_params(&with_port).expect_err("unsafe debug launch must fail");
+        assert_eq!(
+            extract_error_code(&error),
+            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+        assert!(
+            error
+                .message
+                .contains("refused a Chromium remote-debugging launch")
+        );
 
         let with_profile = launch_params("chrome.exe", vec!["--user-data-dir=C:\\my"], 10_000);
         assert!(chromium_cdp_launch(&with_profile).is_none());
+
+        let safe_profile = cdp_automation_profile_dir();
+        let safe_profile_arg = format!("--user-data-dir={}", safe_profile.display());
+        let safe_remote_debug = launch_params(
+            "chrome.exe",
+            vec![
+                "--remote-debugging-port=0",
+                safe_profile_arg.as_str(),
+                "--silent-debugger-extension-api",
+                "--disable-extensions",
+                "about:blank",
+            ],
+            10_000,
+        );
+        println!(
+            "readback=cdp_launch edge=caller_popup_safe before=args:{:?}",
+            safe_remote_debug.args
+        );
+        validate_launch_params(&safe_remote_debug).expect("popup-safe caller CDP launch");
     }
 
     #[test]
