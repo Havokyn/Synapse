@@ -4,7 +4,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$silentDebuggerSwitch = '--silent-debugger-extension-api'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $extensionDir = Join-Path $repoRoot 'extensions\synapse-chrome-debugger'
@@ -20,7 +19,7 @@ if ($requiredPermissions -contains 'debugger') {
     throw "SYNAPSE_CHROME_EXTENSION_REQUIRED_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use chrome.tabs without required debugger permission"
 }
 if ($optionalPermissions -contains 'debugger') {
-    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=Chrome does not allow debugger as optional permission; use a separate debugger-enabled bridge only with --silent-debugger-extension-api"
+    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use chrome.tabs without optional debugger permission; use raw CDP from a Synapse-launched automation profile for DOM/action CDP"
 }
 if ($requiredPermissions -contains 'nativeMessaging') {
     throw "SYNAPSE_CHROME_EXTENSION_NATIVE_MESSAGING_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use direct localhost HTTP registration plus WebSocket command delivery; nativeMessaging can launch a visible cmd.exe wrapper on Windows"
@@ -148,9 +147,11 @@ $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     background_navigation_backend = 'chrome.tabs_no_debugger_permission_no_native_messaging'
-    attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_profile_active_permission_gate'
+    reconnect_driver = 'chrome.alarms_30s_direct_localhost_register'
+    attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_daemon_side_attach_disabled'
     normal_bridge_attach_commands_available = $false
     normal_bridge_debugger_api_calls_present = $false
+    required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
     required_debugger_permission_present = $false
     optional_debugger_permission_present = $false
     required_native_messaging_permission_present = $false
@@ -158,8 +159,8 @@ $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction
     localhost_host_permission_present = $true
     native_host_registry_present = (Test-Path -LiteralPath $registryPath)
     native_host_manifest_present = (Test-Path -LiteralPath $hostManifestPath)
-    silent_debugger_switch_required_for_attach_commands = $true
-    silent_debugger_switch = $silentDebuggerSwitch
+    silent_debugger_switch_required_for_attach_commands = $false
+    silent_debugger_switch = $null
     current_chrome_processes = $chromeProcesses
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     external_debugger_or_native_extensions = $externalDebuggerOrNativeExtensions

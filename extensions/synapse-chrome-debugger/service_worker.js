@@ -8,6 +8,8 @@ const TAB_TARGET_PREFIX = "chrome-tab:";
 const BRIDGE_TOKEN_HEADER = "X-Synapse-Bridge-Token";
 const DAEMON_WS_BASE_URL = "ws://127.0.0.1:7700";
 const WEBSOCKET_KEEPALIVE_MS = 20000;
+const RECONNECT_ALARM_NAME = "synapse-daemon-reconnect";
+const RECONNECT_ALARM_PERIOD_MINUTES = 0.5;
 
 let hostId = null;
 let bridgeToken = null;
@@ -16,8 +18,34 @@ let reconnectTimer = null;
 let webSocket = null;
 let keepAliveTimer = null;
 
+function startBridge() {
+  ensureReconnectAlarm();
+  connectDaemon();
+}
+
+function ensureReconnectAlarm() {
+  chrome.alarms
+    .create(RECONNECT_ALARM_NAME, {
+      delayInMinutes: RECONNECT_ALARM_PERIOD_MINUTES,
+      periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES
+    })
+    .catch((error) => {
+      console.error(`Synapse daemon bridge alarm setup failed: ${errorMessage(error)}`);
+    });
+}
+
 function connectDaemon() {
-  if (hostId || webSocket || connectInFlight) {
+  if (connectInFlight) {
+    return;
+  }
+  if (webSocket && isWebSocketUsable(webSocket)) {
+    return;
+  }
+  if (webSocket && !isWebSocketUsable(webSocket)) {
+    closeWebSocket();
+  }
+  if (hostId && bridgeToken) {
+    connectWebSocket();
     return;
   }
   connectInFlight = registerDaemon()
@@ -105,6 +133,10 @@ function connectWebSocket() {
   };
 }
 
+function isWebSocketUsable(socket) {
+  return socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN;
+}
+
 async function handleWebSocketMessage(raw) {
   if (typeof raw !== "string") {
     throw new Error(`daemon websocket returned non-text payload type=${typeof raw}`);
@@ -162,10 +194,15 @@ function closeWebSocket() {
   }
 }
 
-chrome.runtime.onInstalled.addListener(connectDaemon);
-chrome.runtime.onStartup.addListener(connectDaemon);
+chrome.runtime.onInstalled.addListener(startBridge);
+chrome.runtime.onStartup.addListener(startBridge);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name === RECONNECT_ALARM_NAME) {
+    startBridge();
+  }
+});
 
-connectDaemon();
+startBridge();
 
 async function handleCommand(command) {
   if (!command || typeof command !== "object") {
@@ -208,8 +245,7 @@ function rejectAttachCommand(kind, params) {
     `normal Synapse Chrome Bridge refused ${String(kind)} before browser debugger startup; ` +
       `the normal end-user extension is tabs-only and contains no debugger transport. ` +
       `hwnd=${String(params?.hwnd ?? "unknown")} remediation=use raw CDP with a dedicated ` +
-      `Synapse-launched automation profile or install a separate debugger-enabled bridge only ` +
-      `for Chrome processes launched with --silent-debugger-extension-api`
+      `Synapse-launched automation profile`
   );
 }
 

@@ -36,7 +36,6 @@ use uuid::Uuid;
 const EXTENSION_ID: &str = "leoocgnkjnplbfdbklajepahofecgfbk";
 const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
-const CHROME_DEBUGGER_SILENT_FLAG: &str = "--silent-debugger-extension-api";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -46,7 +45,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge uses chrome.tabs over direct localhost WebSocket without nativeMessaging or debugger permissions, and attach-capable debugger commands require an explicit debugger-enabled bridge plus Chrome launched with --silent-debugger-extension-api; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge uses chrome.tabs over direct localhost WebSocket without nativeMessaging or debugger permissions, and attach-capable debugger commands are disabled in the normal bridge; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
 
@@ -153,23 +152,11 @@ impl ChromeDebuggerBridgeError {
         }
     }
 
-    fn debugger_warning_unsuppressed(
-        hwnd: i64,
-        pid: Option<u32>,
-        process_name: Option<&str>,
-        command_line: Option<&[String]>,
-        reason: impl Into<String>,
-    ) -> Self {
-        let process_name = process_name.unwrap_or("unknown");
-        let command_line = command_line
-            .map(|parts| format!("{parts:?}"))
-            .unwrap_or_else(|| "unreadable".to_owned());
+    fn normal_bridge_attach_disabled(hwnd: i64, command_kind: &str) -> Self {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "Chrome debugger extension attach refused before chrome.debugger.attach because Chrome would surface its debugger warning UI; hwnd={hwnd} pid={} process_name={process_name:?} required_flag={CHROME_DEBUGGER_SILENT_FLAG:?} command_line={command_line} reason={}",
-                pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
-                reason.into()
+                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge is tabs-only and contains no daemon-side chrome.debugger attach transport remediation=use raw CDP from a Synapse-launched automation profile for DOM/action CDP"
             ),
         }
     }
@@ -917,163 +904,17 @@ fn bridge() -> &'static ChromeDebuggerBridge {
 async fn send_attach_command(
     hwnd: i64,
     kind: &'static str,
-    mut payload: Value,
+    _payload: Value,
 ) -> Result<Value, ChromeDebuggerBridgeError> {
-    let state = verify_debugger_warning_suppressed(hwnd)?;
-    attach_suppression_attestation(&mut payload, &state)?;
-    bridge().send_command(kind, payload).await
-}
-
-#[derive(Clone, Debug)]
-struct DebuggerAttachProcessState {
-    pid: u32,
-    process_name: String,
-    command_line: Vec<String>,
-}
-
-#[cfg(windows)]
-fn verify_debugger_warning_suppressed(
-    hwnd: i64,
-) -> Result<DebuggerAttachProcessState, ChromeDebuggerBridgeError> {
-    let state = debugger_attach_process_state(hwnd)?;
-    if command_line_has_silent_debugger_flag(&state.command_line) {
-        return Ok(state);
-    }
-    Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
+    let error = ChromeDebuggerBridgeError::normal_bridge_attach_disabled(hwnd, kind);
+    tracing::warn!(
+        code = error.code(),
         hwnd,
-        Some(state.pid),
-        Some(&state.process_name),
-        Some(&state.command_line),
-        "target browser process command line lacks the required silent debugger switch",
-    ))
-}
-
-#[cfg(not(windows))]
-fn verify_debugger_warning_suppressed(
-    hwnd: i64,
-) -> Result<DebuggerAttachProcessState, ChromeDebuggerBridgeError> {
-    Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-        hwnd,
-        None,
-        None,
-        None,
-        "target browser process command line cannot be verified on this platform",
-    ))
-}
-
-fn attach_suppression_attestation(
-    payload: &mut Value,
-    state: &DebuggerAttachProcessState,
-) -> Result<(), ChromeDebuggerBridgeError> {
-    let Some(object) = payload.as_object_mut() else {
-        return Err(ChromeDebuggerBridgeError::protocol(
-            "Chrome debugger attach command payload was not a JSON object",
-        ));
-    };
-    object.insert("debuggerAttachSuppressionVerified".to_owned(), true.into());
-    object.insert(
-        "debuggerAttachSuppression".to_owned(),
-        json!({
-            "requiredSwitch": CHROME_DEBUGGER_SILENT_FLAG,
-            "processId": state.pid,
-            "processName": state.process_name,
-        }),
+        command_kind = kind,
+        detail = %error.detail(),
+        "normal Chrome bridge refused attach-capable debugger command before queueing it to Chrome"
     );
-    Ok(())
-}
-
-#[cfg(windows)]
-fn debugger_attach_process_state(
-    hwnd: i64,
-) -> Result<DebuggerAttachProcessState, ChromeDebuggerBridgeError> {
-    use std::ffi::c_void;
-
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    use windows::Win32::{
-        Foundation::HWND,
-        UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow},
-    };
-
-    let hwnd_value = HWND(hwnd as *mut c_void);
-    if !unsafe { IsWindow(Some(hwnd_value)) }.as_bool() {
-        return Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-            hwnd,
-            None,
-            None,
-            None,
-            "target hwnd is not a live window",
-        ));
-    }
-
-    let mut raw_pid = 0_u32;
-    unsafe { GetWindowThreadProcessId(hwnd_value, Some(&raw mut raw_pid)) };
-    if raw_pid == 0 {
-        return Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-            hwnd,
-            None,
-            None,
-            None,
-            "target hwnd owner pid was unavailable",
-        ));
-    }
-
-    let pid = Pid::from_u32(raw_pid);
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing()
-            .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always)
-            .without_tasks(),
-    );
-    let Some(process) = system.process(pid) else {
-        return Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-            hwnd,
-            Some(raw_pid),
-            None,
-            None,
-            "target hwnd owner pid was not present in the process table",
-        ));
-    };
-
-    let process_name = process.name().to_string_lossy().into_owned();
-    let command_line = process
-        .cmd()
-        .iter()
-        .map(|part| part.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    if command_line.is_empty() {
-        return Err(ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-            hwnd,
-            Some(raw_pid),
-            Some(&process_name),
-            None,
-            "target browser process command line was unreadable",
-        ));
-    }
-
-    Ok(DebuggerAttachProcessState {
-        pid: raw_pid,
-        process_name,
-        command_line,
-    })
-}
-
-fn command_line_has_silent_debugger_flag(command_line: &[String]) -> bool {
-    let exact_or_valued = |arg: &str| {
-        let arg = arg.trim_matches('"').to_ascii_lowercase();
-        arg == CHROME_DEBUGGER_SILENT_FLAG
-            || arg
-                .strip_prefix(CHROME_DEBUGGER_SILENT_FLAG)
-                .is_some_and(|rest| rest.starts_with('='))
-    };
-
-    command_line.iter().any(|arg| exact_or_valued(arg))
-        || command_line
-            .join(" ")
-            .split_whitespace()
-            .any(exact_or_valued)
+    Err(error)
 }
 
 pub(crate) async fn fetch_dom_snapshot(
@@ -2103,44 +1944,24 @@ mod tests {
     }
 
     #[test]
-    fn debugger_warning_preflight_error_maps_to_attach_failed_status() {
-        let command_line = vec![
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_owned(),
-            "--profile-directory=Default".to_owned(),
-        ];
-        let error = ChromeDebuggerBridgeError::debugger_warning_unsuppressed(
-            1234,
-            Some(5678),
-            Some("chrome.exe"),
-            Some(&command_line),
-            "missing flag",
-        );
+    fn normal_bridge_attach_disabled_is_local_refusal() {
+        let error = ChromeDebuggerBridgeError::normal_bridge_attach_disabled(1234, "snapshot");
 
         assert_eq!(
             error.code(),
             error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
         );
         assert_eq!(error.cdp_status(), CdpStatus::AttachFailed);
-        assert!(error.detail().contains("--silent-debugger-extension-api"));
-        assert!(error.detail().contains("pid=5678"));
-    }
-
-    #[test]
-    fn command_line_silent_debugger_flag_detection_is_exact() {
-        assert!(command_line_has_silent_debugger_flag(&[
-            "chrome.exe".to_owned(),
-            "--silent-debugger-extension-api".to_owned(),
-        ]));
-        assert!(command_line_has_silent_debugger_flag(&[
-            "chrome.exe --silent-debugger-extension-api --profile-directory=Default".to_owned(),
-        ]));
-        assert!(command_line_has_silent_debugger_flag(&[
-            "chrome.exe".to_owned(),
-            "--silent-debugger-extension-api=true".to_owned(),
-        ]));
-        assert!(!command_line_has_silent_debugger_flag(&[
-            "chrome.exe".to_owned(),
-            "--not-silent-debugger-extension-api".to_owned(),
-        ]));
+        assert!(
+            error
+                .detail()
+                .contains("before queueing any Chrome command")
+        );
+        assert!(
+            error
+                .detail()
+                .contains("normal end-user bridge is tabs-only")
+        );
+        assert!(error.detail().contains("raw CDP"));
     }
 }
