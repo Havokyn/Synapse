@@ -542,24 +542,33 @@ impl SynapseService {
             "tool.invocation kind=cdp_close_tab"
         );
         let session_id = require_target_session_id(&request_context)?;
-        validate_cdp_target_id(&params.0.cdp_target_id)?;
         let request_details = json!({
             "session_id": &session_id,
             "cdp_target_id": &params.0.cdp_target_id,
             "required_foreground": false,
         });
-        let owner = match self.cdp_target_owner_for_close(&session_id, &params.0.cdp_target_id) {
-            Ok(owner) => owner,
-            Err(error) => {
-                self.audit_action_denied_with_details_for_request(
-                    TOOL,
-                    &error,
-                    &request_details,
-                    &request_context,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = validate_cdp_target_id(&params.0.cdp_target_id) {
+            self.audit_action_denied_with_details_for_request(
+                TOOL,
+                &error,
+                &request_details,
+                &request_context,
+            );
+            return Err(error);
+        }
+        let (owner_key, owner) =
+            match self.cdp_target_owner_for_close(&session_id, &params.0.cdp_target_id) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    self.audit_action_denied_with_details_for_request(
+                        TOOL,
+                        &error,
+                        &request_details,
+                        &request_context,
+                    );
+                    return Err(error);
+                }
+            };
         self.audit_action_started_with_details_for_session(
             TOOL,
             &json!({
@@ -572,7 +581,7 @@ impl SynapseService {
             &session_id,
         )?;
         let result = self
-            .cdp_close_tab_impl(&session_id, &params.0.cdp_target_id, owner)
+            .cdp_close_tab_impl(&session_id, &params.0.cdp_target_id, &owner_key, owner)
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
@@ -799,32 +808,33 @@ impl SynapseService {
         }
     }
 
-    fn register_cdp_target_owner(
-        &self,
-        target_id: &str,
-        owner: CdpTargetOwner,
-    ) -> Result<(), ErrorData> {
+    fn register_cdp_target_owner(&self, owner: CdpTargetOwner) -> Result<String, ErrorData> {
+        let owner_key =
+            cdp_target_owner_key(owner.window_hwnd, &owner.endpoint, &owner.cdp_target_id);
         let mut guard = self.lock_cdp_target_owners()?;
-        if let Some(existing) = guard.get(target_id) {
+        if let Some(existing) = guard.get(&owner_key) {
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "CDP target {target_id:?} is already owned by MCP session {:?}",
+                    "CDP target {:?} on endpoint {:?} window {:#x} is already owned by MCP session {:?}",
+                    existing.cdp_target_id,
+                    existing.endpoint,
+                    existing.window_hwnd,
                     existing.session_id
                 ),
             ));
         }
-        guard.insert(target_id.to_owned(), owner);
+        guard.insert(owner_key.clone(), owner);
         drop(guard);
-        Ok(())
+        Ok(owner_key)
     }
 
     fn remove_cdp_target_owner(
         &self,
-        target_id: &str,
+        owner_key: &str,
     ) -> Result<Option<CdpTargetOwner>, ErrorData> {
         let mut guard = self.lock_cdp_target_owners()?;
-        let removed = guard.remove(target_id);
+        let removed = guard.remove(owner_key);
         drop(guard);
         Ok(removed)
     }
@@ -833,27 +843,42 @@ impl SynapseService {
         &self,
         session_id: &str,
         target_id: &str,
-    ) -> Result<CdpTargetOwner, ErrorData> {
-        let guard = self.lock_cdp_target_owners()?;
-        let Some(owner) = guard.get(target_id).cloned() else {
+    ) -> Result<(String, CdpTargetOwner), ErrorData> {
+        let active_target = self.session_target(Some(session_id))?;
+        let owners = self.cdp_target_owners_for_target_id(target_id)?;
+        if owners.is_empty() {
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
                     "cdp_close_tab refused target {target_id:?}: target is not owned by this session or was already closed"
                 ),
             ));
-        };
-        drop(guard);
-        if owner.session_id != session_id {
+        }
+        let owned_by_session = owners
+            .iter()
+            .filter(|(_key, owner)| owner.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if owned_by_session.is_empty() {
+            let owner_sessions = owners
+                .iter()
+                .map(|(_key, owner)| owner.session_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "cdp_close_tab refused target {target_id:?}: owner_session_id={:?}, requesting_session_id={:?}",
-                    owner.session_id, session_id
+                    "cdp_close_tab refused target {target_id:?}: owner_session_id(s)={owner_sessions:?}, requesting_session_id={session_id:?}",
                 ),
             ));
         }
-        Ok(owner)
+        select_cdp_owner_for_session(
+            "cdp_close_tab",
+            session_id,
+            target_id,
+            active_target.as_ref(),
+            owned_by_session,
+        )
     }
 
     fn resolve_cdp_navigation_target(
@@ -929,21 +954,51 @@ impl SynapseService {
         session_id: &str,
         target_id: &str,
     ) -> Result<Option<CdpTargetOwner>, ErrorData> {
-        let guard = self.lock_cdp_target_owners()?;
-        let owner = guard.get(target_id).cloned();
-        drop(guard);
-        if let Some(owner) = owner.as_ref()
-            && owner.session_id != session_id
-        {
+        let active_target = self.session_target(Some(session_id))?;
+        let owners = self.cdp_target_owners_for_target_id(target_id)?;
+        if owners.is_empty() {
+            return Ok(None);
+        }
+        let owned_by_session = owners
+            .iter()
+            .filter(|(_key, owner)| owner.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if owned_by_session.is_empty() {
+            let owner_sessions = owners
+                .iter()
+                .map(|(_key, owner)| owner.session_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "cdp_navigate_tab refused target {target_id:?}: owner_session_id={:?}, requesting_session_id={:?}",
-                    owner.session_id, session_id
+                    "cdp_navigate_tab refused target {target_id:?}: owner_session_id(s)={owner_sessions:?}, requesting_session_id={session_id:?}",
                 ),
             ));
         }
-        Ok(owner)
+        select_cdp_owner_for_session(
+            "cdp_navigate_tab",
+            session_id,
+            target_id,
+            active_target.as_ref(),
+            owned_by_session,
+        )
+        .map(|(_key, owner)| Some(owner))
+    }
+
+    fn cdp_target_owners_for_target_id(
+        &self,
+        target_id: &str,
+    ) -> Result<Vec<(String, CdpTargetOwner)>, ErrorData> {
+        let guard = self.lock_cdp_target_owners()?;
+        let owners = guard
+            .iter()
+            .filter(|(_key, owner)| cdp_target_ids_equal(&owner.cdp_target_id, target_id))
+            .map(|(key, owner)| (key.clone(), owner.clone()))
+            .collect::<Vec<_>>();
+        drop(guard);
+        Ok(owners)
     }
 
     #[cfg(windows)]
@@ -960,7 +1015,16 @@ impl SynapseService {
         }
         {
             let guard = self.lock_cdp_target_owners()?;
-            if let Some(owner) = guard.get(cdp_target_id) {
+            let owners = guard
+                .values()
+                .filter(|owner| {
+                    owner.window_hwnd == window_hwnd
+                        && cdp_target_ids_equal(&owner.cdp_target_id, cdp_target_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            drop(guard);
+            for owner in owners {
                 if owner.session_id != session_id {
                     return Err(mcp_error(
                         error_codes::ACTION_TARGET_INVALID,
@@ -1018,7 +1082,8 @@ impl SynapseService {
     ) -> Result<(), ErrorData> {
         {
             let guard = self.lock_cdp_target_owners()?;
-            if let Some(owner) = guard.get(cdp_target_id) {
+            let owner_key = cdp_target_owner_key(window_hwnd, endpoint, cdp_target_id);
+            if let Some(owner) = guard.get(&owner_key) {
                 if owner.session_id != session_id {
                     return Err(mcp_error(
                         error_codes::ACTION_TARGET_INVALID,
@@ -1119,17 +1184,15 @@ impl SynapseService {
             .map(chrome_debugger_endpoint)
             .unwrap_or_else(chrome_debugger_default_endpoint);
         let cdp_target_id = opened.target_id.clone();
-        self.register_cdp_target_owner(
-            &cdp_target_id,
-            CdpTargetOwner {
-                session_id: session_id.to_owned(),
-                window_hwnd,
-                endpoint: endpoint.clone(),
-                requested_url: requested_url.to_owned(),
-                target_url: opened.url.clone(),
-                created_at_unix_ms: unix_ms_now(),
-            },
-        )?;
+        let owner_key = self.register_cdp_target_owner(CdpTargetOwner {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            endpoint: endpoint.clone(),
+            cdp_target_id: cdp_target_id.clone(),
+            requested_url: requested_url.to_owned(),
+            target_url: opened.url.clone(),
+            created_at_unix_ms: unix_ms_now(),
+        })?;
         let current = TargetWire::Cdp {
             window_hwnd,
             cdp_target_id: cdp_target_id.clone(),
@@ -1147,6 +1210,7 @@ impl SynapseService {
             hwnd = window_hwnd,
             endpoint = %endpoint,
             cdp_target_id = %cdp_target_id,
+            cdp_owner_key = %owner_key,
             tab_id = opened.tab_id,
             requested_url = %requested_url,
             target_url = %opened.url,
@@ -1192,17 +1256,15 @@ impl SynapseService {
                 )
             })?;
         let cdp_target_id = opened.target.target_id.clone();
-        self.register_cdp_target_owner(
-            &cdp_target_id,
-            CdpTargetOwner {
-                session_id: session_id.to_owned(),
-                window_hwnd,
-                endpoint: endpoint.to_owned(),
-                requested_url: requested_url.to_owned(),
-                target_url: opened.target.url.clone(),
-                created_at_unix_ms: unix_ms_now(),
-            },
-        )?;
+        let owner_key = self.register_cdp_target_owner(CdpTargetOwner {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            endpoint: endpoint.to_owned(),
+            cdp_target_id: cdp_target_id.clone(),
+            requested_url: requested_url.to_owned(),
+            target_url: opened.target.url.clone(),
+            created_at_unix_ms: unix_ms_now(),
+        })?;
         let current = TargetWire::Cdp {
             window_hwnd,
             cdp_target_id: cdp_target_id.clone(),
@@ -1220,6 +1282,7 @@ impl SynapseService {
             hwnd = window_hwnd,
             endpoint = %endpoint,
             cdp_target_id = %cdp_target_id,
+            cdp_owner_key = %owner_key,
             requested_url = %requested_url,
             target_url = %opened.target.url,
             window_title = %window_title,
@@ -1263,6 +1326,7 @@ impl SynapseService {
         &self,
         session_id: &str,
         cdp_target_id: &str,
+        owner_key: &str,
         owner: CdpTargetOwner,
     ) -> Result<CdpCloseTabResponse, ErrorData> {
         if is_chrome_debugger_endpoint(&owner.endpoint) {
@@ -1277,7 +1341,7 @@ impl SynapseService {
                         ),
                     )
                 })?;
-            let _removed = self.remove_cdp_target_owner(cdp_target_id)?;
+            let _removed = self.remove_cdp_target_owner(owner_key)?;
             let previous = self.clear_session_cdp_target_if_matches(session_id, cdp_target_id)?;
             let current = self.get_session_target_wire(session_id)?;
             tracing::info!(
@@ -1286,6 +1350,7 @@ impl SynapseService {
                 hwnd = owner.window_hwnd,
                 endpoint = %owner.endpoint,
                 cdp_target_id = %closed.target_id,
+                cdp_owner_key = %owner_key,
                 tab_id = closed.tab_id,
                 requested_url = %owner.requested_url,
                 target_url = %owner.target_url,
@@ -1315,7 +1380,7 @@ impl SynapseService {
                     format!("cdp_close_tab Target.closeTarget/readback failed: {error}"),
                 )
             })?;
-        let _removed = self.remove_cdp_target_owner(cdp_target_id)?;
+        let _removed = self.remove_cdp_target_owner(owner_key)?;
         let previous = self.clear_session_cdp_target_if_matches(session_id, cdp_target_id)?;
         let current = self.get_session_target_wire(session_id)?;
         tracing::info!(
@@ -1324,6 +1389,7 @@ impl SynapseService {
             hwnd = owner.window_hwnd,
             endpoint = %owner.endpoint,
             cdp_target_id = %cdp_target_id,
+            cdp_owner_key = %owner_key,
             requested_url = %owner.requested_url,
             target_url = %owner.target_url,
             owner_created_at_unix_ms = owner.created_at_unix_ms,
@@ -1478,6 +1544,7 @@ impl SynapseService {
         &self,
         _session_id: &str,
         _cdp_target_id: &str,
+        _owner_key: &str,
         _owner: CdpTargetOwner,
     ) -> Result<CdpCloseTabResponse, ErrorData> {
         Err(mcp_error(
@@ -1517,6 +1584,72 @@ fn target_cdp_id(target: &Option<SessionTarget>) -> Option<String> {
         Some(SessionTarget::Cdp { cdp_target_id, .. }) => Some(cdp_target_id.clone()),
         Some(SessionTarget::Window { .. }) | None => None,
     }
+}
+
+fn cdp_target_owner_key(window_hwnd: i64, endpoint: &str, cdp_target_id: &str) -> String {
+    format!(
+        "cdp:0x{window_hwnd:x}:{}:{}",
+        endpoint.trim(),
+        normalize_cdp_target_id(cdp_target_id)
+    )
+}
+
+fn normalize_cdp_target_id(cdp_target_id: &str) -> String {
+    cdp_target_id.trim().to_ascii_lowercase()
+}
+
+fn cdp_target_ids_equal(left: &str, right: &str) -> bool {
+    normalize_cdp_target_id(left) == normalize_cdp_target_id(right)
+}
+
+fn select_cdp_owner_for_session(
+    tool: &str,
+    session_id: &str,
+    target_id: &str,
+    active_target: Option<&SessionTarget>,
+    owners: Vec<(String, CdpTargetOwner)>,
+) -> Result<(String, CdpTargetOwner), ErrorData> {
+    if owners.len() == 1 {
+        return owners.into_iter().next().ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!("{tool} internal owner selection lost single CDP owner"),
+            )
+        });
+    }
+    let active_window = match active_target {
+        Some(SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        }) if cdp_target_ids_equal(cdp_target_id, target_id) => Some(*window_hwnd),
+        Some(SessionTarget::Window { .. }) | Some(SessionTarget::Cdp { .. }) | None => None,
+    };
+    if let Some(active_window) = active_window {
+        let active_matches = owners
+            .iter()
+            .filter(|(_key, owner)| owner.window_hwnd == active_window)
+            .cloned()
+            .collect::<Vec<_>>();
+        if active_matches.len() == 1 {
+            return active_matches.into_iter().next().ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    format!("{tool} internal owner selection lost active CDP owner"),
+                )
+            });
+        }
+    }
+    let owner_surfaces = owners
+        .iter()
+        .map(|(_key, owner)| format!("hwnd=0x{:x},endpoint={}", owner.window_hwnd, owner.endpoint))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(mcp_error(
+        error_codes::ACTION_TARGET_INVALID,
+        format!(
+            "{tool} refused target {target_id:?}: target id is ambiguous for MCP session {session_id:?}; set this session's active CDP target or pass a target id that maps to one owned browser surface. matches={owner_surfaces}"
+        ),
+    ))
 }
 
 fn target_wire(target: &SessionTarget) -> TargetWire {

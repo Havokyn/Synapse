@@ -3714,12 +3714,6 @@ fn select_launch_window<'a>(
         })
         .or_else(|| {
             contexts.iter().find(|context| {
-                !excluded_hwnds.contains(&context.hwnd)
-                    && title_regex.is_match(&context.window_title)
-            })
-        })
-        .or_else(|| {
-            contexts.iter().find(|context| {
                 excluded_hwnds.contains(&context.hwnd)
                     && launch_target_matches_existing_window(
                         launch_target_name,
@@ -6538,7 +6532,7 @@ mod tests {
     fn launch_window_selection_prefers_new_matching_window() {
         let contexts = vec![
             foreground_for_launch_selection(10, 100, "chrome.exe", "Google Chrome"),
-            foreground_for_launch_selection(11, 200, "chrome.exe", "Google Chrome"),
+            foreground_for_launch_selection(11, 999, "chrome.exe", "Google Chrome"),
         ];
         let excluded = HashSet::from([10]);
         let title_regex = regex::Regex::new("Chrome|Chromium").expect("synthetic regex compiles");
@@ -6548,6 +6542,26 @@ mod tests {
                 .expect("new matching window should be selected");
 
         assert_eq!(selected.hwnd, 11);
+    }
+
+    #[test]
+    fn launch_window_selection_rejects_unowned_new_matching_window() {
+        let contexts = vec![foreground_for_launch_selection(
+            11,
+            200,
+            "chrome.exe",
+            "Google Chrome",
+        )];
+        let excluded = HashSet::new();
+        let title_regex = regex::Regex::new("Chrome|Chromium").expect("synthetic regex compiles");
+
+        let selected =
+            select_launch_window(&contexts, 999, &title_regex, &excluded, "chrome.exe", &[]);
+
+        assert!(
+            selected.is_none(),
+            "a matching title from an unrelated PID must not satisfy launch wait"
+        );
     }
 
     #[test]

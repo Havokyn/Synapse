@@ -1332,12 +1332,12 @@ async fn cleanup_session_cdp_targets(
         owned_before: owned.len(),
         target_ids: owned
             .iter()
-            .map(|(target_id, _owner)| target_id.clone())
+            .map(|owner| owner.cdp_target_id.clone())
             .collect(),
         ..SessionCdpCleanupReport::default()
     };
-    for (target_id, owner) in owned {
-        match close_cdp_target_for_cleanup(&target_id, &owner).await {
+    for owner in owned {
+        match close_cdp_target_for_cleanup(&owner.cdp_target_id, &owner).await {
             Ok(()) => {
                 report.closed = report.closed.saturating_add(1);
                 tracing::info!(
@@ -1345,7 +1345,7 @@ async fn cleanup_session_cdp_targets(
                     session_id,
                     hwnd = owner.window_hwnd,
                     endpoint = %owner.endpoint,
-                    cdp_target_id = %target_id,
+                    cdp_target_id = %owner.cdp_target_id,
                     "readback=Target.closeTarget edge=session_cleanup after=closed"
                 );
             }
@@ -1356,7 +1356,7 @@ async fn cleanup_session_cdp_targets(
                     session_id,
                     hwnd = owner.window_hwnd,
                     endpoint = %owner.endpoint,
-                    cdp_target_id = %target_id,
+                    cdp_target_id = %owner.cdp_target_id,
                     detail = %detail,
                     "session lifecycle removed CDP owner but failed to close target"
                 );
@@ -1369,7 +1369,7 @@ async fn cleanup_session_cdp_targets(
 fn remove_session_cdp_target_owners(
     cdp_target_owners: &SharedCdpTargetOwners,
     session_id: &str,
-) -> Result<Vec<(String, CdpTargetOwner)>, String> {
+) -> Result<Vec<CdpTargetOwner>, String> {
     let mut guard = cdp_target_owners
         .lock()
         .map_err(|_error| "CDP target ownership registry lock poisoned".to_owned())?;
@@ -1381,7 +1381,7 @@ fn remove_session_cdp_target_owners(
         .collect::<Vec<_>>();
     let owned = owned_ids
         .into_iter()
-        .filter_map(|target_id| guard.remove(&target_id).map(|owner| (target_id, owner)))
+        .filter_map(|target_id| guard.remove(&target_id))
         .collect();
     Ok(owned)
 }

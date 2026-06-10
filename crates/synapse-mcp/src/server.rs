@@ -196,14 +196,15 @@ pub(crate) struct CdpTargetOwner {
     pub session_id: String,
     pub window_hwnd: i64,
     pub endpoint: String,
+    pub cdp_target_id: String,
     pub requested_url: String,
     pub target_url: String,
     pub created_at_unix_ms: u64,
 }
 
-/// Per-CDP-target ownership registry keyed by browser `TargetID`. Only the
-/// creating MCP session may close a registered target; unowned targets may be
-/// observed by explicit `set_target` but are never closed by Synapse.
+/// Per-CDP-target ownership registry keyed by browser surface + `TargetID`.
+/// Only the creating MCP session may close a registered target; unowned targets
+/// may be observed by explicit `set_target` but are never closed by Synapse.
 pub(crate) type SharedCdpTargetOwners = Arc<Mutex<HashMap<String, CdpTargetOwner>>>;
 
 #[derive(Debug, Clone)]

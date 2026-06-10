@@ -521,14 +521,22 @@ async fn cleanup_stale_session_cdp_targets_once(
     for session_id in stale_sessions {
         let (owned_before, target_ids) = match cdp_target_owners.lock() {
             Ok(mut owners) => {
-                let target_ids = owners
+                let stale_owner_keys = owners
                     .iter()
-                    .filter_map(|(target_id, owner)| {
-                        (owner.session_id == session_id).then(|| target_id.clone())
+                    .filter_map(|(owner_key, owner)| {
+                        (owner.session_id == session_id).then(|| owner_key.clone())
                     })
                     .collect::<Vec<_>>();
-                for target_id in &target_ids {
-                    owners.remove(target_id);
+                let target_ids = stale_owner_keys
+                    .iter()
+                    .filter_map(|owner_key| {
+                        owners
+                            .get(owner_key)
+                            .map(|owner| owner.cdp_target_id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for owner_key in &stale_owner_keys {
+                    owners.remove(owner_key);
                 }
                 (target_ids.len(), target_ids)
             }
