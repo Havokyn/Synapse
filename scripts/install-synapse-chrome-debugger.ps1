@@ -1,7 +1,7 @@
 param(
     [string]$SynapseNativeHostExe = "$env:USERPROFILE\.cargo\bin\synapse-chrome-native-host.exe",
     [string]$ExtensionId = "leoocgnkjnplbfdbklajepahofecgfbk",
-    [switch]$ApplyExternalChromeDebuggerPolicy,
+    [switch]$ApplyExternalChromeDebuggerPolicy = $true,
     [ValidateSet('HKCU', 'HKLM')]
     [string]$ChromePolicyHive = 'HKCU',
     [ValidateSet('AllExtensions', 'DetectedExtensions')]
@@ -18,6 +18,43 @@ function ConvertTo-CompressedJson {
         [int]$Depth = 12
     )
     $Value | ConvertTo-Json -Depth $Depth -Compress
+}
+
+function Get-RegistryAclDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $cursor = $Path
+    while (-not [string]::IsNullOrWhiteSpace($cursor) -and -not (Test-Path -LiteralPath $cursor)) {
+        if ($cursor -notmatch '^(.*)\\[^\\]+$') {
+            break
+        }
+        $cursor = $Matches[1]
+    }
+    if ([string]::IsNullOrWhiteSpace($cursor)) {
+        $cursor = $Path
+    }
+    try {
+        $acl = Get-Acl -LiteralPath $cursor -ErrorAction Stop
+        $access = @($acl.Access | ForEach-Object {
+            [pscustomobject]@{
+                identity = [string]$_.IdentityReference
+                rights = [string]$_.RegistryRights
+                type = [string]$_.AccessControlType
+                inherited = [bool]$_.IsInherited
+            }
+        })
+        return ConvertTo-CompressedJson -Value ([ordered]@{
+            requested_path = $Path
+            inspected_path = $cursor
+            owner = [string]$acl.Owner
+            access = $access
+        }) -Depth 8
+    } catch {
+        return "requested_path=$Path inspected_path=$cursor acl_error=$($_.Exception.Message)"
+    }
 }
 
 function Get-ChromePolicyRoot {
@@ -142,7 +179,8 @@ function Write-ChromeExternalDebuggerPolicy {
             policy_json = ConvertTo-CompressedJson -Value $readback
         }
     } catch {
-        throw "SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED hive=$Hive path=$policyRoot block_scope=$BlockScope policy_entries=$($policyEntries -join ',') blocked_extension_ids=$($ids -join ',') detail=$($_.Exception.Message) remediation=run setup from a principal that can write Chrome policy or disable/remove the named external Chrome extension, then refresh/restart Chrome and rerun this verifier"
+        $aclDiagnostic = Get-RegistryAclDiagnostic -Path $policyRoot
+        throw "SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED hive=$Hive path=$policyRoot block_scope=$BlockScope policy_entries=$($policyEntries -join ',') blocked_extension_ids=$($ids -join ',') detail=$($_.Exception.Message) acl_detail=$aclDiagnostic remediation=run setup from a principal that can write Chrome policy or disable/remove the named external Chrome extension, then refresh/restart Chrome and rerun this verifier"
     }
 }
 

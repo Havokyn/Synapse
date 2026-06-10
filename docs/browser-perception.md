@@ -158,11 +158,10 @@ Chrome session, the supported attach path is:
    `scripts\synapse-setup.ps1` merges
    `blocked_permissions=["debugger","nativeMessaging"]` into the wildcard `"*"`
    policy entry, so current and future extensions cannot load with those
-   permissions. Passing `-ApplyExternalChromeDebuggerPolicy:$false` is
-   diagnostic-only and cannot certify a popup-free end-user host. The standalone
-   bridge verifier can apply the same policy with
-   `scripts\install-synapse-chrome-debugger.ps1
-   -ApplyExternalChromeDebuggerPolicy`. `-ChromePolicyBlockScope
+   permissions. The standalone bridge verifier applies the same policy by
+   default with `scripts\install-synapse-chrome-debugger.ps1`. Passing
+   `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and cannot
+   certify a popup-free end-user host. `-ChromePolicyBlockScope
    DetectedExtensions` limits the merge to currently discovered extension IDs.
    The scripts fail with
    `SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED` if the current principal

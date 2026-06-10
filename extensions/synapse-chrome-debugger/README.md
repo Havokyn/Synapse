@@ -16,6 +16,11 @@ Install/verify the local bridge registration with:
 scripts\install-synapse-chrome-debugger.ps1
 ```
 
+That verifier applies the same Chrome `ExtensionSettings` policy remediation as
+the full setup path by default, blocking `debugger` and `nativeMessaging`
+permissions so external extensions cannot surface the Chrome
+"started debugging this browser" banner during Synapse background work.
+
 Then load this directory as an unpacked extension from `chrome://extensions`.
 The extension registers with the loopback daemon at `http://127.0.0.1:7700`,
 then keeps an authenticated WebSocket open at `ws://127.0.0.1:7700` with a 20s
@@ -73,11 +78,11 @@ which blocks current and future extensions from loading with those permissions.
 Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and cannot
 certify an end-user host as popup-free.
 
-To apply the same supported Chrome policy remediation from the standalone
-bridge verifier, run:
+The standalone bridge verifier applies the same supported Chrome policy
+remediation by default:
 
 ```powershell
-scripts\install-synapse-chrome-debugger.ps1 -ApplyExternalChromeDebuggerPolicy
+scripts\install-synapse-chrome-debugger.ps1
 ```
 
 Use `-ChromePolicyBlockScope DetectedExtensions` only when the operator
@@ -88,3 +93,5 @@ fails with
 After policy is written, Chrome must reload policy or restart; the verifier
 still fails closed until the profile/process SoT shows the external debugger or
 native-messaging surface is gone.
+Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and
+cannot certify the host as popup-free.
