@@ -31,9 +31,9 @@ current Chrome profile/process readback shows any external extension or native
 host with `debugger` or `nativeMessaging`, because those surfaces can create the
 same operator-visible debugger/native-host popup when tab events occur.
 On unsafe hosts, the daemon refuses the direct bridge registration itself with
-`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED`, and the extension clears its reconnect
-alarm and stays dormant until Chrome or the extension restarts instead of
-repeatedly waking the normal Chrome profile.
+`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED`, and the extension stays dormant until
+Chrome or the extension restarts instead of repeatedly waking the normal Chrome
+profile.
 
 ## Diagnostics
 
@@ -134,18 +134,21 @@ Chrome session, the supported attach path is:
    is `leoocgnkjnplbfdbklajepahofecgfbk`. The normal bridge must not request
    `nativeMessaging`; Chrome can launch native hosts through a visible
    `cmd.exe` intermediary on Windows. The extension uses a daemon-issued bridge
-   token, a 20s WebSocket keepalive while connected, and a 30s `chrome.alarms`
-   reconnect tick so the MV3 service worker reconnects after daemon restarts
-   without native messaging. If the daemon refuses registration because the live
-   Chrome profile/process SoT is unsafe, the service worker clears that alarm
-   and remains dormant until Chrome or the extension restarts.
+   token and a 20s WebSocket keepalive while connected. It must not request
+   `chrome.alarms` or any other recurring wakeup permission. If registration,
+   message post, or WebSocket keepalive fails, or if the daemon refuses
+   registration because the live Chrome profile/process SoT is unsafe, the
+   service worker logs the exact error and remains dormant until Chrome or the
+   extension restarts.
    If Chrome loads the unpacked directory under any extension ID other than
-   `leoocgnkjnplbfdbklajepahofecgfbk`, the service worker clears the same alarm
-   and remains dormant before making any daemon HTTP request.
+   `leoocgnkjnplbfdbklajepahofecgfbk`, the service worker remains dormant before
+   making any daemon HTTP request.
    The verifier removes stale Synapse native-host registration from all Windows
    Chrome lookup hives (`HKCU`/`HKLM`, 32-bit and 64-bit views) and fails closed
    with per-key readback/ACL evidence if any Synapse native-host registration
-   remains.
+   remains. It also reads Chrome profile permissions for the live Synapse
+   extension ID and fails closed if an older load still has `alarms`,
+   `debugger`, or `nativeMessaging` active.
 7. Use the non-attach `chrome.tabs` bridge for normal-profile Chrome tab
    navigation (`cdp_open_tab`, `cdp_close_tab`, and extension-backed
    `cdp_navigate_tab`). This path uses `chrome.tabs.create`,
@@ -173,13 +176,16 @@ Chrome session, the supported attach path is:
    `blocked_permissions=["debugger","nativeMessaging"]` is present in the
    wildcard `"*"` policy entry, so current and future extensions cannot load
    with those permissions. If the current process cannot write either hive,
-   setup attempts a one-time elevated hidden PowerShell helper for HKLM and
-   reads back the helper's JSON evidence file before continuing. Canceling UAC,
-   missing evidence, or a failed elevated registry readback remains a hard
-   failure. Before attempting any policy write, the standalone bridge verifier
+   setup fails closed with per-hive ACL/readback evidence. Passing
+   `-AutoElevateChromePolicy:$true` explicitly permits a one-time elevated
+   PowerShell helper for HKLM and reads back the helper's JSON evidence file
+   before continuing; that opt-in can show UAC and is not used by background
+   end-user setup. Canceling UAC, missing evidence, or a failed elevated
+   registry readback remains a hard failure. Before attempting any policy write,
+   the standalone bridge verifier
    reads HKCU/HKLM and accepts an already-compliant policy as `existing_policy`
-   so repeated setup runs do not relaunch an elevated helper for no state
-   change. The standalone bridge verifier applies the same policy by default
+   so repeated setup runs do not launch any helper for no state change. The
+   standalone bridge verifier applies the same policy by default
    with `scripts\install-synapse-chrome-debugger.ps1`.
    Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and
    cannot certify a popup-free end-user host. `-ChromePolicyBlockScope

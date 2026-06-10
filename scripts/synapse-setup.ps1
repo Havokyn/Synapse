@@ -88,11 +88,12 @@
   found in the current Chrome profile/process Source of Truth.
 
 .PARAMETER AutoElevateChromePolicy
-  Enabled by default. If HKCU/HKLM Chrome policy writes fail from the current
-  unelevated process, setup launches a one-time elevated hidden PowerShell
-  helper to write the supported HKLM ExtensionSettings policy, then reads back
-  the exact policy evidence file and registry value. If UAC is canceled or HKLM
-  still cannot be written, setup fails closed with the helper evidence.
+  Disabled by default. Background end-user setup must not create visible UAC or
+  helper windows while trying to suppress Chrome debugger/native-host popups. If
+  HKCU/HKLM Chrome policy writes fail from the current process, setup fails
+  closed with per-hive ACL/readback evidence. Passing
+  -AutoElevateChromePolicy:$true explicitly permits a one-time elevated
+  PowerShell helper to write HKLM policy and return a JSON evidence file.
 
 .PARAMETER MaintenanceLockPath
   File-lock Source of Truth that serializes setup/remove across multiple
@@ -122,7 +123,7 @@ param(
     [string]$ChromePolicyHive = 'Auto',
     [ValidateSet('AllExtensions', 'DetectedExtensions')]
     [string]$ChromePolicyBlockScope = 'AllExtensions',
-    [bool]$AutoElevateChromePolicy = $true,
+    [bool]$AutoElevateChromePolicy = $false,
     [string]$CargoTarget = "$env:LOCALAPPDATA\synapse\build-target",
     [string]$DbPath      = "$env:LOCALAPPDATA\synapse\db-daemon",
     [string]$ProfilesDir = "$env:USERPROFILE\.cargo\bin\profiles",

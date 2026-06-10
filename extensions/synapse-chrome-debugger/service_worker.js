@@ -6,18 +6,15 @@ const ERROR_AXTREE_FAILED = "A11Y_CDP_AXTREE_FAILED";
 const ERROR_DEBUGGER_WARNING_UNSUPPRESSED = "A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED";
 const ERROR_EXTENSION_TIMEOUT = "A11Y_CDP_EXTENSION_TIMEOUT";
 const ERROR_EXTENSION_ID_MISMATCH = "SYNAPSE_CHROME_EXTENSION_ID_MISMATCH";
+const ERROR_DAEMON_UNAVAILABLE = "SYNAPSE_CHROME_DAEMON_UNAVAILABLE";
 const TAB_TARGET_PREFIX = "chrome-tab:";
 const BRIDGE_TOKEN_HEADER = "X-Synapse-Bridge-Token";
 const DAEMON_WS_BASE_URL = "ws://127.0.0.1:7700";
 const WEBSOCKET_KEEPALIVE_MS = 20000;
-const RECONNECT_ALARM_NAME = "synapse-daemon-reconnect";
-const RECONNECT_ALARM_PERIOD_MINUTES = 0.5;
-const RECONNECT_DELAY_MS = 30000;
 
 let hostId = null;
 let bridgeToken = null;
 let connectInFlight = null;
-let reconnectTimer = null;
 let webSocket = null;
 let keepAliveTimer = null;
 
@@ -32,31 +29,6 @@ function startBridge() {
     return;
   }
   connectDaemon();
-}
-
-async function ensureReconnectAlarm(periodInMinutes, options = {}) {
-  const preserveLonger = Boolean(options.preserveLonger);
-  let existing = null;
-  try {
-    existing = await chrome.alarms.get(RECONNECT_ALARM_NAME);
-  } catch (error) {
-    console.error(`Synapse daemon bridge alarm read failed: ${errorMessage(error)}`);
-  }
-  if (
-    preserveLonger &&
-    typeof existing?.periodInMinutes === "number" &&
-    existing.periodInMinutes > periodInMinutes
-  ) {
-    return;
-  }
-  chrome.alarms
-    .create(RECONNECT_ALARM_NAME, {
-      delayInMinutes: periodInMinutes,
-      periodInMinutes
-    })
-    .catch((error) => {
-      console.error(`Synapse daemon bridge alarm setup failed: ${errorMessage(error)}`);
-    });
 }
 
 function connectDaemon() {
@@ -82,7 +54,10 @@ function connectDaemon() {
         );
         return;
       }
-      scheduleReconnect(`direct daemon register failed: ${errorMessage(error)}`);
+      disableBridgeUntilChromeRestart(
+        `direct daemon register failed: ${errorMessage(error)}`,
+        ERROR_DAEMON_UNAVAILABLE
+      );
     })
     .finally(() => {
       connectInFlight = null;
@@ -111,7 +86,6 @@ async function registerDaemon() {
   }
   hostId = registered.host_id;
   bridgeToken = registered.bridge_token;
-  ensureReconnectAlarm(RECONNECT_ALARM_PERIOD_MINUTES);
   await postDaemonMessage({
     type: "hello",
     extensionId: chrome.runtime.id,
@@ -123,39 +97,10 @@ async function registerDaemon() {
   connectWebSocket();
 }
 
-function scheduleReconnect(detail, options = {}) {
-  closeWebSocket();
-  hostId = null;
-  bridgeToken = null;
-  const delayMs = Number.isFinite(options.delayMs) ? Math.max(1000, options.delayMs) : RECONNECT_DELAY_MS;
-  const alarmPeriodMinutes = Number.isFinite(options.alarmPeriodMinutes)
-    ? Math.max(RECONNECT_ALARM_PERIOD_MINUTES, options.alarmPeriodMinutes)
-    : RECONNECT_ALARM_PERIOD_MINUTES;
-  ensureReconnectAlarm(alarmPeriodMinutes);
-  if (reconnectTimer) {
-    return;
-  }
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectDaemon();
-  }, delayMs);
-  console.warn(
-    `Synapse daemon bridge disconnected: ${detail}; reconnectDelayMs=${delayMs}; ` +
-      `alarmPeriodMinutes=${alarmPeriodMinutes}`
-  );
-}
-
 function disableBridgeUntilChromeRestart(detail, code) {
   closeWebSocket();
   hostId = null;
   bridgeToken = null;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  chrome.alarms.clear(RECONNECT_ALARM_NAME).catch((error) => {
-    console.error(`Synapse daemon bridge dormant alarm clear failed: ${errorMessage(error)}`);
-  });
   console.error(
     `Synapse daemon bridge disabled until Chrome or extension restart: ${detail}; ` +
       `code=${code}`
@@ -176,17 +121,20 @@ function connectWebSocket() {
   };
   socket.onmessage = (event) => {
     handleWebSocketMessage(event.data).catch((error) => {
-      scheduleReconnect(`direct daemon websocket message failed: ${errorMessage(error)}`);
+      disableBridgeUntilChromeRestart(
+        `direct daemon websocket message failed: ${errorMessage(error)}`,
+        ERROR_DAEMON_UNAVAILABLE
+      );
     });
   };
   socket.onerror = () => {
     if (webSocket === socket) {
-      scheduleReconnect("direct daemon websocket error");
+      disableBridgeUntilChromeRestart("direct daemon websocket error", ERROR_DAEMON_UNAVAILABLE);
     }
   };
   socket.onclose = () => {
     if (webSocket === socket) {
-      scheduleReconnect("direct daemon websocket closed");
+      disableBridgeUntilChromeRestart("direct daemon websocket closed", ERROR_DAEMON_UNAVAILABLE);
     }
   };
 }
@@ -227,7 +175,10 @@ function startWebSocketKeepAlive(socket) {
         sent_at_unix_ms: Date.now()
       }));
     } catch (error) {
-      scheduleReconnect(`direct daemon websocket keepalive failed: ${errorMessage(error)}`);
+      disableBridgeUntilChromeRestart(
+        `direct daemon websocket keepalive failed: ${errorMessage(error)}`,
+        ERROR_DAEMON_UNAVAILABLE
+      );
     }
   }, WEBSOCKET_KEEPALIVE_MS);
 }
@@ -247,18 +198,13 @@ function closeWebSocket() {
     try {
       socket.close();
     } catch (_) {
-      // Closing is best-effort during reconnect cleanup.
+      // Closing is best-effort during dormant cleanup.
     }
   }
 }
 
 chrome.runtime.onInstalled.addListener(startBridge);
 chrome.runtime.onStartup.addListener(startBridge);
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm?.name === RECONNECT_ALARM_NAME) {
-    startBridge();
-  }
-});
 
 startBridge();
 
@@ -703,7 +649,10 @@ async function postDaemonMessage(message) {
       }
     });
   } catch (error) {
-    scheduleReconnect(`direct daemon message failed: ${errorMessage(error)}`);
+    disableBridgeUntilChromeRestart(
+      `direct daemon message failed: ${errorMessage(error)}`,
+      ERROR_DAEMON_UNAVAILABLE
+    );
     throw error;
   }
 }

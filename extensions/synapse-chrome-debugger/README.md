@@ -5,15 +5,15 @@ user's normal Chrome profile through a direct localhost WebSocket from the
 extension service worker to the Synapse daemon. The normal end-user bridge is
 tabs-first: background tab open/close/navigation use `chrome.tabs` APIs and the
 extension does not require the `debugger` or `nativeMessaging` permissions.
-It uses `chrome.alarms` only to wake the MV3 service worker and reconnect to a
-restarted local daemon.
+It also does not require `chrome.alarms` or any recurring wakeup permission. If
+the daemon is unavailable or the live Chrome profile is unsafe, the failure is
+logged once and the bridge stays dormant until Chrome or the extension restarts.
 
 Stable extension ID: `leoocgnkjnplbfdbklajepahofecgfbk`
 
 The service worker checks `chrome.runtime.id` against that stable ID before it
 contacts the daemon. If Chrome loads the unpacked directory under any other ID,
-the bridge clears its reconnect alarm and stays dormant until the extension is
-reloaded correctly.
+the bridge stays dormant until the extension is reloaded correctly.
 
 Install/verify the local bridge registration with:
 
@@ -29,9 +29,10 @@ permissions so external extensions cannot surface the Chrome
 Then load this directory as an unpacked extension from `chrome://extensions`.
 The extension registers with the loopback daemon at `http://127.0.0.1:7700`,
 then keeps an authenticated WebSocket open at `ws://127.0.0.1:7700` with a 20s
-keepalive. A 30s Chrome alarm wakes the service worker after daemon restarts and
-attempts direct localhost registration again. Commands execute only after the
-daemon asks through the fixed extension origin and daemon-issued bridge token.
+keepalive. Commands execute only after the daemon asks through the fixed
+extension origin and daemon-issued bridge token. If registration, message post,
+or WebSocket keepalive fails, the bridge fails closed and does not retry on a
+timer.
 The normal bridge does not call `runtime.connectNative()`, so Chrome does not
 create a native-host `cmd.exe` wrapper on end-user systems.
 The verifier also removes stale Synapse native-host registration from every
@@ -39,15 +40,17 @@ Chrome Windows lookup hive (`HKCU`/`HKLM`, 32-bit and 64-bit views) and returns
 the before/after registry readback. If any Synapse native-host key remains, the
 verifier fails closed with the exact hive/path/ACL evidence instead of
 certifying the host.
+The verifier also reads Chrome profile permissions for the live Synapse
+extension ID and fails closed if an older load still has `alarms`, `debugger`,
+or `nativeMessaging` active.
 
 Registration is also fail-closed. If the daemon sees any live Chrome
 profile/process Source of Truth that is not popup-free, it refuses the direct
 bridge registration with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before
 accepting a Chrome-hosted command channel. The service worker treats that exact
-error as an unsafe-profile condition, clears its reconnect timer/alarm, and
-stays dormant until Chrome or the extension restarts. This keeps the failure
-visible while preventing repeated background wakeups on an unsafe end-user
-Chrome profile.
+error as an unsafe-profile condition and stays dormant until Chrome or the
+extension restarts. This keeps the failure visible while preventing repeated
+background wakeups on an unsafe end-user Chrome profile.
 
 Background tab commands (`openTab`, `closeTab`, and `navigateTab`) use
 `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
@@ -100,12 +103,12 @@ HKLM, and accepts the setup only after a separate policy readback proves that
 extensions from loading with those permissions.
 Before attempting a policy write, the verifier reads HKCU/HKLM and accepts an
 already-compliant policy as `existing_policy=true`; repeated setup runs should
-not relaunch an elevated helper when the policy Source of Truth is already
-correct.
-If the current process cannot write either hive, setup attempts a one-time
-elevated hidden PowerShell helper that writes the same supported policy to HKLM
-and returns a JSON evidence file. Canceling UAC or failing the elevated readback
-is a hard setup failure, not a warning.
+not launch any helper when the policy Source of Truth is already correct.
+If the current process cannot write either hive, setup fails closed with
+per-hive ACL/readback evidence. Passing `-AutoElevateChromePolicy:$true`
+explicitly permits a one-time elevated PowerShell helper that writes the same
+supported policy to HKLM and returns a JSON evidence file; that opt-in can show
+UAC and is not used by background end-user setup.
 Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and cannot
 certify an end-user host as popup-free.
 
