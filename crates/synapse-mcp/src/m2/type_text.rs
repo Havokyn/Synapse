@@ -924,6 +924,9 @@ impl TypeBackend {
 }
 
 fn validate_type_params(params: &ActTypeParams) -> Result<(), ErrorData> {
+    if params.text.is_empty() && !params.press_enter_after {
+        return Err(empty_text_params_error());
+    }
     if params.use_scancodes {
         return Err(action_error_to_mcp(&ActionError::BackendUnavailable {
             detail: "act_type use_scancodes=true is not wired for the M2 unicode typing path"
@@ -1020,6 +1023,21 @@ fn type_params_error(requested_linear_ms_per_char: u32, message: impl Into<Strin
             "target_readback_required": true,
             "backend_tier_used": TYPE_TIER_FOREGROUND,
             "required_foreground": true,
+        })),
+    )
+}
+
+fn empty_text_params_error() -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        "act_type text must be non-empty unless press_enter_after=true emits a newline",
+        Some(json!({
+            "code": synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "reason": "empty_text_without_emitted_input",
+            "text_len": 0,
+            "press_enter_after": false,
+            "target_text_integrity": TEXT_INTEGRITY_DISPATCH_ONLY,
+            "target_readback_required": true,
         })),
     )
 }
@@ -1201,6 +1219,36 @@ mod tests {
         );
         assert_eq!(data["target_readback_required"], true);
         assert_eq!(data["target_text_integrity"], TEXT_INTEGRITY_DISPATCH_ONLY);
+    }
+
+    #[test]
+    fn empty_text_without_enter_fails_closed_before_dispatch() {
+        let params = ActTypeParams {
+            text: String::new(),
+            into_element: None,
+            dynamics: TypeDynamics::Linear,
+            linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
+            use_scancodes: false,
+            press_enter_after: false,
+            backend: TypeBackend::Software,
+            verify_delta: true,
+            expected_browser_url_regex: None,
+            verify_timeout_ms: default_verify_timeout_ms(),
+        };
+
+        let error = match action_from_type_params(&params) {
+            Ok(action) => panic!("empty no-op text dispatched unexpectedly: {action:?}"),
+            Err(error) => error,
+        };
+        let Some(data) = error.data else {
+            panic!("empty no-op text error had no structured data");
+        };
+
+        assert_eq!(data["code"], synapse_core::error_codes::TOOL_PARAMS_INVALID);
+        assert_eq!(data["reason"], "empty_text_without_emitted_input");
+        assert_eq!(data["text_len"], 0);
+        assert_eq!(data["press_enter_after"], false);
+        assert_eq!(data["target_readback_required"], true);
     }
 
     #[test]

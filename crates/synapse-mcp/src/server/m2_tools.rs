@@ -3370,7 +3370,12 @@ fn choose_act_type_text_readback(
     cdp_readback: &CdpActiveTextReadback,
     ocr_readback: &OcrTextReadback,
 ) -> (Option<String>, Option<String>) {
-    if should_prefer_cdp_active_text(focused, uia_value.as_deref(), cdp_readback) {
+    if should_prefer_cdp_active_text(
+        focused,
+        uia_value.as_deref(),
+        uia_readback_source,
+        cdp_readback,
+    ) {
         if let Some(value) = cdp_readback.value.clone() {
             return (
                 Some(value),
@@ -3406,6 +3411,7 @@ fn choose_act_type_text_readback(
 fn should_prefer_cdp_active_text(
     focused: Option<&ActTypeFocusedTextCandidate>,
     uia_value: Option<&str>,
+    uia_readback_source: Option<&'static str>,
     cdp_readback: &CdpActiveTextReadback,
 ) -> bool {
     if cdp_readback.value.is_none()
@@ -3417,6 +3423,9 @@ fn should_prefer_cdp_active_text(
     let tag = cdp_readback.tag_name.as_deref().unwrap_or("").trim();
     if tag.is_empty() || tag.eq_ignore_ascii_case("BODY") || tag.eq_ignore_ascii_case("HTML") {
         return false;
+    }
+    if uia_readback_source == Some(ACT_TYPE_TEXT_SOURCE_UIA_EMPTY) {
+        return true;
     }
     is_browser_shell_uia_readback(focused, uia_value)
 }
@@ -5491,6 +5500,24 @@ mod tests {
 
         assert_eq!(value, None);
         assert_eq!(source, None);
+    }
+
+    #[test]
+    fn act_type_text_readback_prefers_editable_cdp_over_empty_uia_text_placeholder() {
+        let focused = act_type_focused_candidate("group", None);
+        let cdp = cdp_active_text_readback_for_test(Some("alpha issue786"), true, "DIV");
+        let ocr = ocr_text_readback_for_test(None);
+
+        let (value, source) = choose_act_type_text_readback(
+            Some(&focused),
+            Some(String::new()),
+            Some(ACT_TYPE_TEXT_SOURCE_UIA_EMPTY),
+            &cdp,
+            &ocr,
+        );
+
+        assert_eq!(value.as_deref(), Some("alpha issue786"));
+        assert_eq!(source.as_deref(), Some(ACT_TYPE_TEXT_SOURCE_CDP_ACTIVE));
     }
 
     #[test]
