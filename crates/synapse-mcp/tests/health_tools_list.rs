@@ -129,7 +129,8 @@ async fn health_and_action_tools_appear_in_tools_list_with_schema() -> anyhow::R
         .context("act_type description missing")?;
     assert!(type_description.contains("foreground-safe native HWND text messages"));
     assert!(type_description.contains("UIA ValuePattern.SetValue"));
-    assert!(type_description.contains("does not require foreground"));
+    assert!(type_description.contains("leased foreground click/type fallback"));
+    assert!(type_description.contains("target window is already foreground"));
     assert!(type_description.contains("leased foreground keyboard backend"));
 
     assert!(

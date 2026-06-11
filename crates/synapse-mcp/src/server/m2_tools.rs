@@ -24,9 +24,9 @@ use crate::m2::{
     PressBackend, ResolvedKeymapPress, act_click_postmessage_with_params,
     act_keymap_response_from_press, act_press_cdp_target, act_press_normalized_labels,
     act_press_postmessage_target, act_stroke_error_details, act_stroke_request_details,
-    action_from_press_params, attach_click_tier_attempts, click_params_can_route_background_first,
-    click_target_root_hwnd, click_tier_delivered, click_tier_failed, emitted_text,
-    hwnd_keyboard_target_state, resolve_keymap_press,
+    action_from_press_params, action_from_type_params, attach_click_tier_attempts,
+    click_params_can_route_background_first, click_target_root_hwnd, click_tier_delivered,
+    click_tier_failed, emitted_text, hwnd_keyboard_target_state, resolve_keymap_press,
 };
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use schemars::JsonSchema;
@@ -42,9 +42,9 @@ use synapse_action::{
     ActionStateSnapshot, RecordingBackend, ResolvedBackend, TokenBucketSnapshot,
 };
 use synapse_core::{
-    AccessibleNode, Action, Backend, ElementId, FocusedElement, ForegroundContext, PathPoint,
-    PathSpec, Point, Rect, StrokeMotionModel, StrokeTiming, UiaPattern, VelocityProfile,
-    error_codes,
+    AccessibleNode, Action, AimCurve, Backend, ButtonAction, ElementId, FocusedElement,
+    ForegroundContext, MouseButton, MouseTarget, PathPoint, PathSpec, Point, Rect,
+    StrokeMotionModel, StrokeTiming, UiaPattern, VelocityProfile, error_codes,
 };
 use synapse_perception::ObservationInput;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +65,8 @@ const ACT_TYPE_TEXT_SOURCE_UIA_VALUE: &str = "uia_focused_value";
 const ACT_TYPE_TEXT_SOURCE_UIA_EMPTY: &str = "uia_focused_empty_value_or_text";
 const ACT_TYPE_TEXT_SOURCE_CDP_ACTIVE: &str = "cdp_active_element_value";
 const ACT_TYPE_TEXT_SOURCE_OCR_FOCUSED_RECT: &str = "ocr_focused_rect_text";
+const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_HOLD_MS: u32 = 120;
+const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_DURATION_MS: u32 = 50;
 const BACKGROUND_FOREGROUND_SOURCE_OF_TRUTH: &str = "os_foreground_window";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -225,14 +227,14 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Type text. With into_element, routes through background CDP insertText for web nodes, foreground-safe native HWND text messages for UIA-resolved edit controls, or UIA ValuePattern.SetValue with value readback for native elements without a native edit HWND; into_element routing does not require foreground. Without into_element, types through the leased foreground keyboard backend."
+        description = "Type text. With into_element, routes through background CDP insertText for web nodes, foreground-safe native HWND text messages for UIA-resolved edit controls, UIA ValuePattern.SetValue with value readback for native elements without a native edit HWND, or a leased foreground click/type fallback for verified Chromium UIA editable targets when CDP is unavailable and the target window is already foreground. Without into_element, types through the leased foreground keyboard backend."
     )]
     pub async fn act_type(
         &self,
         params: Parameters<ActTypeParams>,
         request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActTypeResponse>, ErrorData> {
-        let params = params.0;
+        let mut params = params.0;
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
             kind = "act_type",
@@ -265,16 +267,27 @@ impl SynapseService {
                 return result.map(Json);
             }
         };
+        let foreground_fallback =
+            match act_type_chromium_foreground_fallback_target(params.into_element.as_ref()) {
+                Ok(target) => target,
+                Err(error) => {
+                    let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                    self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                    return result.map(Json);
+                }
+            };
+        let requires_foreground_route =
+            act_type_requires_foreground_route(&params, foreground_fallback.as_ref());
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
-        if params.into_element.is_none()
+        if requires_foreground_route
             && let Err(error) = self.ensure_act_type_foreground(&preflight, recording.as_ref())
         {
             let result: Result<ActTypeResponse, ErrorData> = Err(error);
             self.audit_action_result_for_request("act_type", &result, &request_context)?;
             return result.map(Json);
         }
-        let _lease_guard = if params.into_element.is_none() {
+        let _lease_guard = if requires_foreground_route {
             match acquire_tool_foreground_input_lease(self, "act_type", &request_context) {
                 Ok(guard) => Some(guard),
                 Err(error) => {
@@ -288,7 +301,57 @@ impl SynapseService {
         };
         let verify_timeout_ms = params.verify_timeout_ms;
         let emitted = emitted_text(&params);
-        let before_text_signature = if act_type_should_capture_text_signature(&params) {
+        let before_text_signature = if let Some(target) = foreground_fallback.as_ref() {
+            let mut foreground_params = params.clone();
+            foreground_params.into_element = None;
+            if let Err(error) = action_from_type_params(&foreground_params) {
+                let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                return result.map(Json);
+            }
+            if let Err(error) = self.ensure_act_type_foreground_fallback_target(
+                &preflight,
+                target,
+                recording.as_ref(),
+            ) {
+                let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                return result.map(Json);
+            }
+            if let Err(error) = self
+                .click_act_type_foreground_fallback_target(handle.clone(), target)
+                .await
+            {
+                let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                return result.map(Json);
+            }
+            let focus_readback = match self.capture_act_type_text_signature(160, true, false).await
+            {
+                Ok(signature) => signature,
+                Err(error) => {
+                    let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                    self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                    return result.map(Json);
+                }
+            };
+            if let Err(error) =
+                act_type_foreground_fallback_focus_matches_target(target, &focus_readback.signature)
+            {
+                let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                return result.map(Json);
+            }
+            tracing::info!(
+                code = "M2_ACT_TYPE_CHROMIUM_FOREGROUND_FALLBACK_READY",
+                element_id = %target.element_id,
+                root_hwnd = target.root_hwnd,
+                role = %target.role,
+                "readback=foreground_text tool=act_type into_element_fallback=chromium_uia_value_pattern_refused"
+            );
+            params = foreground_params;
+            params.verify_delta.then_some(focus_readback)
+        } else if act_type_should_capture_text_signature(&params) {
             match self
                 .capture_act_type_text_signature(160, true, browser_url_policy.is_some())
                 .await
@@ -1555,6 +1618,22 @@ struct ActTypeTextReadback {
     browser_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActTypeForegroundFallbackTarget {
+    element_id: String,
+    root_hwnd: i64,
+    process_name: String,
+    role: String,
+    automation_id_present: bool,
+    bbox: Rect,
+    enabled: bool,
+    keyboard_focusable: bool,
+    patterns: Vec<UiaPattern>,
+    name_len: usize,
+    value_len: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 struct ActTypeBrowserUrlPolicy {
     expected_url_regex: regex::Regex,
@@ -2105,6 +2184,62 @@ impl SynapseService {
             value,
             browser_url: browser_url.url,
         })
+    }
+
+    fn ensure_act_type_foreground_fallback_target(
+        &self,
+        preflight: &ActionPreflightReadback,
+        target: &ActTypeForegroundFallbackTarget,
+        recording: Option<&Arc<RecordingBackend>>,
+    ) -> Result<(), ErrorData> {
+        if recording.is_some() {
+            return Err(act_type_foreground_fallback_recording_error(target));
+        }
+        let expected = preflight.after.as_ref().unwrap_or(&preflight.before);
+        if expected.hwnd != target.root_hwnd {
+            return Err(act_type_foreground_fallback_target_not_foreground_error(
+                expected, target,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn click_act_type_foreground_fallback_target(
+        &self,
+        handle: ActionHandle,
+        target: &ActTypeForegroundFallbackTarget,
+    ) -> Result<(), ErrorData> {
+        let point = act_type_target_center_point(target)?;
+        let actions = [
+            Action::MouseMove {
+                to: MouseTarget::Screen { point },
+                curve: AimCurve::Instant,
+                duration_ms: ACT_TYPE_FOREGROUND_FALLBACK_CLICK_DURATION_MS,
+                backend: Backend::Auto,
+            },
+            Action::MouseButton {
+                button: MouseButton::Left,
+                action: ButtonAction::Press,
+                hold_ms: ACT_TYPE_FOREGROUND_FALLBACK_CLICK_HOLD_MS,
+                backend: Backend::Auto,
+            },
+        ];
+        for action in actions {
+            handle
+                .execute(action)
+                .await
+                .map_err(|error| act_type_foreground_fallback_click_error(target, point, &error))?;
+        }
+        tracing::info!(
+            code = "M2_ACT_TYPE_CHROMIUM_FOREGROUND_FALLBACK_CLICKED",
+            element_id = %target.element_id,
+            root_hwnd = target.root_hwnd,
+            screen_x = point.x,
+            screen_y = point.y,
+            role = %target.role,
+            "readback=foreground_click tool=act_type into_element_fallback=chromium_uia_value_pattern_refused"
+        );
+        Ok(())
     }
 
     async fn capture_action_delta_signature(
@@ -3014,6 +3149,106 @@ fn act_type_should_capture_text_signature(params: &ActTypeParams) -> bool {
     params.verify_delta && params.into_element.is_none()
 }
 
+fn act_type_requires_foreground_route(
+    params: &ActTypeParams,
+    fallback_target: Option<&ActTypeForegroundFallbackTarget>,
+) -> bool {
+    params.into_element.is_none() || fallback_target.is_some()
+}
+
+#[cfg(windows)]
+fn act_type_chromium_foreground_fallback_target(
+    element_id: Option<&ElementId>,
+) -> Result<Option<ActTypeForegroundFallbackTarget>, ErrorData> {
+    let Some(element_id) = element_id else {
+        return Ok(None);
+    };
+    if synapse_a11y::cdp_backend_from_element_id(element_id).is_some() {
+        return Ok(None);
+    }
+    let root_hwnd = element_id
+        .parts()
+        .map_err(|err| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("act_type into_element id is malformed: {err}"),
+            )
+        })?
+        .hwnd;
+    let context = synapse_a11y::foreground_context(root_hwnd).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "act_type into_element foreground fallback target HWND readback failed: {error}"
+            ),
+        )
+    })?;
+    if !synapse_a11y::is_chromium_family(&context.process_name) {
+        return Ok(None);
+    }
+    let metadata = synapse_a11y::element_metadata(element_id).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "act_type into_element foreground fallback target metadata readback failed: {error}"
+            ),
+        )
+    })?;
+    if !chromium_editable_value_pattern_requires_foreground_fallback(
+        &context.process_name,
+        &metadata,
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(ActTypeForegroundFallbackTarget {
+        element_id: element_id.to_string(),
+        root_hwnd,
+        process_name: context.process_name,
+        role: metadata.role,
+        automation_id_present: metadata.automation_id.is_some(),
+        bbox: metadata.bbox,
+        enabled: metadata.enabled,
+        keyboard_focusable: metadata.keyboard_focusable,
+        patterns: metadata.patterns,
+        name_len: metadata.name.chars().count(),
+        value_len: metadata.value.as_ref().map(|value| value.chars().count()),
+    }))
+}
+
+#[cfg(not(windows))]
+fn act_type_chromium_foreground_fallback_target(
+    _element_id: Option<&ElementId>,
+) -> Result<Option<ActTypeForegroundFallbackTarget>, ErrorData> {
+    Ok(None)
+}
+
+fn chromium_editable_value_pattern_requires_foreground_fallback(
+    process_name: &str,
+    metadata: &synapse_a11y::ElementMetadataReadback,
+) -> bool {
+    if !synapse_a11y::is_chromium_family(process_name) || !metadata.enabled {
+        return false;
+    }
+    if !metadata
+        .patterns
+        .iter()
+        .any(|pattern| *pattern == UiaPattern::Value)
+    {
+        return false;
+    }
+    metadata.keyboard_focusable
+        && (act_type_editable_role(&metadata.role)
+            || metadata
+                .patterns
+                .iter()
+                .any(|pattern| *pattern == UiaPattern::Text))
+}
+
+fn act_type_editable_role(role: &str) -> bool {
+    let role = role.to_ascii_lowercase();
+    role.contains("edit") || role.contains("document") || role.contains("text")
+}
+
 fn act_type_url_policy_params_invalid(
     field: &'static str,
     detail: impl Into<String>,
@@ -3672,6 +3907,71 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.x < b_right && a_right > b.x && a.y < b_bottom && a_bottom > b.y
 }
 
+fn act_type_foreground_fallback_focus_matches_target(
+    target: &ActTypeForegroundFallbackTarget,
+    after_click: &ActTypeTextSignature,
+) -> Result<(), ErrorData> {
+    if after_click.foreground_hwnd != target.root_hwnd {
+        return Err(act_type_foreground_fallback_focus_error(
+            target,
+            after_click,
+            "foreground_hwnd_changed_after_target_click",
+        ));
+    }
+    let role = after_click.focused_role.as_deref().unwrap_or_default();
+    if !act_type_editable_role(role) {
+        return Err(act_type_foreground_fallback_focus_error(
+            target,
+            after_click,
+            "focused_role_is_not_text_editable",
+        ));
+    }
+    if after_click
+        .focused_element_id
+        .as_deref()
+        .is_some_and(|focused_id| focused_id == target.element_id)
+    {
+        return Ok(());
+    }
+    if after_click
+        .focused_bbox
+        .is_some_and(|bbox| rects_intersect(bbox, target.bbox))
+    {
+        return Ok(());
+    }
+    Err(act_type_foreground_fallback_focus_error(
+        target,
+        after_click,
+        "focused_element_did_not_match_target_or_bbox",
+    ))
+}
+
+fn act_type_target_center_point(
+    target: &ActTypeForegroundFallbackTarget,
+) -> Result<Point, ErrorData> {
+    if target.bbox.w <= 0 || target.bbox.h <= 0 {
+        return Err(act_type_foreground_fallback_target_invalid_error(
+            target,
+            "target bbox is empty or inverted",
+        ));
+    }
+    let x = i64::from(target.bbox.x) + i64::from(target.bbox.w) / 2;
+    let y = i64::from(target.bbox.y) + i64::from(target.bbox.h) / 2;
+    let x = i32::try_from(x).map_err(|err| {
+        act_type_foreground_fallback_target_invalid_error(
+            target,
+            format!("target bbox center x overflowed i32: {err}"),
+        )
+    })?;
+    let y = i32::try_from(y).map_err(|err| {
+        act_type_foreground_fallback_target_invalid_error(
+            target,
+            format!("target bbox center y overflowed i32: {err}"),
+        )
+    })?;
+    Ok(Point { x, y })
+}
+
 fn has_text_readback_pattern(patterns: &[UiaPattern]) -> bool {
     patterns
         .iter()
@@ -3920,6 +4220,121 @@ fn act_type_text_target_changed(
         return before.focused_bbox != after.focused_bbox;
     }
     false
+}
+
+fn act_type_foreground_fallback_recording_error(
+    target: &ActTypeForegroundFallbackTarget,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        "act_type into_element Chromium foreground fallback requires the live foreground input tier and cannot run against the recording backend",
+        Some(json!({
+            "code": error_codes::ACTION_BACKEND_UNAVAILABLE,
+            "tool": "act_type",
+            "reason": "chromium_foreground_fallback_recording_backend_unsupported",
+            "target": target,
+            "required_foreground": true,
+            "target_readback_required": true,
+        })),
+    )
+}
+
+fn act_type_foreground_fallback_target_not_foreground_error(
+    expected: &ForegroundProof,
+    target: &ActTypeForegroundFallbackTarget,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "act_type into_element Chromium foreground fallback requires target hwnd 0x{:x} to be the current foreground hwnd, but preflight foreground was 0x{:x}",
+            target.root_hwnd, expected.hwnd
+        ),
+        Some(json!({
+            "code": error_codes::ACTION_FOREGROUND_LOST,
+            "tool": "act_type",
+            "reason": "into_element_foreground_fallback_target_not_foreground",
+            "foreground_expected": expected,
+            "target": target,
+            "required_foreground": true,
+            "target_readback_required": true,
+        })),
+    )
+}
+
+fn act_type_foreground_fallback_target_invalid_error(
+    target: &ActTypeForegroundFallbackTarget,
+    detail: impl Into<String>,
+) -> ErrorData {
+    let detail = detail.into();
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!("act_type into_element Chromium foreground fallback target invalid: {detail}"),
+        Some(json!({
+            "code": error_codes::ACTION_TARGET_INVALID,
+            "tool": "act_type",
+            "reason": "chromium_foreground_fallback_target_invalid",
+            "detail": detail,
+            "target": target,
+            "required_foreground": true,
+            "target_readback_required": true,
+        })),
+    )
+}
+
+fn act_type_foreground_fallback_click_error(
+    target: &ActTypeForegroundFallbackTarget,
+    point: Point,
+    error: &ActionError,
+) -> ErrorData {
+    let mapped = crate::m2::action_error_to_mcp(error);
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "act_type into_element Chromium foreground fallback click failed at ({},{}): {}",
+            point.x, point.y, error
+        ),
+        Some(json!({
+            "code": mapped
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or(error_codes::ACTION_BACKEND_UNAVAILABLE),
+            "tool": "act_type",
+            "reason": "chromium_foreground_fallback_click_failed",
+            "point": point,
+            "target": target,
+            "cause": mapped.data,
+            "required_foreground": true,
+            "target_readback_required": true,
+        })),
+    )
+}
+
+fn act_type_foreground_fallback_focus_error(
+    target: &ActTypeForegroundFallbackTarget,
+    after_click: &ActTypeTextSignature,
+    reason: &'static str,
+) -> ErrorData {
+    let after_hash =
+        verify_hash_json(after_click).unwrap_or_else(|_| "hash_unavailable".to_owned());
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "act_type into_element Chromium foreground fallback click did not focus the requested editable target: {reason}"
+        ),
+        Some(json!({
+            "code": error_codes::ACTION_TARGET_INVALID,
+            "tool": "act_type",
+            "reason": reason,
+            "source_of_truth": ACT_TYPE_FOREGROUND_TEXT_SOURCE_OF_TRUTH,
+            "after_click_signature": after_hash,
+            "after_click": after_click,
+            "target": target,
+            "required_foreground": true,
+            "target_readback_required": true,
+        })),
+    )
 }
 
 fn act_type_verify_surface_unavailable_error(
@@ -4993,6 +5408,177 @@ mod tests {
     }
 
     #[test]
+    fn act_type_chromium_fallback_requires_foreground_route_for_refused_target() {
+        let mut params = act_type_params(true, None);
+        params.into_element = Some(
+            ElementId::parse("0x1000:0000002a00000001")
+                .expect("synthetic element id must be valid"),
+        );
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+
+        println!(
+            "readback=act_type_foreground_fallback_route before=into_element after=requires_foreground:{}",
+            act_type_requires_foreground_route(&params, Some(&target))
+        );
+
+        assert!(act_type_requires_foreground_route(&params, Some(&target)));
+        assert!(
+            !act_type_requires_foreground_route(&params, None),
+            "ordinary into_element routes stay background-only unless the Chromium fallback target is detected"
+        );
+        params.into_element = None;
+        assert!(act_type_requires_foreground_route(&params, None));
+    }
+
+    #[test]
+    fn chromium_foreground_fallback_eligibility_matches_unsafe_value_pattern_shape() {
+        let metadata = act_type_element_metadata("edit", true, true, vec![UiaPattern::Value]);
+
+        assert!(
+            chromium_editable_value_pattern_requires_foreground_fallback("chrome.exe", &metadata)
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback("notepad.exe", &metadata)
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("button", true, true, vec![UiaPattern::Value])
+            )
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("edit", true, false, vec![UiaPattern::Value])
+            )
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("edit", true, true, vec![UiaPattern::Text])
+            )
+        );
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_focus_accepts_matching_edit_bbox() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+        let readback = act_type_signature_for_fallback(
+            0x1000,
+            Some("edit"),
+            Some(Rect {
+                x: 120,
+                y: 205,
+                w: 120,
+                h: 30,
+            }),
+        );
+
+        act_type_foreground_fallback_focus_matches_target(&target, &readback)
+            .expect("intersecting focused edit bbox should identify the clicked target");
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_focus_rejects_wrong_target() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+        let wrong_role = act_type_signature_for_fallback(
+            0x1000,
+            Some("button"),
+            Some(Rect {
+                x: 120,
+                y: 205,
+                w: 120,
+                h: 30,
+            }),
+        );
+        let wrong_bbox = act_type_signature_for_fallback(
+            0x1000,
+            Some("edit"),
+            Some(Rect {
+                x: 800,
+                y: 900,
+                w: 120,
+                h: 30,
+            }),
+        );
+
+        let role_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_role)
+            .expect_err("non-edit focused role must fail closed before typing");
+        let bbox_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_bbox)
+            .expect_err("focused edit outside target bbox must fail closed before typing");
+
+        assert_eq!(
+            role_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(Value::as_str),
+            Some("focused_role_is_not_text_editable")
+        );
+        assert_eq!(
+            bbox_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(Value::as_str),
+            Some("focused_element_did_not_match_target_or_bbox")
+        );
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_rejects_empty_target_bbox() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 0,
+                h: 40,
+            },
+        );
+
+        let error = act_type_target_center_point(&target)
+            .expect_err("empty target bbox must fail closed before foreground input");
+
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str),
+            Some(error_codes::ACTION_TARGET_INVALID)
+        );
+    }
+
+    #[test]
     fn act_set_value_background_guard_rejects_target_child_activation() {
         let before = foreground_context(100, 10, "chrome.exe", "before");
         let after = foreground_context(150, 20, "winforms-test.exe", "after child");
@@ -5882,6 +6468,93 @@ mod tests {
             },
             value: focused_value,
             browser_url: browser_url_owned,
+        }
+    }
+
+    fn act_type_element_metadata(
+        role: &str,
+        enabled: bool,
+        keyboard_focusable: bool,
+        patterns: Vec<UiaPattern>,
+    ) -> synapse_a11y::ElementMetadataReadback {
+        synapse_a11y::ElementMetadataReadback {
+            name: "synthetic chrome edit".to_owned(),
+            role: role.to_owned(),
+            automation_id: Some("synthetic-input".to_owned()),
+            bbox: Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+            enabled,
+            keyboard_focusable,
+            patterns,
+            value: Some("before".to_owned()),
+        }
+    }
+
+    fn act_type_foreground_fallback_target(
+        root_hwnd: i64,
+        role: &str,
+        bbox: Rect,
+    ) -> ActTypeForegroundFallbackTarget {
+        ActTypeForegroundFallbackTarget {
+            element_id: format!("0x{root_hwnd:x}:0000002a00000001"),
+            root_hwnd,
+            process_name: "chrome.exe".to_owned(),
+            role: role.to_owned(),
+            automation_id_present: true,
+            bbox,
+            enabled: true,
+            keyboard_focusable: true,
+            patterns: vec![UiaPattern::Value, UiaPattern::Text],
+            name_len: "synthetic chrome edit".chars().count(),
+            value_len: Some("before".chars().count()),
+        }
+    }
+
+    fn act_type_signature_for_fallback(
+        foreground_hwnd: i64,
+        focused_role: Option<&str>,
+        focused_bbox: Option<Rect>,
+    ) -> ActTypeTextSignature {
+        ActTypeTextSignature {
+            foreground_hwnd,
+            foreground_pid: 20,
+            foreground_process: "chrome.exe".to_owned(),
+            foreground_title_sha256: non_empty_sha256("Synthetic - Google Chrome"),
+            focused_element_id: focused_role
+                .map(|_| format!("0x{foreground_hwnd:x}:0000002a00000002")),
+            focused_role: focused_role.map(str::to_owned),
+            focused_name_sha256: focused_role.and_then(non_empty_sha256),
+            focused_value_len: Some("before".chars().count()),
+            focused_value_sha256: Some(text_sha256("before")),
+            focused_selected_text_sha256: None,
+            focused_bbox,
+            readback_source: Some(ACT_TYPE_TEXT_SOURCE_UIA_VALUE.to_owned()),
+            has_text_readback: true,
+            text_readback_attempts: vec![format!("{ACT_TYPE_TEXT_SOURCE_UIA_VALUE}:available")],
+            cdp_status: None,
+            cdp_endpoint_present: false,
+            cdp_selected_target_id: None,
+            cdp_active_has_element: None,
+            cdp_active_is_editable: None,
+            cdp_active_tag_name: None,
+            cdp_active_id_sha256: None,
+            cdp_active_name_sha256: None,
+            cdp_active_value_len: None,
+            cdp_active_value_sha256: None,
+            cdp_active_error_code: None,
+            cdp_active_error_detail_sha256: None,
+            ocr_word_count: 0,
+            ocr_text_len: None,
+            ocr_text_sha256: None,
+            web_path: Some("uia_only".to_owned()),
+            browser_url_len: None,
+            browser_url_sha256: None,
+            browser_cdp_target_id: None,
+            browser_url_readback_source: None,
         }
     }
 

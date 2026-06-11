@@ -243,9 +243,13 @@ For browser work in an existing authenticated Chrome session, prefer this loop:
 4. Call `find` with a role/name query, such as `role = "button"` and
    `name_substring = "Apply"`.
 5. Use the returned CDP-backed `element_id` with `act_click`, `act_type`, or
-   `act_stroke`. For fragile browser controls, set `act_click.verify_delta =
-   true` so Synapse fails closed with `ACTION_NO_OBSERVED_DELTA` when no
-   focused/UI/pixel state change is observed.
+   `act_stroke`. If CDP is unavailable in the user's existing Chrome but UIA
+   still exposes a verified Chromium editable target, `act_type.into_element`
+   may use a leased foreground click/type fallback only while that Chrome HWND
+   is already foreground; it refuses before typing if the target or focus
+   readback does not match. For fragile browser controls, set
+   `act_click.verify_delta = true` so Synapse fails closed with
+   `ACTION_NO_OBSERVED_DELTA` when no focused/UI/pixel state change is observed.
 6. Read the separate source of truth after the action: page text/DOM state,
    visible UI state, downloaded file bytes, server-side record, or the Synapse
    audit row that should have changed.
