@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 45] = [
+const EXPECTED_TOOLS: [&str; 46] = [
     "act_click",
     "act_clipboard",
     "act_keymap",
@@ -20,6 +20,7 @@ const EXPECTED_TOOLS: [&str; 45] = [
     "capture_screenshot",
     "find",
     "health",
+    "hidden_desktop_pip_frame",
     "observe",
     "profile_activate",
     "profile_authoring_decide",

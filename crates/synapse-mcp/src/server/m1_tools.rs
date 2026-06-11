@@ -2,13 +2,15 @@ use super::{
     CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse,
     CdpOpenTabParams, CdpOpenTabResponse, CdpTargetOwner, ErrorData, FindParams, FindResponse,
-    Health, Json, ObserveParams, Parameters, ReadTextParams, SessionTarget, SetCaptureTargetParams,
-    SetCaptureTargetResponse, SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam,
-    SetTargetParams, SynapseService, TargetResponse, TargetWire, empty_input_schema, mcp_error,
-    observe_include, observe_input, populate_audio_summary, populate_clipboard_summary,
-    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
-    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
-    set_target_input_schema, tool, tool_router,
+    Health, HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse,
+    HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters, ReadTextParams, SessionTarget,
+    SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
+    SetPerceptionModeResponse, SetTargetParam, SetTargetParams, SynapseService, TargetResponse,
+    TargetWire, empty_input_schema, mcp_error, observe_include, observe_input,
+    populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
+    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
+    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
+    tool_router,
 };
 use crate::m1::{effective_ocr_backend, hidden_desktop_input_from_worker_snapshot};
 use rmcp::{RoleServer, service::RequestContext};
@@ -337,6 +339,27 @@ impl SynapseService {
         let session_id = super::context::mcp_session_id_from_request_context(&request_context)?;
         let session_target_hwnd = self.request_session_target_hwnd(&request_context)?;
         if let Some(window_hwnd) = params.0.window_hwnd.or(session_target_hwnd) {
+            if let Some(session_id) = session_id.as_deref() {
+                if self
+                    .hidden_desktop_context_for_session(session_id, window_hwnd)?
+                    .is_some()
+                {
+                    let original_error = mcp_error(
+                        error_codes::TARGET_WINDOW_NOT_FOUND,
+                        format!(
+                            "capture_screenshot hidden desktop target hwnd {window_hwnd:#x} was not found in session {session_id}"
+                        ),
+                    );
+                    return self
+                        .capture_hidden_desktop_screenshot_to_file(
+                            &params.0,
+                            Some(session_id),
+                            window_hwnd,
+                            original_error,
+                        )
+                        .map(Json);
+                }
+            }
             let normal_result = (|| {
                 let target_context = resolve_capture_target_window_context(window_hwnd)?;
                 let region = match params.0.region {
@@ -402,6 +425,38 @@ impl SynapseService {
                 )
             })?;
         capture_screen_screenshot_to_file(&params.0, region, foreground).map(Json)
+    }
+
+    #[tool(
+        description = "Read-only Picture-in-Picture frame for a session-owned hidden desktop. Captures one hidden-desktop window frame through the per-desktop PrintWindow worker and writes it to the requested PNG/JPEG path as the viewer surface. It never forwards clicks, keys, or any operator input into the hidden desktop; repeat calls form the frame stream. If the watched session is already closed, returns stream_status=ended without writing a frame."
+    )]
+    pub async fn hidden_desktop_pip_frame(
+        &self,
+        params: Parameters<HiddenDesktopPipFrameParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<HiddenDesktopPipFrameResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "hidden_desktop_pip_frame",
+            "tool.invocation kind=hidden_desktop_pip_frame"
+        );
+        let current_session_id = super::context::mcp_session_id_from_request_context(
+            &request_context,
+        )?
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::HTTP_SESSION_INVALID,
+                "hidden_desktop_pip_frame requires an MCP session id",
+            )
+        })?;
+        let watched_session_id = params
+            .0
+            .watched_session_id
+            .clone()
+            .unwrap_or(current_session_id);
+        super::session_tools::validate_session_id(&watched_session_id)?;
+        self.hidden_desktop_pip_frame_to_file(&params.0, &watched_session_id)
+            .map(Json)
     }
 
     #[tool(description = "Set the active capture target")]
@@ -723,6 +778,85 @@ impl SynapseService {
             bitmap_sha256,
             Some(captured.context),
         )
+    }
+
+    fn hidden_desktop_pip_frame_to_file(
+        &self,
+        params: &HiddenDesktopPipFrameParams,
+        watched_session_id: &str,
+    ) -> Result<HiddenDesktopPipFrameResponse, ErrorData> {
+        let status = self.session_status_impl(watched_session_id)?;
+        let lifecycle = status
+            .session
+            .as_ref()
+            .map(|session| session.registry.lifecycle.clone());
+        if lifecycle.as_deref() == Some("closed") {
+            return Ok(hidden_desktop_pip_ended_response(
+                params,
+                watched_session_id,
+                lifecycle,
+                "watched_session_closed",
+            ));
+        }
+        if !status.found {
+            return Err(mcp_error(
+                error_codes::HTTP_SESSION_INVALID,
+                format!(
+                    "hidden_desktop_pip_frame watched_session_id {watched_session_id:?} is unknown"
+                ),
+            ));
+        }
+        let original_error = mcp_error(
+            error_codes::TARGET_WINDOW_NOT_FOUND,
+            format!(
+                "hidden_desktop_pip_frame target hwnd {:#x} was not found for watched session {watched_session_id:?}",
+                params.window_hwnd
+            ),
+        );
+        let screenshot_params = CaptureScreenshotParams {
+            path: params.path.clone(),
+            region: params.region,
+            window_hwnd: Some(params.window_hwnd),
+            overwrite: params.overwrite,
+        };
+        let screenshot = self.capture_hidden_desktop_screenshot_to_file(
+            &screenshot_params,
+            Some(watched_session_id),
+            params.window_hwnd,
+            original_error,
+        )?;
+        let hidden_desktop = self
+            .session_hidden_desktop_readback(watched_session_id)?
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::TARGET_WINDOW_NOT_FOUND,
+                    format!(
+                        "hidden_desktop_pip_frame watched session {watched_session_id:?} lost its session-owned hidden desktop resources after capture"
+                    ),
+                )
+            })?;
+        Ok(HiddenDesktopPipFrameResponse {
+            stream_status: HiddenDesktopPipStreamStatus::Frame,
+            watched_session_id: watched_session_id.to_owned(),
+            watched_session_lifecycle: lifecycle,
+            watched_window_hwnd: params.window_hwnd,
+            viewer_surface: "mcp_file_frame".to_owned(),
+            read_only: true,
+            input_forwarding: "none".to_owned(),
+            desktop_names: hidden_desktop.desktop_names,
+            launch_pids: hidden_desktop.launch_pids,
+            resource_count: hidden_desktop.resource_count,
+            ended_reason: None,
+            path: Some(screenshot.path),
+            format: Some(screenshot.format),
+            capture_backend: Some(screenshot.capture_backend),
+            region: Some(screenshot.region),
+            width: Some(screenshot.width),
+            height: Some(screenshot.height),
+            bytes_written: Some(screenshot.bytes_written),
+            bitmap_sha256: Some(screenshot.bitmap_sha256),
+            foreground: screenshot.foreground,
+        })
     }
 
     #[cfg(windows)]
@@ -2346,6 +2480,36 @@ fn write_screenshot_bitmap(
     })
 }
 
+fn hidden_desktop_pip_ended_response(
+    params: &HiddenDesktopPipFrameParams,
+    watched_session_id: &str,
+    lifecycle: Option<String>,
+    reason: &str,
+) -> HiddenDesktopPipFrameResponse {
+    HiddenDesktopPipFrameResponse {
+        stream_status: HiddenDesktopPipStreamStatus::Ended,
+        watched_session_id: watched_session_id.to_owned(),
+        watched_session_lifecycle: lifecycle,
+        watched_window_hwnd: params.window_hwnd,
+        viewer_surface: "mcp_file_frame".to_owned(),
+        read_only: true,
+        input_forwarding: "none".to_owned(),
+        desktop_names: Vec::new(),
+        launch_pids: Vec::new(),
+        resource_count: 0,
+        ended_reason: Some(reason.to_owned()),
+        path: None,
+        format: None,
+        capture_backend: None,
+        region: None,
+        width: None,
+        height: None,
+        bytes_written: None,
+        bitmap_sha256: None,
+        foreground: None,
+    }
+}
+
 fn validate_screenshot_region(region: Rect) -> Result<(), ErrorData> {
     if region.w <= 0 || region.h <= 0 {
         return Err(mcp_error(
@@ -3539,10 +3703,11 @@ fn template_value(field_name: &str, path: &str, index: usize) -> PerceptionResul
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        SessionTarget, TargetWire, hidden_worker_target_miss, mcp_error, ocr_cache_key,
-        resolve_capture_target_window_context, sha256_hex, target_wire, template_value,
-        validate_target_window,
+        SessionTarget, TargetWire, hidden_desktop_pip_ended_response, hidden_worker_target_miss,
+        mcp_error, ocr_cache_key, resolve_capture_target_window_context, sha256_hex, target_wire,
+        template_value, validate_target_window,
     };
+    use crate::m1::{HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus};
     use synapse_core::error_codes;
 
     #[test]
@@ -3589,6 +3754,32 @@ mod tests {
 
         assert!(hidden_worker_target_miss(&target_error));
         assert!(!hidden_worker_target_miss(&capture_error));
+    }
+
+    #[test]
+    fn hidden_desktop_pip_ended_response_is_read_only_without_frame_path() {
+        let response = hidden_desktop_pip_ended_response(
+            &HiddenDesktopPipFrameParams {
+                watched_session_id: Some("agent-session-1".to_owned()),
+                window_hwnd: 0x1234,
+                path: "C:\\temp\\ignored.png".to_owned(),
+                region: None,
+                overwrite: false,
+            },
+            "agent-session-1",
+            Some("closed".to_owned()),
+            "watched_session_closed",
+        );
+
+        assert_eq!(response.stream_status, HiddenDesktopPipStreamStatus::Ended);
+        assert!(response.read_only);
+        assert_eq!(response.input_forwarding, "none");
+        assert!(response.path.is_none());
+        assert!(response.bitmap_sha256.is_none());
+        assert_eq!(
+            response.ended_reason.as_deref(),
+            Some("watched_session_closed")
+        );
     }
 
     #[test]

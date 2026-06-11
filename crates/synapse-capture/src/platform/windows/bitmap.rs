@@ -11,8 +11,8 @@ use windows::{
         },
         Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
-            SRCCOPY, SelectObject,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, RDW_ALLCHILDREN,
+            RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, ReleaseDC, SRCCOPY, SelectObject,
         },
     },
     Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow},
@@ -667,6 +667,15 @@ fn printwindow_region_bgra(
             return Err(error);
         }
     };
+    let repaint_flags = RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW;
+    let repainted = unsafe { RedrawWindow(Some(hwnd), None, None, repaint_flags) };
+    if !repainted.as_bool() {
+        tracing::debug!(
+            hwnd = hwnd_value,
+            region = ?region,
+            "RedrawWindow before PrintWindow returned false; continuing with PrintWindow"
+        );
+    }
     let printed = unsafe {
         PrintWindow(
             hwnd,

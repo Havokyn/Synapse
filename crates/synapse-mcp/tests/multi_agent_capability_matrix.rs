@@ -6,7 +6,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 60] = [
+const EXPECTED_MATRIX_TOOLS: [&str; 61] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -42,6 +42,7 @@ const EXPECTED_MATRIX_TOOLS: [&str; 60] = [
     "control_lease_status",
     "find",
     "get_target",
+    "hidden_desktop_pip_frame",
     "observe",
     "observe_delta",
     "read_text",
@@ -291,6 +292,7 @@ fn is_matrix_scope_tool(name: &str) -> bool {
                 | "clear_target"
                 | "find"
                 | "get_target"
+                | "hidden_desktop_pip_frame"
                 | "observe"
                 | "observe_delta"
                 | "read_text"

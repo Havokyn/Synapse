@@ -326,6 +326,69 @@ pub enum CaptureScreenshotFormat {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct HiddenDesktopPipFrameParams {
+    /// MCP session id whose session-owned hidden desktop should be viewed. If
+    /// omitted, the caller's current MCP session is viewed.
+    #[serde(default)]
+    pub watched_session_id: Option<String>,
+    /// Hidden-desktop top-level window HWND to capture.
+    pub window_hwnd: i64,
+    /// Output PNG/JPEG frame path. This is the read-only viewer surface.
+    pub path: String,
+    /// Optional client-relative region within `window_hwnd`.
+    #[serde(default)]
+    pub region: Option<Rect>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HiddenDesktopPipStreamStatus {
+    Frame,
+    Ended,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HiddenDesktopPipFrameResponse {
+    pub stream_status: HiddenDesktopPipStreamStatus,
+    pub watched_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watched_session_lifecycle: Option<String>,
+    pub watched_window_hwnd: i64,
+    pub viewer_surface: String,
+    pub read_only: bool,
+    pub input_forwarding: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_pids: Vec<u32>,
+    pub resource_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<CaptureScreenshotFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Rect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_written: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitmap_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetCaptureTargetParams {
     pub target: CaptureTargetParam,
     #[serde(default)]

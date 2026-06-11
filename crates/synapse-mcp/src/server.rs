@@ -25,6 +25,7 @@ use crate::{
         CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
         CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams,
         CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse, FindParams, FindResponse,
+        HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse, HiddenDesktopPipStreamStatus,
         M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams, SetCaptureTargetResponse,
         SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam, SetTargetParams,
         SharedM1State, TargetResponse, TargetWire, apply_profile_runtime_config_in_state,
