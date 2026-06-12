@@ -17,15 +17,16 @@ use super::{
     StorageGcOnceResponse, StorageInspectParams, StorageInspectResponse,
     StoragePressureSampleParams, StoragePressureSampleResponse, StoragePutProbeRowsParams,
     StoragePutProbeRowsResponse, SubscribeCancelParams, SubscribeCancelResponse, SubscribeParams,
-    SubscribeResponse, SynapseService, apply_storage_pressure_sample, cancel_reflex,
+    SubscribeResponse, SynapseService, TimelineSearchParams, TimelineSearchResponse,
+    apply_storage_pressure_sample, cancel_reflex,
     cancel_subscription, decide_profile_authoring_candidate, disable_registry_profile,
     export_audit_bundle, export_profile_authoring_candidate, export_registry,
     generate_profile_authoring_candidate, history_reflexes, import_registry,
     inspect_profile_authoring_candidate, inspect_storage, install_registry_package,
     list_profile_authoring_candidates, list_profiles, list_reflexes, put_probe_rows,
     query_audit_intelligence, query_registry, record_replay, refresh_profile_quality,
-    register_reflex, rollback_registry_profile, run_storage_gc_once, subscribe_to_events,
-    tail_audio, tool, tool_router, transcribe_audio,
+    register_reflex, rollback_registry_profile, run_storage_gc_once, search_timeline,
+    subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio,
 };
 use rmcp::{RoleServer, service::RequestContext};
 
@@ -582,6 +583,31 @@ impl SynapseService {
         )?;
         let runtime = self.reflex_runtime()?;
         inspect_storage(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(
+        description = "Search the operator activity timeline (CF_TIMELINE) by time range, app, kind, actor, and case-insensitive text over titles/paths/URLs; pages via cursor"
+    )]
+    pub async fn timeline_search(
+        &self,
+        params: Parameters<TimelineSearchParams>,
+    ) -> Result<Json<TimelineSearchResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "timeline_search",
+            start_ts_ns = params.0.start_ts_ns,
+            end_ts_ns = params.0.end_ts_ns,
+            has_text = params.0.text.is_some(),
+            limit = params.0.limit,
+            has_cursor = params.0.cursor.is_some(),
+            "tool.invocation kind=timeline_search"
+        );
+        self.require_m3_permissions(
+            "timeline_search",
+            &crate::m3::timeline::required_permissions(&params.0),
+        )?;
+        let runtime = self.reflex_runtime()?;
+        search_timeline(&runtime, &params.0).map(Json)
     }
 
     #[tool(description = "Write bounded synthetic probe rows to a storage column family")]

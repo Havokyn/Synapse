@@ -536,6 +536,44 @@ impl Db {
         Ok(rows)
     }
 
+    /// Scans up to `max_rows` rows starting at `start_key` (inclusive) and
+    /// reports whether more rows remain past the returned window.
+    ///
+    /// Unlike [`Self::scan_cf_prefix_from`], iteration stops after
+    /// `max_rows + 1` steps, so callers can page through arbitrarily large
+    /// column families without materializing them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ReadFailed`] when the column family is missing
+    /// or `RocksDB` iteration fails.
+    #[tracing::instrument(skip_all, fields(cf_name, start_key_len = start_key.len(), max_rows))]
+    pub fn scan_cf_from(
+        &self,
+        cf_name: &str,
+        start_key: &[u8],
+        max_rows: usize,
+    ) -> StorageResult<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+        let handle = self.cf_handle(cf_name)?;
+        let mut rows = Vec::new();
+        let mut more = false;
+        for item in self
+            .inner
+            .iterator_cf(&handle, IteratorMode::From(start_key, Direction::Forward))
+        {
+            let (key, value) = item.map_err(|source| StorageError::ReadFailed {
+                cf_name: cf_name.to_owned(),
+                detail: source.to_string(),
+            })?;
+            if rows.len() == max_rows {
+                more = true;
+                break;
+            }
+            rows.push((key.to_vec(), value.to_vec()));
+        }
+        Ok((rows, more))
+    }
+
     /// Compacts a whole column family.
     ///
     /// # Errors

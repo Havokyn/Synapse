@@ -48,6 +48,11 @@ pub struct StoragePutProbeRowsParams {
     pub ts_ns_start: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ns_step: Option<u64>,
+    /// Key layout: `prefix_index` (default) writes `{prefix}:{index}` string
+    /// keys; `timeline_ts` writes the binary `CF_TIMELINE` codec keys
+    /// (`ts_ns BE || seq BE`, requires `ts_ns_start`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -441,6 +446,54 @@ fn validate_probe_params(params: &StoragePutProbeRowsParams) -> Result<(), Error
             "storage_put_probe_rows value_json must be a JSON object",
         ));
     }
+    match params.key_mode.as_deref().map(str::trim) {
+        None | Some("prefix_index") => {}
+        Some("timeline_ts") => {
+            if params.ts_ns_start.is_none() {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "storage_put_probe_rows key_mode=timeline_ts requires ts_ns_start",
+                ));
+            }
+            if params.cf_name.trim() != cf::CF_TIMELINE {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "storage_put_probe_rows key_mode=timeline_ts is only valid for CF_TIMELINE",
+                ));
+            }
+            // Timeline-keyed probes must be valid TimelineRecord envelopes:
+            // this mode exists to seed realistic timeline rows, and the
+            // envelope rejects unknown fields, so the generic probe_id/seq
+            // diagnostics are not injected. Validate the merged row-0 value
+            // up front so a bad template fails closed instead of writing
+            // rows that every consumer counts as invalid.
+            let Some(template) = &params.value_json else {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "storage_put_probe_rows key_mode=timeline_ts requires value_json",
+                ));
+            };
+            let merged = timeline_record_value(template, params.ts_ns_start.unwrap_or_default());
+            if let Err(error) =
+                serde_json::from_value::<synapse_core::types::TimelineRecord>(merged)
+            {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    format!(
+                        "storage_put_probe_rows key_mode=timeline_ts value_json is not a valid TimelineRecord: {error}"
+                    ),
+                ));
+            }
+        }
+        Some(other) => {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "storage_put_probe_rows key_mode must be \"prefix_index\" or \"timeline_ts\"; got {other:?}"
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -510,9 +563,20 @@ fn probe_writable_cf(raw: &str) -> Result<&'static str, ErrorData> {
 
 fn build_probe_rows(params: &StoragePutProbeRowsParams) -> Vec<(Vec<u8>, Vec<u8>)> {
     let prefix = params.key_prefix.trim();
+    let timeline_keys = params.key_mode.as_deref().map(str::trim) == Some("timeline_ts");
     (0..params.rows)
         .map(|index| {
-            let key = format!("{prefix}:{index:020}").into_bytes();
+            let key = if timeline_keys {
+                let ts_ns = params.ts_ns_start.unwrap_or_default().saturating_add(
+                    params
+                        .ts_ns_step
+                        .unwrap_or_default()
+                        .saturating_mul(u64::from(index)),
+                );
+                synapse_storage::timeline::timeline_key(ts_ns, index)
+            } else {
+                format!("{prefix}:{index:020}").into_bytes()
+            };
             let value = probe_value(params, prefix, index);
             (key, value)
         })
@@ -521,9 +585,30 @@ fn build_probe_rows(params: &StoragePutProbeRowsParams) -> Vec<(Vec<u8>, Vec<u8>
 
 fn probe_value(params: &StoragePutProbeRowsParams, prefix: &str, index: u32) -> Vec<u8> {
     if let Some(template) = &params.value_json {
+        if params.key_mode.as_deref().map(str::trim) == Some("timeline_ts") {
+            let ts_ns = params.ts_ns_start.unwrap_or_default().saturating_add(
+                params
+                    .ts_ns_step
+                    .unwrap_or_default()
+                    .saturating_mul(u64::from(index)),
+            );
+            let merged = timeline_record_value(template, ts_ns);
+            return synapse_storage::encode_json(&merged)
+                .unwrap_or_else(|_error| byte_probe_value(prefix, index, 0));
+        }
         return json_probe_value(params, template, prefix, index);
     }
     byte_probe_value(prefix, index, params.value_bytes as usize)
+}
+
+/// Merges the per-row timestamp into a `TimelineRecord` template without the
+/// generic probe diagnostics (the envelope rejects unknown fields).
+fn timeline_record_value(template: &Value, ts_ns: u64) -> Value {
+    let mut value = template.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("ts_ns".to_owned(), Value::from(ts_ns));
+    }
+    value
 }
 
 fn byte_probe_value(prefix: &str, index: u32, len: usize) -> Vec<u8> {

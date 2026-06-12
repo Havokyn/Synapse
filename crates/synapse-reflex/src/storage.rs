@@ -111,6 +111,22 @@ impl ReflexRuntime {
         Ok(rows)
     }
 
+    /// Returns up to `max_rows` rows starting at `start_key` (inclusive) and
+    /// whether more rows remain, without materializing the whole column family.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the column family cannot be scanned.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", cf_name, start_key_len = start_key.len(), max_rows))]
+    pub fn storage_cf_rows_from(
+        &self,
+        cf_name: &str,
+        start_key: &[u8],
+        max_rows: usize,
+    ) -> StorageResult<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+        self.db.scan_cf_from(cf_name, start_key, max_rows)
+    }
+
     /// Writes a bounded diagnostic batch to storage and flushes it immediately.
     ///
     /// # Errors
