@@ -67,6 +67,7 @@ const ACT_TYPE_TEXT_SOURCE_CDP_ACTIVE: &str = "cdp_active_element_value";
 const ACT_TYPE_TEXT_SOURCE_OCR_FOCUSED_RECT: &str = "ocr_focused_rect_text";
 const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_HOLD_MS: u32 = 120;
 const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_DURATION_MS: u32 = 50;
+const ACT_TYPE_VERIFY_POLL_INTERVAL_MS: u64 = 50;
 const BACKGROUND_FOREGROUND_SOURCE_OF_TRUTH: &str = "os_foreground_window";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2453,14 +2454,68 @@ impl SynapseService {
         emitted: &str,
         browser_url_policy: Option<&ActTypeBrowserUrlPolicy>,
     ) -> Result<ActTypeResponse, ErrorData> {
-        tokio::time::sleep(Duration::from_millis(u64::from(verify_timeout_ms))).await;
-        let after = self
-            .capture_act_type_text_signature(
-                160,
-                browser_url_policy.is_none(),
-                browser_url_policy.is_some(),
-            )
-            .await?;
+        let started = Instant::now();
+        let timeout = Duration::from_millis(u64::from(verify_timeout_ms));
+        let poll_interval = Duration::from_millis(ACT_TYPE_VERIFY_POLL_INTERVAL_MS);
+        let mut last_error: Option<ErrorData> = None;
+
+        loop {
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            tokio::time::sleep(std::cmp::min(poll_interval, timeout - elapsed)).await;
+
+            let after = self
+                .capture_act_type_text_signature(160, false, browser_url_policy.is_some())
+                .await?;
+            let before_hash = verify_hash_json(&before.signature)?;
+            let after_hash = verify_hash_json(&after.signature)?;
+            let result = if let Some(policy) = browser_url_policy {
+                verify_act_type_browser_url_response(
+                    response.clone(),
+                    before.clone(),
+                    after,
+                    before_hash,
+                    after_hash,
+                    verify_timeout_ms,
+                    policy,
+                )
+            } else {
+                let terminal_failure = act_type_text_terminal_failure(&before, &after);
+                let result = verify_act_type_text_response(
+                    response.clone(),
+                    before.clone(),
+                    after,
+                    before_hash,
+                    after_hash,
+                    verify_timeout_ms,
+                    emitted,
+                );
+                if terminal_failure && result.is_err() {
+                    return result;
+                }
+                result
+            };
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    last_error = Some(error);
+                    if started.elapsed() >= timeout {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let after = match self
+            .capture_act_type_text_signature(160, false, browser_url_policy.is_some())
+            .await
+        {
+            Ok(after) => after,
+            Err(error) => return Err(last_error.unwrap_or(error)),
+        };
         let before_hash = verify_hash_json(&before.signature)?;
         let after_hash = verify_hash_json(&after.signature)?;
         if let Some(policy) = browser_url_policy {
@@ -4031,6 +4086,14 @@ fn act_type_foreground_identity_changed(
     before.foreground_hwnd != after.foreground_hwnd
         || before.foreground_pid != after.foreground_pid
         || before.foreground_process != after.foreground_process
+}
+
+fn act_type_text_terminal_failure(
+    before: &ActTypeTextReadback,
+    after: &ActTypeTextReadback,
+) -> bool {
+    act_type_foreground_identity_changed(&before.signature, &after.signature)
+        || act_type_text_target_changed(&before.signature, &after.signature)
 }
 
 fn verify_act_type_browser_url_response(
@@ -6110,6 +6173,39 @@ mod tests {
             data.get("code").and_then(Value::as_str),
             Some(error_codes::ACTION_NO_OBSERVED_DELTA)
         );
+    }
+
+    #[test]
+    fn act_type_verify_polling_keeps_target_switch_terminal() {
+        let before = act_type_text_readback_with_source(
+            None,
+            Some("title-field"),
+            Some("draft"),
+            Some(ACT_TYPE_TEXT_SOURCE_UIA_VALUE),
+        );
+        let after_same_target = act_type_text_readback_with_source(
+            None,
+            Some("title-field"),
+            Some("draft issue880"),
+            Some(ACT_TYPE_TEXT_SOURCE_UIA_VALUE),
+        );
+        let after_switched_target = act_type_text_readback_with_source(
+            None,
+            Some("description-field"),
+            Some("draft issue880"),
+            Some(ACT_TYPE_TEXT_SOURCE_UIA_VALUE),
+        );
+
+        println!(
+            "readback=act_type_verify_polling same_target_terminal={} switched_target_terminal={}",
+            act_type_text_terminal_failure(&before, &after_same_target),
+            act_type_text_terminal_failure(&before, &after_switched_target)
+        );
+        assert!(!act_type_text_terminal_failure(&before, &after_same_target));
+        assert!(act_type_text_terminal_failure(
+            &before,
+            &after_switched_target
+        ));
     }
 
     #[test]

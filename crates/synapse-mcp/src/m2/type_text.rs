@@ -14,9 +14,8 @@ use synapse_core::{
 
 use crate::m1::mcp_error;
 use crate::m2::postcondition::{
-    ActPostcondition, default_verify_timeout_ms, no_observed_delta_error,
-    postcondition_failed_error, postcondition_not_requested, postcondition_observed_delta,
-    text_signature,
+    ActPostcondition, no_observed_delta_error, postcondition_failed_error,
+    postcondition_not_requested, postcondition_observed_delta, text_signature,
 };
 
 const MIN_SAFE_LINEAR_MS_PER_CHAR: u32 = 20;
@@ -26,6 +25,7 @@ const TYPE_TIER_WIN32_MESSAGE: &str = "win32_message";
 const TYPE_TIER_FOREGROUND: &str = "foreground";
 const MIN_VERIFY_TIMEOUT_MS: u32 = 50;
 const MAX_VERIFY_TIMEOUT_MS: u32 = 5000;
+const DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS: u32 = 2000;
 const TEXT_INTEGRITY_DISPATCH_ONLY: &str = "dispatch_only_requires_target_readback";
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN: &str = "uia_value_pattern_readback";
 const TEXT_INTEGRITY_UIA_PASSWORD_LENGTH: &str = "uia_value_pattern_password_length_readback";
@@ -78,8 +78,11 @@ pub struct ActTypeParams {
         description = "When set on foreground typing with verify_delta=true, verify the after-read Chromium CDP target URL against this regex. Intended for address-bar navigation where focus may move from the address field to the document; CDP URL readback is required and missing/unreachable CDP fails closed before input."
     )]
     pub expected_browser_url_regex: Option<String>,
-    #[serde(default = "default_verify_timeout_ms")]
-    #[schemars(default = "default_verify_timeout_ms", range(min = 50, max = 5000))]
+    #[serde(default = "default_act_type_verify_timeout_ms")]
+    #[schemars(
+        default = "default_act_type_verify_timeout_ms",
+        range(min = 50, max = 5000)
+    )]
     pub verify_timeout_ms: u32,
 }
 
@@ -1175,6 +1178,10 @@ const fn default_verify_delta() -> bool {
     true
 }
 
+const fn default_act_type_verify_timeout_ms() -> u32 {
+    DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS
+}
+
 const fn default_use_scancodes() -> bool {
     false
 }
@@ -1190,18 +1197,21 @@ mod tests {
     use synapse_action::{ActionEmitter, RecordedInput, sample_typing_schedule};
     use synapse_core::{ElementId, KeystrokeNaturalParams, Rect, UiaPattern};
 
+    use crate::m2::default_verify_timeout_ms;
+
     use super::{
-        ActTypeParams, METHOD_NATIVE_TEXT_MESSAGE, MIN_SAFE_LINEAR_MS_PER_CHAR,
-        SOURCE_NATIVE_PASSWORD_LENGTH, SOURCE_NATIVE_TEXT, SOURCE_UIA_PASSWORD_LENGTH,
-        SOURCE_UIA_VALUE, TEXT_INTEGRITY_DISPATCH_ONLY, TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH,
-        TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE, TYPE_TIER_FOREGROUND, TYPE_TIER_WIN32_MESSAGE,
-        TypeBackend, TypeDynamics, act_type_with_handle, action_from_type_params,
-        chromium_uia_value_pattern_refused_error, chromium_uia_value_pattern_should_be_refused,
+        ActTypeParams, DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS, METHOD_NATIVE_TEXT_MESSAGE,
+        MIN_SAFE_LINEAR_MS_PER_CHAR, SOURCE_NATIVE_PASSWORD_LENGTH, SOURCE_NATIVE_TEXT,
+        SOURCE_UIA_PASSWORD_LENGTH, SOURCE_UIA_VALUE, TEXT_INTEGRITY_DISPATCH_ONLY,
+        TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH, TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE,
+        TYPE_TIER_FOREGROUND, TYPE_TIER_WIN32_MESSAGE, TypeBackend, TypeDynamics,
+        act_type_with_handle, action_from_type_params, chromium_uia_value_pattern_refused_error,
+        chromium_uia_value_pattern_should_be_refused, default_act_type_verify_timeout_ms,
         default_linear_ms_per_char, default_press_enter_after, default_type_backend,
-        default_type_dynamics, default_use_scancodes, default_verify_delta,
-        default_verify_timeout_ms, recorded_ikis, set_backend_tier,
-        set_readback_from_separate_reads, set_source_of_truth, set_text_integrity,
-        uia_readback_matches_emitted, validate_type_params, verify_uia_type_delta,
+        default_type_dynamics, default_use_scancodes, default_verify_delta, recorded_ikis,
+        set_backend_tier, set_readback_from_separate_reads, set_source_of_truth,
+        set_text_integrity, uia_readback_matches_emitted, validate_type_params,
+        verify_uia_type_delta,
     };
 
     fn metadata(role: &str, patterns: Vec<UiaPattern>) -> synapse_a11y::ElementMetadataReadback {
@@ -1354,8 +1364,28 @@ mod tests {
         assert_eq!(default_linear_ms_per_char(), 30);
         assert_eq!(default_type_backend(), TypeBackend::Auto);
         assert!(default_verify_delta());
+        assert_eq!(
+            default_act_type_verify_timeout_ms(),
+            DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS
+        );
         assert!(!default_use_scancodes());
         assert!(!default_press_enter_after());
+    }
+
+    #[test]
+    fn act_type_params_default_verify_timeout_allows_web_field_settle_time() {
+        let params: ActTypeParams = serde_json::from_value(serde_json::json!({
+            "text": "issue880-default-timeout",
+            "dynamics": "burst",
+            "backend": "auto"
+        }))
+        .expect("minimal act_type params should deserialize");
+
+        println!(
+            "readback=act_type_defaults field=verify_timeout_ms actual={} expected={DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS}",
+            params.verify_timeout_ms
+        );
+        assert_eq!(params.verify_timeout_ms, DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS);
     }
 
     #[test]
