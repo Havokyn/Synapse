@@ -171,6 +171,7 @@ mod m1_tools;
 mod m2_tools;
 mod m3_tools;
 mod m4_tools;
+mod notify_tools;
 mod reality;
 mod schema_sanitize;
 pub(crate) mod session_continuity;
@@ -498,7 +499,8 @@ impl SynapseService {
             + Self::target_claim_tool_router()
             + Self::reality_tool_router()
             + Self::m3_tool_router()
-            + Self::m4_tool_router();
+            + Self::m4_tool_router()
+            + Self::notify_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface
         // unless the operator opts in (SYNAPSE_ENABLE_EVERQUEST). No capability
         // is lost — visibility is gated. rmcp builds the tool list once per

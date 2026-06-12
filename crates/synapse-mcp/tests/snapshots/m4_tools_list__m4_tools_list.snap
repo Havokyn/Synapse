@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 110,
+  "count": 119,
   "m4_defaults": [
     {
       "actual": 33,
@@ -148,6 +148,26 @@ expression: snapshot
       "tool": "act_launch"
     },
     {
+      "actual_contains": "title",
+      "path": "inputSchema.required",
+      "tool": "notify_human"
+    },
+    {
+      "actual_contains": "body",
+      "path": "inputSchema.required",
+      "tool": "notify_human"
+    },
+    {
+      "actual_contains": "kind",
+      "path": "inputSchema.required",
+      "tool": "notify_human"
+    },
+    {
+      "actual": false,
+      "path": "inputSchema.properties.suppress_popup.default",
+      "tool": "notify_human"
+    },
+    {
       "actual": "everquest.live",
       "path": "inputSchema.properties.profile_id.default",
       "tool": "everquest_world_summary"
@@ -202,6 +222,7 @@ expression: snapshot
     "act_run_shell_start",
     "act_run_shell_status",
     "act_scroll",
+    "act_set_field_text",
     "act_set_value",
     "act_spawn_agent",
     "act_stroke",
@@ -253,6 +274,10 @@ expression: snapshot
     "get_target",
     "health",
     "hidden_desktop_pip_frame",
+    "hygiene_flags",
+    "hygiene_scan_storage",
+    "hygiene_scan_text",
+    "notify_human",
     "observe",
     "observe_delta",
     "profile_activate",
@@ -294,6 +319,10 @@ expression: snapshot
     "target_claim_adopt",
     "target_claim_status",
     "target_release",
+    "timeline_exclusions",
+    "timeline_pause",
+    "timeline_purge",
+    "timeline_resume",
     "timeline_search",
     "workspace_get",
     "workspace_list",

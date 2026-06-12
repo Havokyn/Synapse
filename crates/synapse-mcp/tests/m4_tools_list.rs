@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 114] = [
+const EXPECTED_TOOLS: [&str; 119] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -73,6 +73,7 @@ const EXPECTED_TOOLS: [&str; 114] = [
     "hygiene_flags",
     "hygiene_scan_storage",
     "hygiene_scan_text",
+    "notify_human",
     "observe",
     "observe_delta",
     "profile_activate",
@@ -114,6 +115,10 @@ const EXPECTED_TOOLS: [&str; 114] = [
     "target_claim_adopt",
     "target_claim_status",
     "target_release",
+    "timeline_exclusions",
+    "timeline_pause",
+    "timeline_purge",
+    "timeline_resume",
     "timeline_search",
     "workspace_get",
     "workspace_list",
@@ -475,6 +480,16 @@ fn m4_default_readbacks(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
     read_required(&mut readbacks, tools, "act_run_shell_status", "job_id")?;
     read_required(&mut readbacks, tools, "act_run_shell_cancel", "job_id")?;
     read_required(&mut readbacks, tools, "act_launch", "target")?;
+    read_required(&mut readbacks, tools, "notify_human", "title")?;
+    read_required(&mut readbacks, tools, "notify_human", "body")?;
+    read_required(&mut readbacks, tools, "notify_human", "kind")?;
+    read_default(
+        &mut readbacks,
+        tools,
+        "notify_human",
+        "inputSchema.properties.suppress_popup.default",
+        &json!(false),
+    )?;
     read_default(
         &mut readbacks,
         tools,

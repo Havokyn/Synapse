@@ -79,6 +79,9 @@ windows = { version = "0.62.2", features = [
     "Graphics_Imaging",
     "Media_Ocr",
     "Storage_Streams",
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    "Foundation_Collections",
 ] }
 windows-capture = "2.0.0"
 uiautomation = { version = "0.25.0", features = ["pattern", "control", "event"] }
