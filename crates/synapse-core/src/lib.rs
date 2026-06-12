@@ -3,6 +3,7 @@ pub mod episodes;
 pub mod error_codes;
 pub mod filter;
 pub mod retention;
+pub mod routines;
 pub mod types;
 
 pub use defaults::{DEFAULT_AIM_TRACK_EMA_ALPHA, SCHEMA_VERSION};

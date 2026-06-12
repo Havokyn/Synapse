@@ -71,18 +71,18 @@ fn structured(response: &Value) -> anyhow::Result<&Value> {
         .with_context(|| format!("structuredContent missing from response: {response}"))
 }
 
-fn unique_marker() -> String {
+fn unique_marker() -> anyhow::Result<String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before unix epoch")
+        .context("system clock before unix epoch")?
         .as_nanos();
-    format!("fsv-{nanos}-{}", std::process::id())
+    Ok(format!("fsv-{nanos}-{}", std::process::id()))
 }
 
 #[tokio::test]
 async fn notify_human_delivers_dedupes_and_redelivers_after_dismissal() -> anyhow::Result<()> {
     let mut client = StdioMcpClient::launch_and_init().await?;
-    let marker = unique_marker();
+    let marker = unique_marker()?;
 
     // Happy path: synthetic input with a known dedupe_key.
     let response = client
@@ -198,7 +198,7 @@ async fn notify_human_delivers_dedupes_and_redelivers_after_dismissal() -> anyho
 #[tokio::test]
 async fn notify_human_without_dedupe_key_uses_unique_tags() -> anyhow::Result<()> {
     let mut client = StdioMcpClient::launch_and_init().await?;
-    let marker = unique_marker();
+    let marker = unique_marker()?;
     let mut tags = Vec::new();
     for index in 0..2 {
         let response = client

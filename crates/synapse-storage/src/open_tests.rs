@@ -42,11 +42,14 @@ fn opens_database_created_with_pre_timeline_layout() -> Result<(), Box<dyn Error
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
 
-    // Recreate the historical 11-CF layout (no CF_TIMELINE, and therefore no
-    // CF_EPISODES either) exactly as a pre-ADR binary would have left it.
+    // Recreate the historical 11-CF layout (no CF_TIMELINE, and therefore
+    // none of its derived CFs either) exactly as a pre-ADR binary would
+    // have left it.
     let legacy_cfs: Vec<&str> = cf::ALL_COLUMN_FAMILIES
         .into_iter()
-        .filter(|name| *name != cf::CF_TIMELINE && *name != cf::CF_EPISODES)
+        .filter(|name| {
+            *name != cf::CF_TIMELINE && *name != cf::CF_EPISODES && *name != cf::CF_ROUTINES
+        })
         .collect();
     {
         let mut options = Options::default();
@@ -100,11 +103,11 @@ fn opens_database_created_with_pre_episodes_layout() -> Result<(), Box<dyn Error
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
 
-    // Recreate the 12-CF layout (everything except CF_EPISODES) exactly as a
-    // pre-#846 binary would have left it on disk.
+    // Recreate the 12-CF layout (no CF_EPISODES, and therefore no
+    // CF_ROUTINES) exactly as a pre-#846 binary would have left it on disk.
     let legacy_cfs: Vec<&str> = cf::ALL_COLUMN_FAMILIES
         .into_iter()
-        .filter(|name| *name != cf::CF_EPISODES)
+        .filter(|name| *name != cf::CF_EPISODES && *name != cf::CF_ROUTINES)
         .collect();
     {
         let mut options = Options::default();
@@ -150,6 +153,125 @@ fn opens_database_created_with_pre_episodes_layout() -> Result<(), Box<dyn Error
     assert_eq!(preserved.as_deref(), Some(DURABILITY_VALUE));
     assert_eq!(episode_rows.len(), 1);
     assert!(after.contains(&cf::CF_EPISODES.to_owned()));
+    Ok(())
+}
+
+#[test]
+fn opens_database_created_with_pre_routines_layout() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("db");
+
+    // Recreate the 13-CF layout (everything except CF_ROUTINES) exactly as
+    // a pre-#848 binary would have left it on disk.
+    let legacy_cfs: Vec<&str> = cf::ALL_COLUMN_FAMILIES
+        .into_iter()
+        .filter(|name| *name != cf::CF_ROUTINES)
+        .collect();
+    {
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let legacy = DB::open_cf(&options, &path, &legacy_cfs)?;
+        legacy.put(SCHEMA_VERSION_KEY, TEST_SCHEMA_VERSION.to_be_bytes())?;
+        let episodes = legacy
+            .cf_handle(cf::CF_EPISODES)
+            .ok_or("legacy CF_EPISODES handle missing")?;
+        legacy.put_cf(&episodes, DURABILITY_KEY, DURABILITY_VALUE)?;
+        legacy.flush_cf(&episodes)?;
+    }
+    let before = sorted_list_cf(&path)?;
+    println!(
+        "regression_state=db.list_cf edge=pre_routines before={before:?} before_count={}",
+        before.len()
+    );
+    assert!(
+        !before.contains(&cf::CF_ROUTINES.to_owned()),
+        "precondition: legacy layout must not contain CF_ROUTINES"
+    );
+
+    let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
+    let handles = existing_prd_handles(&db);
+    let preserved = db
+        .inner
+        .cf_handle(cf::CF_EPISODES)
+        .and_then(|handle| db.inner.get_cf(&handle, DURABILITY_KEY).transpose())
+        .transpose()?;
+    db.put_batch(
+        cf::CF_ROUTINES,
+        vec![(b"rt1-0123456789abcdef".to_vec(), b"{}".to_vec())],
+    )?;
+    db.flush()?;
+    let routine_rows = db.scan_cf(cf::CF_ROUTINES)?;
+    drop(db);
+
+    let after = sorted_list_cf(&path)?;
+    println!(
+        "regression_state=db.list_cf edge=pre_routines after={after:?} preserved={:?} routine_rows={} observed=additive_open:ok",
+        preserved.as_deref(),
+        routine_rows.len()
+    );
+    assert_eq!(handles, sorted_prd_cfs());
+    assert_eq!(preserved.as_deref(), Some(DURABILITY_VALUE));
+    assert_eq!(routine_rows.len(), 1);
+    assert!(after.contains(&cf::CF_ROUTINES.to_owned()));
+    Ok(())
+}
+
+#[test]
+fn opens_database_holding_a_future_unknown_cf() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("db");
+
+    // A newer binary created the database, added a CF this binary does not
+    // know, and wrote rows into it (the 2026-06-12 rollback incident shape:
+    // a pre-CF_ROUTINES daemon died at startup on a post-CF_ROUTINES DB).
+    {
+        let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
+        db.put_batch(
+            cf::CF_EVENTS,
+            vec![(DURABILITY_KEY.to_vec(), DURABILITY_VALUE.to_vec())],
+        )?;
+        db.flush()?;
+    }
+    {
+        let mut options = Options::default();
+        options.create_if_missing(false);
+        options.create_missing_column_families(true);
+        let mut all: Vec<&str> = cf::ALL_COLUMN_FAMILIES.to_vec();
+        all.push("CF_FROM_THE_FUTURE");
+        let future = DB::open_cf(&options, &path, &all)?;
+        let handle = future
+            .cf_handle("CF_FROM_THE_FUTURE")
+            .ok_or("future CF handle missing")?;
+        future.put_cf(&handle, b"future-key", b"future-value")?;
+        future.flush_cf(&handle)?;
+    }
+    let before = sorted_list_cf(&path)?;
+    println!("regression_state=db.list_cf edge=future_cf before={before:?}");
+    assert!(before.contains(&"CF_FROM_THE_FUTURE".to_owned()));
+
+    // This binary must open the database anyway, preserve both its own rows
+    // and the unknown CF's rows, and leave the unknown CF physically intact.
+    let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
+    let preserved = db
+        .inner
+        .cf_handle(cf::CF_EVENTS)
+        .and_then(|handle| db.inner.get_cf(&handle, DURABILITY_KEY).transpose())
+        .transpose()?;
+    let future_value = db
+        .inner
+        .cf_handle("CF_FROM_THE_FUTURE")
+        .and_then(|handle| db.inner.get_cf(&handle, b"future-key").transpose())
+        .transpose()?;
+    assert_eq!(preserved.as_deref(), Some(DURABILITY_VALUE));
+    assert_eq!(future_value.as_deref(), Some(b"future-value".as_slice()));
+    drop(db);
+
+    let after = sorted_list_cf(&path)?;
+    println!(
+        "regression_state=db.list_cf edge=future_cf after={after:?} observed=tolerant_open:ok"
+    );
+    assert!(after.contains(&"CF_FROM_THE_FUTURE".to_owned()));
     Ok(())
 }
 

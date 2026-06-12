@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 122,
+  "count": 123,
   "m4_defaults": [
     {
       "actual": 33,
@@ -306,6 +306,7 @@ expression: snapshot
     "reflex_register",
     "release_all",
     "replay_record",
+    "routine_mine",
     "session_end",
     "session_list",
     "session_status",

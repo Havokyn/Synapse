@@ -2165,6 +2165,22 @@ if (-not $SkipBuild) {
 # ---------------------------------------------------------------------------
 if (-not $SkipBuild) {
     Step "Building synapse-mcp (release) from $SourceDir"
+    if (-not $PSBoundParameters.ContainsKey('CargoTarget')) {
+        # Key the persistent target by the source checkout so two checkouts
+        # can never share (and poison) one fingerprint database. Cargo
+        # freshness is mtime-based against the dep-info file list: a build
+        # from checkout A marks its units fresh for checkout A's files, and
+        # a later build from checkout B silently reuses crates whose sources
+        # differ (observed live 2026-06-12: a synapse-core compiled from a
+        # sibling clone shadowed new modules and broke the deploy build).
+        $resolvedSource = (Resolve-Path $SourceDir).Path.TrimEnd('\')
+        $sourceBytes = [System.Text.Encoding]::UTF8.GetBytes($resolvedSource.ToLowerInvariant())
+        $sourceHash = ([System.Security.Cryptography.SHA1]::Create().ComputeHash($sourceBytes) |
+            ForEach-Object { $_.ToString('x2') }) -join ''
+        $sourceLeaf = (Split-Path $resolvedSource -Leaf) -replace '[^A-Za-z0-9._-]', '_'
+        $CargoTarget = Join-Path $CargoTarget "$sourceLeaf-$($sourceHash.Substring(0,12))"
+        Info "Per-checkout build target: $CargoTarget (source: $resolvedSource)"
+    }
     New-Item -ItemType Directory -Force -Path $CargoTarget, $LogDir | Out-Null
     $env:CARGO_TARGET_DIR = $CargoTarget
     if (-not $env:CARGO_BUILD_JOBS) {

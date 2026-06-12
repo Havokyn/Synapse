@@ -17,7 +17,7 @@ pub enum RetentionTtl {
 }
 
 /// PRD §4/§6 storage retention defaults.
-pub const DEFAULTS: [RetentionDefault; 13] = [
+pub const DEFAULTS: [RetentionDefault; 14] = [
     RetentionDefault {
         cf: "CF_EVENTS",
         ttl: RetentionTtl::Hours(24),
@@ -101,5 +101,14 @@ pub const DEFAULTS: [RetentionDefault; 13] = [
         ttl: RetentionTtl::Days(90),
         soft_cap_mb: 256,
         hard_cap_mb: 512,
+    },
+    // Derived routines (#848): a few hundred small rows replaced wholesale
+    // on every mining run; the mining window (episode retention) bounds the
+    // content, so no TTL — stale rows cannot outlive a re-mine.
+    RetentionDefault {
+        cf: "CF_ROUTINES",
+        ttl: RetentionTtl::None,
+        soft_cap_mb: 16,
+        hard_cap_mb: 64,
     },
 ];

@@ -6,6 +6,7 @@ pub mod episodes;
 pub mod error;
 mod gc;
 mod pressure;
+pub mod routines;
 pub mod timeline;
 
 use std::collections::BTreeMap;
@@ -60,6 +61,15 @@ impl fmt::Debug for Db {
 impl Db {
     /// Opens the `RocksDB` storage at `path`.
     ///
+    /// `RocksDB` refuses to open a database without naming every column
+    /// family that physically exists, so a binary older than the newest CF
+    /// would brick the daemon after any rollback (observed live 2026-06-12:
+    /// a pre-`CF_ROUTINES` binary died at startup with `Column families not
+    /// opened: CF_ROUTINES`). Unknown on-disk CFs are therefore opened with
+    /// default options and a loud structured warning: their rows are
+    /// preserved untouched for the newer binary that owns them, and the
+    /// schema-version sentinel still rejects genuinely incompatible layouts.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError::OpenFailed`] when `RocksDB` cannot open or
@@ -68,9 +78,33 @@ impl Db {
     #[tracing::instrument(skip_all, fields(storage_path = %path.display(), schema_version))]
     pub fn open(path: &Path, schema_version: u32) -> StorageResult<Self> {
         let options = db_options();
+        // An error here means the database does not exist yet (fresh open);
+        // create_missing_column_families covers that path.
+        let existing_cfs = DB::list_cf(&Options::default(), path).unwrap_or_default();
+        let unknown_cfs: Vec<String> = existing_cfs
+            .into_iter()
+            .filter(|name| {
+                name != rocksdb::DEFAULT_COLUMN_FAMILY_NAME
+                    && !cf::ALL_COLUMN_FAMILIES.contains(&name.as_str())
+            })
+            .collect();
+        for name in &unknown_cfs {
+            tracing::warn!(
+                code = "STORAGE_UNKNOWN_CF_OPENED",
+                cf_name = %name,
+                "database holds a column family this binary does not know; \
+                 opening it untouched with default options (newer-binary data, \
+                 preserved for rollback safety)"
+            );
+        }
         let descriptors = cf::ALL_COLUMN_FAMILIES
             .into_iter()
-            .map(|name| ColumnFamilyDescriptor::new(name, cf_options(name)));
+            .map(|name| ColumnFamilyDescriptor::new(name, cf_options(name)))
+            .chain(
+                unknown_cfs
+                    .iter()
+                    .map(|name| ColumnFamilyDescriptor::new(name, Options::default())),
+            );
         let inner = DB::open_cf_descriptors(&options, path, descriptors)
             .map_err(|source| open_failed(path, &source))?;
         verify_schema_version(&inner, path, schema_version)?;

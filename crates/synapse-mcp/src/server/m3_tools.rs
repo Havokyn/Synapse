@@ -16,23 +16,25 @@ use super::{
     ProfileRegistryQueryParams, ProfileRegistryQueryResponse, ProfileRegistryRollbackParams,
     ProfileRegistryRollbackResponse, ReflexCancelParams, ReflexCancelResponse, ReflexHistoryParams,
     ReflexHistoryResponse, ReflexListParams, ReflexListResponse, ReflexRegisterParams,
-    ReflexRegisterResponse, ReplayRecordParams, ReplayRecordResponse, StorageGcOnceParams,
-    StorageGcOnceResponse, StorageInspectParams, StorageInspectResponse,
-    StoragePressureSampleParams, StoragePressureSampleResponse, StoragePutProbeRowsParams,
-    StoragePutProbeRowsResponse, SubscribeCancelParams, SubscribeCancelResponse, SubscribeParams,
-    SubscribeResponse, SynapseService, TimelineExclusionsParams, TimelineExclusionsResponse,
-    TimelinePauseParams, TimelinePauseResponse, TimelinePurgeParams, TimelinePurgeResponse,
-    TimelineResumeParams, TimelineResumeResponse, TimelineSearchParams, TimelineSearchResponse,
+    ReflexRegisterResponse, ReplayRecordParams, ReplayRecordResponse, RoutineMineParams,
+    RoutineMineResponse, StorageGcOnceParams, StorageGcOnceResponse, StorageInspectParams,
+    StorageInspectResponse, StoragePressureSampleParams, StoragePressureSampleResponse,
+    StoragePutProbeRowsParams, StoragePutProbeRowsResponse, SubscribeCancelParams,
+    SubscribeCancelResponse, SubscribeParams, SubscribeResponse, SynapseService,
+    TimelineExclusionsParams, TimelineExclusionsResponse, TimelinePauseParams,
+    TimelinePauseResponse, TimelinePurgeParams, TimelinePurgeResponse, TimelineResumeParams,
+    TimelineResumeResponse, TimelineSearchParams, TimelineSearchResponse,
     apply_storage_pressure_sample, cancel_reflex, cancel_subscription,
     decide_profile_authoring_candidate, disable_registry_profile, export_audit_bundle,
     export_profile_authoring_candidate, export_registry, generate_profile_authoring_candidate,
     get_episode, history_reflexes, import_registry, inspect_profile_authoring_candidate,
     inspect_storage, install_registry_package, list_episodes, list_profile_authoring_candidates,
-    list_profiles, list_reflexes, pause_timeline, purge_timeline, put_probe_rows,
-    query_audit_intelligence, query_flags, query_registry, record_replay, refresh_profile_quality,
-    register_reflex, resume_timeline, rollback_registry_profile, run_storage_gc_once, scan_storage,
-    scan_text_tool, search_timeline, segment_episodes, subscribe_to_events, tail_audio, tool,
-    tool_router, transcribe_audio, update_timeline_exclusions,
+    list_profiles, list_reflexes, mine_and_store_routines, pause_timeline, purge_timeline,
+    put_probe_rows, query_audit_intelligence, query_flags, query_registry, record_replay,
+    refresh_profile_quality, register_reflex, resume_timeline, rollback_registry_profile,
+    run_storage_gc_once, scan_storage, scan_text_tool, search_timeline, segment_episodes,
+    subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio,
+    update_timeline_exclusions,
 };
 use rmcp::{RoleServer, service::RequestContext};
 
@@ -852,6 +854,42 @@ impl SynapseService {
         )?;
         let runtime = self.reflex_runtime()?;
         get_episode(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(
+        description = "Mine recurring routines from derived episodes (CF_EPISODES) into CF_ROUTINES: frequent episode-identity sequences with temporally regular schedules (circular time-of-day clustering, day-of-week classification) and honest Wilson-lower-bound confidence. Deterministic and re-runnable; each run replaces the routine store atomically. Run episode_segment first to materialize episodes"
+    )]
+    pub async fn routine_mine(
+        &self,
+        params: Parameters<RoutineMineParams>,
+    ) -> Result<Json<RoutineMineResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "routine_mine",
+            start_ts_ns = params.0.start_ts_ns,
+            end_ts_ns = params.0.end_ts_ns,
+            min_support_days = params.0.min_support_days,
+            max_pattern_len = params.0.max_pattern_len,
+            include_agent_activity = params.0.include_agent_activity,
+            dry_run = params.0.dry_run,
+            "tool.invocation kind=routine_mine"
+        );
+        self.require_m3_permissions(
+            "routine_mine",
+            &crate::m3::routines::required_permissions(&params.0),
+        )?;
+        let db = {
+            let mut state = self.m3_state.lock().map_err(|_err| {
+                super::mcp_error(
+                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned",
+                )
+            })?;
+            state
+                .ensure_storage()
+                .map_err(|error| super::mcp_error(error.code(), error.to_string()))?
+        };
+        mine_and_store_routines(&db, &params.0).map(Json)
     }
 
     #[tool(description = "Write bounded synthetic probe rows to a storage column family")]

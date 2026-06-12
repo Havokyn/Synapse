@@ -111,6 +111,7 @@ fn m3_tool_stub_names_are_stable() {
         "episode_segment",
         "episode_list",
         "episode_get",
+        "routine_mine",
         "timeline_pause",
         "timeline_resume",
         "timeline_exclusions",

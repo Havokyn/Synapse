@@ -346,6 +346,7 @@ fn permits_write_at(level: DiskPressureLevel, cf_name: &str) -> bool {
                 | cf::CF_PROCESS_HISTORY
                 | cf::CF_TIMELINE
                 | cf::CF_EPISODES
+                | cf::CF_ROUTINES
         ),
         DiskPressureLevel::Level4 => matches!(cf_name, cf::CF_REFLEX_AUDIT | cf::CF_SESSIONS),
     }

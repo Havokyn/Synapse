@@ -13,6 +13,8 @@ pub mod profile_quality;
 pub mod profile_registry;
 pub mod reflex;
 pub mod replay;
+pub mod routine_miner_job;
+pub mod routines;
 pub mod storage;
 pub mod subscribe;
 #[cfg(test)]
@@ -553,7 +555,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 40] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 41] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -592,6 +594,7 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 40] {
         episodes::episode_segment(),
         episodes::episode_list(),
         episodes::episode_get(),
+        routines::routine_mine(),
         timeline_control::timeline_pause(),
         timeline_control::timeline_resume(),
         timeline_control::timeline_exclusions(),

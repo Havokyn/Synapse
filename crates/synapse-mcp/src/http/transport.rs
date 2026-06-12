@@ -264,6 +264,15 @@ pub(super) async fn serve(
         );
     }
 
+    // Periodic routine miner (#848): keeps CF_ROUTINES tracking the episode
+    // store without manual routine_mine calls. A misconfigured schedule is a
+    // startup failure, not a silently substituted default.
+    let _routine_miner_task = crate::m3::routine_miner_job::spawn_periodic_miner(
+        service.m3_state_handle(),
+        shutdown_cancel.clone(),
+    )
+    .context("spawn periodic routine miner")?;
+
     let _operator_hotkey_guard = crate::safety::install_operator_hotkey(service.m3_state_handle())
         .context("install operator panic hotkey")?;
     let m2_emitter_done = service.m2_emitter_done_receiver();

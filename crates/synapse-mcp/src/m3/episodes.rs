@@ -137,13 +137,13 @@ fn lock_runtime(
     })
 }
 
-fn key_after(key: &[u8]) -> Vec<u8> {
+pub(crate) fn key_after(key: &[u8]) -> Vec<u8> {
     let mut next = key.to_vec();
     next.push(0);
     next
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
@@ -158,7 +158,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Uses the host timezone database via `chrono::Local`; DST transitions are
 /// resolved to the earliest valid local instant, and an unresolvable local
 /// time is a structured error, never a guess.
-fn local_day_start(ts_ns: u64) -> Result<u64, ErrorData> {
+pub(crate) fn local_day_start(ts_ns: u64) -> Result<u64, ErrorData> {
     let ts = i64::try_from(ts_ns)
         .map_err(|_e| invalid(format!("timestamp {ts_ns} exceeds the representable range")))?;
     let instant = Local
@@ -188,7 +188,7 @@ fn local_day_start(ts_ns: u64) -> Result<u64, ErrorData> {
 }
 
 /// Local midnight strictly after `day_start_ns` (the next local day).
-fn next_local_day_start(day_start_ns: u64) -> Result<u64, ErrorData> {
+pub(crate) fn next_local_day_start(day_start_ns: u64) -> Result<u64, ErrorData> {
     let ts = i64::try_from(day_start_ns).map_err(|_e| {
         invalid(format!(
             "timestamp {day_start_ns} exceeds the representable range"
@@ -219,7 +219,7 @@ fn next_local_day_start(day_start_ns: u64) -> Result<u64, ErrorData> {
     u64::try_from(nanos).map_err(|_e| internal("next local day precedes the epoch"))
 }
 
-fn now_ts_ns() -> u64 {
+pub(crate) fn now_ts_ns() -> u64 {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
     u64::try_from(nanos).unwrap_or(0)
 }
@@ -765,7 +765,10 @@ enum EpisodeActorFilter {
 /// Decodes a `CF_EPISODES` row or fails loudly: this is derived state we
 /// own, so an undecodable key or value is corruption to surface, never a row
 /// to skip.
-fn decode_episode_row(key: &[u8], value: &[u8]) -> Result<(u64, u32, EpisodeRecord), ErrorData> {
+pub(crate) fn decode_episode_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<(u64, u32, EpisodeRecord), ErrorData> {
     let (key_ts_ns, ordinal) = episode_codec::decode_episode_key(key).map_err(|error| {
         tracing::error!(
             code = "EPISODE_KEY_INVALID",

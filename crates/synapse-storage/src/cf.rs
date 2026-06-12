@@ -25,9 +25,12 @@ pub const CF_TIMELINE: &str = "CF_TIMELINE";
 /// Derived episodes segmented from `CF_TIMELINE` (#846). Fully rebuildable:
 /// re-segmentation replaces day-aligned key ranges idempotently.
 pub const CF_EPISODES: &str = "CF_EPISODES";
+/// Derived routines mined from `CF_EPISODES` (#848). Fully rebuildable:
+/// re-mining replaces the entire CF atomically.
+pub const CF_ROUTINES: &str = "CF_ROUTINES";
 
 /// PRD §4 column family names, excluding `RocksDB`'s implicit `default` CF.
-pub const ALL_COLUMN_FAMILIES: [&str; 13] = [
+pub const ALL_COLUMN_FAMILIES: [&str; 14] = [
     CF_EVENTS,
     CF_OBSERVATIONS,
     CF_PROFILES,
@@ -41,4 +44,5 @@ pub const ALL_COLUMN_FAMILIES: [&str; 13] = [
     CF_KV,
     CF_TIMELINE,
     CF_EPISODES,
+    CF_ROUTINES,
 ];
