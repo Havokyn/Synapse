@@ -1,5 +1,6 @@
 mod a11y_events;
 pub mod activity_recorder;
+pub mod approvals;
 pub mod audio;
 pub mod audit_export;
 pub mod audit_retention;
@@ -560,7 +561,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 44] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 47] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -587,6 +588,9 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 44] {
         replay::replay_record(),
         audio::audio_tail(),
         audio::audio_transcribe(),
+        approvals::approval_request(),
+        approvals::approval_list(),
+        approvals::approval_decide(),
         hygiene::hygiene_scan_text(),
         hygiene::hygiene_scan_storage(),
         hygiene::hygiene_flags(),

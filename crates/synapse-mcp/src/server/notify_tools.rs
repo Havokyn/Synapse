@@ -15,6 +15,8 @@
 //!   suppressed (`deduped: true`); once the operator dismisses it, the next
 //!   notify shows again.
 
+use std::sync::Arc;
+
 use rmcp::{RoleServer, schemars::JsonSchema, service::RequestContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -114,6 +116,31 @@ pub struct NotifyHumanResponse {
     /// operation.
     pub history_count: u32,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ToastAction {
+    pub content: String,
+    pub arguments: String,
+    pub activation_type: ToastActionActivationType,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum ToastActionActivationType {
+    Foreground,
+    Protocol,
+}
+
+impl ToastActionActivationType {
+    const fn as_xml_value(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Protocol => "protocol",
+        }
+    }
+}
+
+pub(crate) type ToastActivationCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 /// Failure raised from the toast worker; carries a precise error code.
 #[derive(Clone, Debug)]
@@ -230,7 +257,27 @@ fn escape_xml_text(raw: &str) -> String {
     escaped
 }
 
+#[cfg(test)]
 fn toast_xml(params: &NotifyHumanParams) -> String {
+    toast_xml_with_actions(params, &[])
+}
+
+fn toast_xml_with_actions(params: &NotifyHumanParams, actions: &[ToastAction]) -> String {
+    let actions_xml = if actions.is_empty() {
+        String::new()
+    } else {
+        let mut xml = String::from("<actions>");
+        for action in actions {
+            xml.push_str(&format!(
+                r#"<action content="{content}" activationType="{activation_type}" arguments="{arguments}"/>"#,
+                content = escape_xml_text(&action.content),
+                activation_type = action.activation_type.as_xml_value(),
+                arguments = escape_xml_text(&action.arguments),
+            ));
+        }
+        xml.push_str("</actions>");
+        xml
+    };
     format!(
         concat!(
             r#"<toast duration="{duration}">"#,
@@ -241,12 +288,14 @@ fn toast_xml(params: &NotifyHumanParams) -> String {
             r#"<text placement="attribution">Synapse - {kind}</text>"#,
             "</binding>",
             "</visual>",
+            "{actions}",
             "</toast>",
         ),
         duration = params.kind.toast_duration(),
         title = escape_xml_text(&params.title),
         body = escape_xml_text(&params.body),
         kind = params.kind.as_str(),
+        actions = actions_xml,
     )
 }
 
@@ -267,17 +316,19 @@ fn notify_request_details(params: &NotifyHumanParams, tag: &str) -> Value {
 mod windows_toast {
     use super::{
         HISTORY_VERIFY_POLL_MS, HISTORY_VERIFY_TIMEOUT_MS, NotifyFailure, NotifyHumanParams,
-        SYNAPSE_AUMID, SYNAPSE_NOTIFY_DISPLAY_NAME, SYNAPSE_TOAST_GROUP, ToastOutcome, error_codes,
-        toast_xml,
+        SYNAPSE_AUMID, SYNAPSE_NOTIFY_DISPLAY_NAME, SYNAPSE_TOAST_GROUP, ToastAction,
+        ToastActivationCallback, ToastOutcome, error_codes, toast_xml_with_actions,
     };
     use std::{
-        sync::{OnceLock, mpsc},
+        sync::{Mutex, OnceLock, mpsc},
         time::{Duration, Instant},
     };
     use windows::{
         Data::Xml::Dom::XmlDocument,
+        Foundation::TypedEventHandler,
         UI::Notifications::{
-            NotificationSetting, ToastNotification, ToastNotificationManager, ToastNotifier,
+            NotificationSetting, ToastActivatedEventArgs, ToastNotification,
+            ToastNotificationManager, ToastNotifier,
         },
         Win32::{
             Foundation::ERROR_SUCCESS,
@@ -290,11 +341,12 @@ mod windows_toast {
                 },
             },
         },
-        core::{HSTRING, PCWSTR},
+        core::{HSTRING, IInspectable, Interface as _, PCWSTR},
     };
 
     const AUMID_SUBKEY: &str = "Software\\Classes\\AppUserModelId\\Synapse.Daemon";
     const DISPLAY_NAME_VALUE: &str = "DisplayName";
+    const MAX_LIVE_ACTIVATION_SUBSCRIPTIONS: usize = 64;
     /// E_NOT_FOUND / ERROR_NOT_FOUND as an HRESULT (0x80070490): what
     /// `ToastNotifier.Setting()` throws before the app's first-ever toast.
     #[allow(clippy::cast_possible_wrap)]
@@ -308,7 +360,14 @@ mod windows_toast {
     struct NotifyJob {
         params: NotifyHumanParams,
         tag: String,
+        actions: Vec<ToastAction>,
+        activation_callback: Option<ToastActivationCallback>,
         reply: tokio::sync::oneshot::Sender<Result<ToastOutcome, NotifyFailure>>,
+    }
+
+    struct LiveActivationSubscription {
+        toast: ToastNotification,
+        token: i64,
     }
 
     /// Single long-lived worker thread that owns COM (MTA) for the daemon's
@@ -320,6 +379,8 @@ mod windows_toast {
     /// access violation that kills the daemon (observed in FSV; same reason
     /// synapse-a11y routes UIA through a dedicated COM worker thread).
     static NOTIFY_WORKER: OnceLock<Result<mpsc::Sender<NotifyJob>, String>> = OnceLock::new();
+    static LIVE_ACTIVATION_SUBSCRIPTIONS: OnceLock<Mutex<Vec<LiveActivationSubscription>>> =
+        OnceLock::new();
 
     fn spawn_notify_worker() -> Result<mpsc::Sender<NotifyJob>, String> {
         let (tx, rx) = mpsc::channel::<NotifyJob>();
@@ -338,7 +399,12 @@ mod windows_toast {
                             error_codes::NOTIFY_WORKER_FAILED,
                             format!("notify worker thread has no COM apartment: {message}"),
                         )),
-                        None => send_toast_blocking(&job.params, &job.tag),
+                        None => send_toast_blocking(
+                            &job.params,
+                            &job.tag,
+                            &job.actions,
+                            job.activation_callback,
+                        ),
                     };
                     let _ = job.reply.send(result);
                 }
@@ -350,6 +416,8 @@ mod windows_toast {
     pub(super) async fn send_toast(
         params: NotifyHumanParams,
         tag: String,
+        actions: Vec<ToastAction>,
+        activation_callback: Option<ToastActivationCallback>,
     ) -> Result<ToastOutcome, NotifyFailure> {
         let sender = NOTIFY_WORKER
             .get_or_init(spawn_notify_worker)
@@ -362,6 +430,8 @@ mod windows_toast {
             .send(NotifyJob {
                 params,
                 tag,
+                actions,
+                activation_callback,
                 reply: reply_tx,
             })
             .map_err(|_send_error| {
@@ -596,6 +666,8 @@ mod windows_toast {
     fn send_toast_blocking(
         params: &NotifyHumanParams,
         tag: &str,
+        actions: &[ToastAction],
+        activation_callback: Option<ToastActivationCallback>,
     ) -> Result<ToastOutcome, NotifyFailure> {
         ensure_aumid_registered()?;
         let notifier = create_notifier()?;
@@ -639,7 +711,7 @@ mod windows_toast {
             }
         }
 
-        let xml = toast_xml(params);
+        let xml = toast_xml_with_actions(params, actions);
         let document = XmlDocument::new().map_err(|error| {
             NotifyFailure::new(
                 error_codes::NOTIFY_XML_PAYLOAD_INVALID,
@@ -662,6 +734,9 @@ mod windows_toast {
                 format!("CreateToastNotification failed: {error}"),
             )
         })?;
+        if let Some(callback) = activation_callback {
+            register_activation_handler(&toast, tag, callback)?;
+        }
         toast.SetTag(&HSTRING::from(tag)).map_err(|error| {
             NotifyFailure::new(
                 error_codes::NOTIFY_SHOW_FAILED,
@@ -716,12 +791,87 @@ mod windows_toast {
             std::thread::sleep(Duration::from_millis(HISTORY_VERIFY_POLL_MS));
         }
     }
+
+    fn register_activation_handler(
+        toast: &ToastNotification,
+        tag: &str,
+        callback: ToastActivationCallback,
+    ) -> Result<(), NotifyFailure> {
+        let tag_for_handler = tag.to_owned();
+        let handler =
+            TypedEventHandler::<ToastNotification, IInspectable>::new(move |_sender, args| {
+                let args = match args.ok() {
+                    Ok(args) => args,
+                    Err(error) => {
+                        tracing::warn!(
+                            code = "NOTIFY_TOAST_ACTIVATION_ARGS_MISSING",
+                            tag = %tag_for_handler,
+                            "toast activation delivered no arguments: {error}"
+                        );
+                        return Ok(());
+                    }
+                };
+                let arguments = match args
+                    .cast::<ToastActivatedEventArgs>()
+                    .and_then(|args| args.Arguments())
+                {
+                    Ok(arguments) => arguments.to_string_lossy(),
+                    Err(error) => {
+                        tracing::warn!(
+                            code = "NOTIFY_TOAST_ACTIVATION_ARGS_INVALID",
+                            tag = %tag_for_handler,
+                            "toast activation arguments could not be read: {error}"
+                        );
+                        return Ok(());
+                    }
+                };
+                tracing::info!(
+                    code = "NOTIFY_TOAST_ACTIVATED",
+                    tag = %tag_for_handler,
+                    arguments_len = arguments.len(),
+                    "toast activation callback received operator action"
+                );
+                callback(arguments);
+                Ok(())
+            });
+        let token = toast.Activated(&handler).map_err(|error| {
+            NotifyFailure::new(
+                error_codes::NOTIFY_SHOW_FAILED,
+                format!("ToastNotification.Activated handler registration failed: {error}"),
+            )
+        })?;
+        retain_activation_subscription(toast, token)
+    }
+
+    fn retain_activation_subscription(
+        toast: &ToastNotification,
+        token: i64,
+    ) -> Result<(), NotifyFailure> {
+        let subscriptions = LIVE_ACTIVATION_SUBSCRIPTIONS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = subscriptions.lock().map_err(|error| {
+            NotifyFailure::new(
+                error_codes::NOTIFY_SHOW_FAILED,
+                format!("toast activation subscription registry is poisoned: {error}"),
+            )
+        })?;
+        while guard.len() >= MAX_LIVE_ACTIVATION_SUBSCRIPTIONS {
+            let stale = guard.remove(0);
+            let _ = stale.toast.RemoveActivated(stale.token);
+        }
+        guard.push(LiveActivationSubscription {
+            toast: toast.clone(),
+            token,
+        });
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
 async fn send_toast_for_platform(
     _params: NotifyHumanParams,
     _tag: String,
+    _actions: Vec<ToastAction>,
+    _activation_callback: Option<ToastActivationCallback>,
 ) -> Result<ToastOutcome, NotifyFailure> {
     Err(NotifyFailure::new(
         error_codes::NOTIFY_UNSUPPORTED_PLATFORM,
@@ -733,13 +883,43 @@ async fn send_toast_for_platform(
 async fn send_toast_for_platform(
     params: NotifyHumanParams,
     tag: String,
+    actions: Vec<ToastAction>,
+    activation_callback: Option<ToastActivationCallback>,
 ) -> Result<ToastOutcome, NotifyFailure> {
-    windows_toast::send_toast(params, tag).await
+    windows_toast::send_toast(params, tag, actions, activation_callback).await
 }
 
 async fn run_notify_human(params: NotifyHumanParams) -> Result<NotifyHumanResponse, ErrorData> {
     let tag = toast_tag_for(params.dedupe_key.as_deref());
-    let outcome = send_toast_for_platform(params, tag.clone())
+    run_internal_toast(params, tag, Vec::new()).await
+}
+
+pub(crate) async fn run_internal_toast(
+    params: NotifyHumanParams,
+    tag: String,
+    actions: Vec<ToastAction>,
+) -> Result<NotifyHumanResponse, ErrorData> {
+    validate_params(&params)?;
+    run_internal_toast_with_tag(params, tag, actions, None).await
+}
+
+pub(crate) async fn run_internal_toast_with_activation(
+    params: NotifyHumanParams,
+    tag: String,
+    actions: Vec<ToastAction>,
+    activation_callback: ToastActivationCallback,
+) -> Result<NotifyHumanResponse, ErrorData> {
+    validate_params(&params)?;
+    run_internal_toast_with_tag(params, tag, actions, Some(activation_callback)).await
+}
+
+async fn run_internal_toast_with_tag(
+    params: NotifyHumanParams,
+    tag: String,
+    actions: Vec<ToastAction>,
+    activation_callback: Option<ToastActivationCallback>,
+) -> Result<NotifyHumanResponse, ErrorData> {
+    let outcome = send_toast_for_platform(params, tag.clone(), actions, activation_callback)
         .await
         .map_err(|failure| {
             tracing::warn!(
@@ -889,6 +1069,31 @@ mod tests {
         assert!(xml.contains("body with &apos;apostrophe&apos; &amp; &lt;tag&gt;"));
         assert!(!xml.contains("<script>"));
         assert!(xml.contains(r#"<toast duration="short">"#));
+    }
+
+    #[test]
+    fn toast_xml_includes_protocol_actions_with_escaped_arguments() {
+        let xml = toast_xml_with_actions(
+            &params("approval", "body", None),
+            &[
+                ToastAction {
+                    content: "Accept & run".to_owned(),
+                    arguments: "synapse-approval://decide?approval_id=apr1-abc&decision=accept"
+                        .to_owned(),
+                    activation_type: ToastActionActivationType::Protocol,
+                },
+                ToastAction {
+                    content: "Decline".to_owned(),
+                    arguments: "synapse-approval://decide?decision=decline".to_owned(),
+                    activation_type: ToastActionActivationType::Foreground,
+                },
+            ],
+        );
+        assert!(xml.contains("<actions>"));
+        assert!(xml.contains("activationType=\"protocol\""));
+        assert!(xml.contains("activationType=\"foreground\""));
+        assert!(xml.contains("Accept &amp; run"));
+        assert!(xml.contains("approval_id=apr1-abc&amp;decision=accept"));
     }
 
     #[test]

@@ -54,6 +54,12 @@ use crate::{
     m3::{
         M3ServiceConfig, SharedM3State,
         activity_recorder::BrowserNavigationEvent,
+        approvals::{
+            ApprovalDecideParams, ApprovalDecideResponse, ApprovalListParams, ApprovalListResponse,
+            ApprovalRequestParams, ApprovalRequestResponse, ApprovalToastDelivery, decide_approval,
+            list_approvals, prepare_activation_links, request_approval,
+            update_approval_toast_state,
+        },
         audio::{
             AudioTailParams, AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse,
             populate_audio_summary, tail_audio, transcribe_audio,

@@ -1,9 +1,15 @@
+use super::notify_tools::{
+    NotifyHumanParams, NotifyKind, SYNAPSE_TOAST_GROUP, ToastAction, ToastActionActivationType,
+    ToastActivationCallback, run_internal_toast_with_activation, toast_tag_for,
+};
 use super::{
-    AudioTailParams, AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse,
-    AuditExportBundleParams, AuditExportBundleResponse, AuditIntelligenceQueryParams,
-    AuditIntelligenceQueryResponse, EpisodeGetParams, EpisodeGetResponse, EpisodeListParams,
-    EpisodeListResponse, EpisodeSegmentParams, EpisodeSegmentResponse, ErrorData,
-    HygieneFlagsParams, HygieneFlagsResponse, HygieneScanStorageParams, HygieneScanStorageResponse,
+    ApprovalDecideParams, ApprovalDecideResponse, ApprovalListParams, ApprovalListResponse,
+    ApprovalRequestParams, ApprovalRequestResponse, ApprovalToastDelivery, AudioTailParams,
+    AudioTailResponse, AudioTranscribeParams, AudioTranscribeResponse, AuditExportBundleParams,
+    AuditExportBundleResponse, AuditIntelligenceQueryParams, AuditIntelligenceQueryResponse,
+    EpisodeGetParams, EpisodeGetResponse, EpisodeListParams, EpisodeListResponse,
+    EpisodeSegmentParams, EpisodeSegmentResponse, ErrorData, HygieneFlagsParams,
+    HygieneFlagsResponse, HygieneScanStorageParams, HygieneScanStorageResponse,
     HygieneScanTextParams, HygieneScanTextResponse, Json, Parameters, ProfileActivateParams,
     ProfileActivateResponse, ProfileAuthoringDecideParams, ProfileAuthoringDecideResponse,
     ProfileAuthoringExportParams, ProfileAuthoringExportResponse, ProfileAuthoringGenerateParams,
@@ -25,20 +31,77 @@ use super::{
     SubscribeResponse, SynapseService, TimelineExclusionsParams, TimelineExclusionsResponse,
     TimelinePauseParams, TimelinePauseResponse, TimelinePurgeParams, TimelinePurgeResponse,
     TimelineResumeParams, TimelineResumeResponse, TimelineSearchParams, TimelineSearchResponse,
-    apply_storage_pressure_sample, cancel_reflex, cancel_subscription,
+    apply_storage_pressure_sample, cancel_reflex, cancel_subscription, decide_approval,
     decide_profile_authoring_candidate, disable_registry_profile, export_audit_bundle,
     export_profile_authoring_candidate, export_registry, generate_profile_authoring_candidate,
     get_episode, history_reflexes, import_registry, inspect_profile_authoring_candidate,
-    inspect_routine, inspect_storage, install_registry_package, list_episodes,
+    inspect_routine, inspect_storage, install_registry_package, list_approvals, list_episodes,
     list_profile_authoring_candidates, list_profiles, list_reflexes, list_routines,
-    mine_and_store_routines, pause_timeline, purge_timeline, put_probe_rows,
-    query_audit_intelligence, query_flags, query_registry, record_replay,
-    refresh_profile_quality, register_reflex, resume_timeline, rollback_registry_profile,
-    run_storage_gc_once, scan_storage, scan_text_tool, search_timeline, segment_episodes,
-    subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio, update_routine,
-    update_timeline_exclusions,
+    mine_and_store_routines, pause_timeline, prepare_activation_links, purge_timeline,
+    put_probe_rows, query_audit_intelligence, query_flags, query_registry, record_replay,
+    refresh_profile_quality, register_reflex, request_approval, resume_timeline,
+    rollback_registry_profile, run_storage_gc_once, scan_storage, scan_text_tool, search_timeline,
+    segment_episodes, subscribe_to_events, tail_audio, tool, tool_router, transcribe_audio,
+    update_approval_toast_state, update_routine, update_timeline_exclusions,
 };
 use rmcp::{RoleServer, service::RequestContext};
+use std::sync::Arc;
+
+fn approval_toast_activation_callback(
+    db: Arc<synapse_storage::Db>,
+    bind: String,
+) -> ToastActivationCallback {
+    Arc::new(move |arguments| {
+        let params = match crate::m3::approvals::parse_activation_uri(&arguments) {
+            Ok(params) => params,
+            Err(error) => {
+                tracing::warn!(
+                    code = "APPROVAL_TOAST_ACTIVATION_URI_INVALID",
+                    detail = %error.message,
+                    "approval toast activation argument rejected"
+                );
+                return;
+            }
+        };
+        if params.bind != bind {
+            tracing::warn!(
+                code = "APPROVAL_TOAST_ACTIVATION_BIND_MISMATCH",
+                approval_id = %params.approval_id,
+                activation_id = %params.activation_id,
+                decision = %params.decision,
+                expected_bind = %bind,
+                actual_bind = %params.bind,
+                "approval toast activation refused because bind does not match this daemon"
+            );
+            return;
+        }
+        let approval_id = params.approval_id.clone();
+        let activation_id = params.activation_id.clone();
+        let decision = params.decision.clone();
+        match crate::m3::approvals::decide_approval_from_activation(
+            &db,
+            &params,
+            "approval_toast_activated",
+        ) {
+            Ok(response) => tracing::info!(
+                code = "APPROVAL_TOAST_ACTIVATION_DECIDED",
+                approval_id = %approval_id,
+                activation_id = %activation_id,
+                decision = %decision,
+                after_status = response.decision.after_status.as_str(),
+                "approval toast activation updated durable queue row"
+            ),
+            Err(error) => tracing::warn!(
+                code = "APPROVAL_TOAST_ACTIVATION_FAILED",
+                approval_id = %approval_id,
+                activation_id = %activation_id,
+                decision = %decision,
+                detail = %error.message,
+                "approval toast activation failed"
+            ),
+        }
+    })
+}
 
 #[tool_router(router = m3_tool_router, vis = "pub(super)")]
 impl SynapseService {
@@ -575,6 +638,254 @@ impl SynapseService {
             &crate::m3::audio::required_permissions_transcribe(&params.0),
         )?;
         transcribe_audio(&self.m3_state, &params.0).map(Json)
+    }
+
+    #[tool(
+        description = "Enqueue a durable human decision request in CF_KV. Supports suggestion, agent_escalation, and armed_run_review items; timeout defaults can ignore/decline but never accept. Optional payload_json is JSON text, not an open schema value."
+    )]
+    pub async fn approval_request(
+        &self,
+        params: Parameters<ApprovalRequestParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ApprovalRequestResponse>, ErrorData> {
+        let params = params.0;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "approval_request",
+            approval_kind = ?params.kind,
+            has_timeout = params.timeout_ms.is_some(),
+            destructive = params.destructive,
+            notify = params.notify,
+            suppress_popup = params.suppress_popup,
+            "tool.invocation kind=approval_request"
+        );
+        self.require_m3_permissions(
+            "approval_request",
+            &crate::m3::approvals::required_permissions_request(&params),
+        )?;
+        let by_session = super::context::mcp_session_id_from_request_context(&request_context)?
+            .unwrap_or_else(|| "stdio".to_owned());
+        let db = self.m3_storage()?;
+        let mut response = request_approval(&db, &params, &by_session)?;
+        if params.notify && !response.deduped {
+            let (delivery, toast_audit_row) =
+                match crate::approval_protocol::ensure_protocol_handler_registered() {
+                    Ok(_protocol_readback) => {
+                        let bind = self.m3_bind_addr()?;
+                        match prepare_activation_links(&db, &response.item.approval_id, &bind) {
+                            Ok(links) => {
+                                let tag = toast_tag_for(Some(&format!(
+                                    "approval:{}",
+                                    response.item.approval_id
+                                )));
+                                let notify = NotifyHumanParams {
+                                    title: response.item.title.clone(),
+                                    body: response.item.body.clone(),
+                                    kind: if response.item.destructive {
+                                        NotifyKind::Warning
+                                    } else {
+                                        NotifyKind::Info
+                                    },
+                                    dedupe_key: Some(format!(
+                                        "approval:{}",
+                                        response.item.approval_id
+                                    )),
+                                    suppress_popup: response.item.toast.suppress_popup,
+                                };
+                                let actions = vec![
+                                    ToastAction {
+                                        content: "Accept".to_owned(),
+                                        arguments: links.accept_uri,
+                                        activation_type: ToastActionActivationType::Foreground,
+                                    },
+                                    ToastAction {
+                                        content: "Decline".to_owned(),
+                                        arguments: links.decline_uri,
+                                        activation_type: ToastActionActivationType::Foreground,
+                                    },
+                                    ToastAction {
+                                        content: "Snooze".to_owned(),
+                                        arguments: links.snooze_uri,
+                                        activation_type: ToastActionActivationType::Foreground,
+                                    },
+                                ];
+                                let activation_callback =
+                                    approval_toast_activation_callback(db.clone(), bind);
+                                match run_internal_toast_with_activation(
+                                    notify,
+                                    tag.clone(),
+                                    actions,
+                                    activation_callback,
+                                )
+                                .await
+                                {
+                                    Ok(toast) => {
+                                        let delivery = ApprovalToastDelivery {
+                                            requested: true,
+                                            suppress_popup: response.item.toast.suppress_popup,
+                                            actionable_buttons: true,
+                                            activation_id: Some(links.activation_id),
+                                            protocol_handler_registered: Some(true),
+                                            unavailable_reason: None,
+                                            notify_tag: Some(toast.tag),
+                                            notify_group: Some(toast.group),
+                                            notification_setting: Some(toast.notification_setting),
+                                            verified_in_history: Some(toast.verified_in_history),
+                                        };
+                                        let (item, item_row, audit_row) =
+                                            update_approval_toast_state(
+                                                &db,
+                                                &response.item.approval_id,
+                                                delivery.clone(),
+                                                &by_session,
+                                            )?;
+                                        response.item = item;
+                                        response.item_row = item_row;
+                                        (delivery, Some(audit_row))
+                                    }
+                                    Err(error) => {
+                                        let delivery = ApprovalToastDelivery {
+                                            requested: true,
+                                            suppress_popup: response.item.toast.suppress_popup,
+                                            actionable_buttons: false,
+                                            activation_id: Some(links.activation_id),
+                                            protocol_handler_registered: Some(true),
+                                            unavailable_reason: Some(format!(
+                                                "approval actionable toast delivery failed: {}",
+                                                error.message
+                                            )),
+                                            notify_tag: Some(tag),
+                                            notify_group: Some(SYNAPSE_TOAST_GROUP.to_owned()),
+                                            notification_setting: None,
+                                            verified_in_history: Some(false),
+                                        };
+                                        let (item, item_row, audit_row) =
+                                            update_approval_toast_state(
+                                                &db,
+                                                &response.item.approval_id,
+                                                delivery.clone(),
+                                                &by_session,
+                                            )?;
+                                        response.item = item;
+                                        response.item_row = item_row;
+                                        (delivery, Some(audit_row))
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let delivery = ApprovalToastDelivery {
+                                    requested: true,
+                                    suppress_popup: response.item.toast.suppress_popup,
+                                    actionable_buttons: false,
+                                    activation_id: None,
+                                    protocol_handler_registered: Some(true),
+                                    unavailable_reason: Some(format!(
+                                        "approval activation link preparation failed: {}",
+                                        error.message
+                                    )),
+                                    notify_tag: None,
+                                    notify_group: None,
+                                    notification_setting: None,
+                                    verified_in_history: Some(false),
+                                };
+                                let (item, item_row, audit_row) = update_approval_toast_state(
+                                    &db,
+                                    &response.item.approval_id,
+                                    delivery.clone(),
+                                    &by_session,
+                                )?;
+                                response.item = item;
+                                response.item_row = item_row;
+                                (delivery, Some(audit_row))
+                            }
+                        }
+                    }
+                    Err(message) => {
+                        let delivery = ApprovalToastDelivery {
+                            requested: true,
+                            suppress_popup: response.item.toast.suppress_popup,
+                            actionable_buttons: false,
+                            activation_id: None,
+                            protocol_handler_registered: Some(false),
+                            unavailable_reason: Some(format!(
+                                "approval protocol handler registration failed: {message}"
+                            )),
+                            notify_tag: None,
+                            notify_group: None,
+                            notification_setting: None,
+                            verified_in_history: Some(false),
+                        };
+                        let (item, item_row, audit_row) = update_approval_toast_state(
+                            &db,
+                            &response.item.approval_id,
+                            delivery.clone(),
+                            &by_session,
+                        )?;
+                        response.item = item;
+                        response.item_row = item_row;
+                        (delivery, Some(audit_row))
+                    }
+                };
+            tracing::info!(
+                code = "APPROVAL_TOAST_DELIVERY_RECORDED",
+                approval_id = %response.item.approval_id,
+                actionable_buttons = delivery.actionable_buttons,
+                unavailable_reason = delivery.unavailable_reason.as_deref().unwrap_or(""),
+                "approval_request toast delivery state recorded"
+            );
+            response.toast_audit_row = toast_audit_row;
+        }
+        Ok(Json(response))
+    }
+
+    #[tool(
+        description = "List durable approval/suggestion queue rows from CF_KV. Materializes expired pending/snoozed rows to their timeout default and audit-logs that transition before returning."
+    )]
+    pub async fn approval_list(
+        &self,
+        params: Parameters<ApprovalListParams>,
+    ) -> Result<Json<ApprovalListResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "approval_list",
+            include_terminal = params.0.include_terminal,
+            limit = params.0.limit,
+            has_cursor = params.0.cursor.is_some(),
+            "tool.invocation kind=approval_list"
+        );
+        self.require_m3_permissions(
+            "approval_list",
+            &crate::m3::approvals::required_permissions_list(&params.0),
+        )?;
+        let db = self.m3_storage()?;
+        list_approvals(&db, &params.0).map(Json)
+    }
+
+    #[tool(
+        description = "Resolve one durable approval queue item as accept, decline, or snooze. Writes and separately reads back the CF_KV item row plus transition audit row."
+    )]
+    pub async fn approval_decide(
+        &self,
+        params: Parameters<ApprovalDecideParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ApprovalDecideResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "approval_decide",
+            approval_id = %params.0.approval_id,
+            decision = ?params.0.decision,
+            has_note = params.0.note.is_some(),
+            snooze_ms = params.0.snooze_ms,
+            "tool.invocation kind=approval_decide"
+        );
+        self.require_m3_permissions(
+            "approval_decide",
+            &crate::m3::approvals::required_permissions_decide(&params.0),
+        )?;
+        let by_session = super::context::mcp_session_id_from_request_context(&request_context)?
+            .unwrap_or_else(|| "stdio".to_owned());
+        let db = self.m3_storage()?;
+        decide_approval(&db, &params.0, &by_session).map(Json)
     }
 
     #[tool(

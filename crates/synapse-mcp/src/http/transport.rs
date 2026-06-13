@@ -443,7 +443,8 @@ fn router(
         ));
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard_index))
-        .route("/dashboard/state.json", get(dashboard_state));
+        .route("/dashboard/state.json", get(dashboard_state))
+        .route("/approval/activate", get(approval_activate));
     let app = Router::new()
         .merge(dashboard_routes)
         .merge(protected_routes)
@@ -1245,6 +1246,13 @@ struct DashboardDeferredSurface {
     rows: Vec<serde_json::Value>,
 }
 
+#[derive(Serialize)]
+struct DashboardApprovalSurface {
+    tool: &'static str,
+    available: bool,
+    rows: Vec<crate::m3::approvals::ApprovalQueueItem>,
+}
+
 async fn dashboard_index(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
         return response;
@@ -1293,11 +1301,99 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         sessions,
         lease,
         storage,
-        approvals: deferred_panel("approval_list", &tool_names),
-        suggestions: deferred_panel("suggestion_list", &tool_names),
-        armed_runs: deferred_panel("armed_run_list", &tool_names),
+        approvals: approval_panel(&state, &tool_names, None),
+        suggestions: approval_panel(
+            &state,
+            &tool_names,
+            Some(crate::m3::approvals::ApprovalKind::Suggestion),
+        ),
+        armed_runs: approval_panel(
+            &state,
+            &tool_names,
+            Some(crate::m3::approvals::ApprovalKind::ArmedRunReview),
+        ),
     };
     Json(response).into_response()
+}
+
+async fn approval_activate(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<crate::m3::approvals::ApprovalActivationParams>,
+) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return response;
+    }
+    if params.bind != state.bind_addr.to_string() {
+        return (StatusCode::BAD_REQUEST, "APPROVAL_ACTIVATION_BIND_MISMATCH").into_response();
+    }
+    match state
+        .health_service
+        .approval_decide_from_activation(&params, "approval_protocol")
+    {
+        Ok(response) => Html(approval_activation_html(&response)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            format!("APPROVAL_ACTIVATION_FAILED: {}", error.message),
+        )
+            .into_response(),
+    }
+}
+
+fn approval_activation_html(
+    response: &crate::m3::approvals::ApprovalActivationDecisionResponse,
+) -> String {
+    let status = response.decision.after_status.as_str();
+    format!(
+        concat!(
+            "<!doctype html><html><head><meta charset=\"utf-8\">",
+            "<title>Synapse Approval</title>",
+            "<style>body{{font-family:system-ui,sans-serif;margin:2rem;}}</style>",
+            "</head><body><h1>Synapse Approval</h1>",
+            "<p>Approval <strong>{approval_id}</strong> is now <strong>{status}</strong>.</p>",
+            "<p>Activation <code>{activation_id}</code> consumed.</p>",
+            "</body></html>"
+        ),
+        approval_id = escape_html(&response.decision.approval_id),
+        status = escape_html(status),
+        activation_id = escape_html(&response.activation_id),
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn approval_panel(
+    state: &HttpState,
+    tool_names: &BTreeSet<&str>,
+    kind: Option<crate::m3::approvals::ApprovalKind>,
+) -> DashboardPanel {
+    if !tool_names.contains("approval_list") {
+        return deferred_panel("approval_list", tool_names);
+    }
+    match state.health_service.approval_queue_snapshot(kind) {
+        Ok(rows) => DashboardPanel::ok(
+            "approval_list",
+            DashboardApprovalSurface {
+                tool: "approval_list",
+                available: true,
+                rows,
+            },
+        ),
+        Err(error) => DashboardPanel::error("approval_list", format!("{error:?}")),
+    }
 }
 
 fn deferred_panel(tool: &'static str, tool_names: &BTreeSet<&str>) -> DashboardPanel {
@@ -1571,18 +1667,37 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       const storage = byId("storage"); clear(storage);
       const counts = data.storage.data?.cf_row_counts || {};
       storage.appendChild(table(["Column Family", "Rows"], Object.entries(counts).map(([k, v]) => [k, v])));
-      renderDeferred("approvals", data.approvals);
-      renderDeferred("suggestions", data.suggestions);
-      renderDeferred("armedRuns", data.armed_runs);
+      renderQueue("approvals", data.approvals);
+      renderQueue("suggestions", data.suggestions);
+      renderQueue("armedRuns", data.armed_runs);
     }
-    function renderDeferred(id, panel) {
+    function renderQueue(id, panel) {
       const node = byId(id); clear(node);
       const data = panel.data || {};
+      if (panel.status !== "ok") {
+        node.append(
+          stat("Status", panel.status, "warn"),
+          stat("Tool", data.tool || panel.source),
+          stat("Available", data.available === true)
+        );
+        return;
+      }
+      const rows = data.rows || [];
       node.append(
-        stat("Status", panel.status, panel.status === "ok" ? "ok" : "warn"),
+        stat("Status", panel.status, "ok"),
         stat("Tool", data.tool || panel.source),
-        stat("Available", data.available === true)
+        stat("Rows", rows.length)
       );
+      node.appendChild(table(["Status", "Kind", "Title", "Updated", "Timeout"], rows.map((row) => {
+        const item = row.item || {};
+        return [
+          item.status,
+          item.kind,
+          item.title,
+          item.updated_at_unix_ms ? new Date(item.updated_at_unix_ms).toLocaleTimeString() : "",
+          item.expires_at_unix_ms ? new Date(item.expires_at_unix_ms).toLocaleTimeString() : ""
+        ];
+      })));
     }
     async function refresh() {
       try {

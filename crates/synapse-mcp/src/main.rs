@@ -52,6 +52,7 @@
         clippy::unwrap_used
     )
 )]
+mod approval_protocol;
 mod chrome_debugger_bridge;
 mod connect;
 mod daemon_lifecycle;
@@ -92,6 +93,8 @@ enum Mode {
     Connect,
     /// Chrome native-messaging host for the bundled debugger extension.
     ChromeNativeHost,
+    /// Internal protocol-activation child for actionable approval toasts.
+    ApprovalProtocol,
     /// Internal child process bound to a hidden desktop for UIA/PrintWindow work.
     DesktopWorker,
     /// Enumerate/classify synapse-mcp processes; with --kill-stray, clean them.
@@ -176,6 +179,8 @@ struct Cli {
         help = "Origin used only for explicit --mode chrome-native-host diagnostics. Chrome native messaging normally passes the real origin as argv[1]."
     )]
     chrome_native_origin: String,
+    #[arg(long, hide = true)]
+    approval_uri: Option<String>,
     #[arg(long, value_enum, hide = true)]
     desktop_worker_op: Option<desktop_worker::DesktopWorkerOp>,
     #[arg(long, hide = true)]
@@ -288,6 +293,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         drop(telemetry_guard);
         return result;
     }
+    if matches!(cli.mode, Mode::ApprovalProtocol) {
+        let approval_uri = cli
+            .approval_uri
+            .as_deref()
+            .context("--approval-uri is required for --mode approval-protocol")?;
+        let result = approval_protocol::run_protocol_activation(approval_uri).await;
+        drop(telemetry_guard);
+        return result;
+    }
     if matches!(cli.mode, Mode::DesktopWorker) {
         let code = desktop_worker::run_worker_from_cli(desktop_worker::DesktopWorkerCli {
             op: cli.desktop_worker_op,
@@ -362,9 +376,13 @@ async fn run() -> anyhow::Result<ExitCode> {
             drop(telemetry_guard);
             Ok(code)
         }
-        Mode::Connect | Mode::ChromeNativeHost | Mode::DesktopWorker | Mode::Doctor => {
+        Mode::Connect
+        | Mode::ChromeNativeHost
+        | Mode::ApprovalProtocol
+        | Mode::DesktopWorker
+        | Mode::Doctor => {
             unreachable!(
-                "connect, chrome-native-host, desktop-worker, and doctor modes are handled before daemon setup"
+                "connect, chrome-native-host, approval-protocol, desktop-worker, and doctor modes are handled before daemon setup"
             )
         }
     }

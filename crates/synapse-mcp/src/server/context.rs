@@ -324,6 +324,35 @@ impl SynapseService {
         )
     }
 
+    pub(crate) fn m3_bind_addr(&self) -> Result<String, ErrorData> {
+        self.m3_state
+            .lock()
+            .map(|state| state.bind.clone())
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned while reading HTTP bind address",
+                )
+            })
+    }
+
+    pub(crate) fn approval_queue_snapshot(
+        &self,
+        kind: Option<crate::m3::approvals::ApprovalKind>,
+    ) -> Result<Vec<crate::m3::approvals::ApprovalQueueItem>, ErrorData> {
+        let db = self.m3_storage()?;
+        crate::m3::approvals::approval_snapshot(&db, kind)
+    }
+
+    pub(crate) fn approval_decide_from_activation(
+        &self,
+        params: &crate::m3::approvals::ApprovalActivationParams,
+        by_session: &str,
+    ) -> Result<crate::m3::approvals::ApprovalActivationDecisionResponse, ErrorData> {
+        let db = self.m3_storage()?;
+        crate::m3::approvals::decide_approval_from_activation(&db, params, by_session)
+    }
+
     fn install_aim_track_target_source(
         &self,
         runtime: &Arc<Mutex<synapse_reflex::ReflexRuntime>>,
