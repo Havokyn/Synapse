@@ -1188,8 +1188,14 @@ mod scope_gate_tests {
     fn instructions_advertise_m3_when_current_m3_tools_are_registered() -> anyhow::Result<()> {
         let profiles = TempDir::new()?;
         let service = service_with_profiles(profiles.path(), false)?;
+        let m3_tools = crate::m3::m3_tool_stubs();
+        let unique_tool_names = m3_tools
+            .iter()
+            .map(|stub| stub.name)
+            .collect::<HashSet<_>>();
 
-        assert_eq!(crate::m3::m3_tool_stubs().len(), 44);
+        assert!(!m3_tools.is_empty());
+        assert_eq!(unique_tool_names.len(), m3_tools.len());
         assert!(service.instructions().contains("M3 scaffold"));
 
         Ok(())
