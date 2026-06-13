@@ -90,14 +90,33 @@ fn approval_toast_activation_callback(
             &params,
             "approval_toast_activated",
         ) {
-            Ok(response) => tracing::info!(
-                code = "APPROVAL_TOAST_ACTIVATION_DECIDED",
-                approval_id = %approval_id,
-                activation_id = %activation_id,
-                decision = %decision,
-                after_status = response.decision.after_status.as_str(),
-                "approval toast activation updated durable queue row"
-            ),
+            Ok(response) => {
+                match super::escalation::ack_from_approval_item_decision(
+                    &db,
+                    &response.decision.item,
+                    decision.as_str(),
+                    response.decision.item.decision_note.as_deref(),
+                    "approval_toast_activated",
+                    super::session_registry::unix_time_ms_now(),
+                ) {
+                    Ok(_maybe_escalation) => tracing::info!(
+                        code = "APPROVAL_TOAST_ACTIVATION_DECIDED",
+                        approval_id = %approval_id,
+                        activation_id = %activation_id,
+                        decision = %decision,
+                        after_status = response.decision.after_status.as_str(),
+                        "approval toast activation updated durable queue row"
+                    ),
+                    Err(error) => tracing::error!(
+                        code = "ESCALATION_TOAST_ACTIVATION_ACK_FAILED",
+                        approval_id = %approval_id,
+                        activation_id = %activation_id,
+                        decision = %decision,
+                        detail = %error.message,
+                        "approval toast activation updated durable queue row but failed to acknowledge linked escalation"
+                    ),
+                }
+            }
             Err(error) => tracing::warn!(
                 code = "APPROVAL_TOAST_ACTIVATION_FAILED",
                 approval_id = %approval_id,
@@ -1100,7 +1119,31 @@ impl SynapseService {
             Value::Null,
             "pending",
         ))?;
-        let result = decide_approval(&db, &params, &by_session);
+        let result = match decide_approval(&db, &params, &by_session) {
+            Ok(response) => {
+                match super::escalation::ack_from_approval_item_decision(
+                    &db,
+                    &response.item,
+                    params.decision.as_str(),
+                    response.item.decision_note.as_deref(),
+                    &by_session,
+                    super::session_registry::unix_time_ms_now(),
+                ) {
+                    Ok(_maybe_escalation) => Ok(response),
+                    Err(error) => {
+                        tracing::error!(
+                            code = "ESCALATION_APPROVAL_ACK_FAILED",
+                            approval_id = %params.approval_id,
+                            decision = params.decision.as_str(),
+                            detail = %error.message,
+                            "approval row was decided but linked escalation ack failed"
+                        );
+                        Err(error)
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
         match &result {
             Ok(response) => self.command_audit_final(
                 super::command_audit::CommandAuditInput::mcp(

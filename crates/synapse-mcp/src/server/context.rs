@@ -443,7 +443,34 @@ impl SynapseService {
             )
             .with_channel("dashboard"),
         )?;
-        let result = crate::m3::approvals::decide_approval_from_activation(&db, params, by_session);
+        let result = match crate::m3::approvals::decide_approval_from_activation(
+            &db, params, by_session,
+        ) {
+            Ok(response) => {
+                match super::escalation::ack_from_approval_item_decision(
+                    &db,
+                    &response.decision.item,
+                    params.decision.as_str(),
+                    response.decision.item.decision_note.as_deref(),
+                    by_session,
+                    super::session_registry::unix_time_ms_now(),
+                ) {
+                    Ok(_maybe_escalation) => Ok(response),
+                    Err(error) => {
+                        tracing::error!(
+                            code = "ESCALATION_APPROVAL_ACTIVATION_ACK_FAILED",
+                            approval_id = %params.approval_id,
+                            activation_id = %params.activation_id,
+                            decision = %params.decision,
+                            detail = %error.message,
+                            "approval activation decided durable queue row but failed to acknowledge linked escalation"
+                        );
+                        Err(error)
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
         match &result {
             Ok(response) => self.command_audit_final(
                 super::command_audit::CommandAuditInput::mcp(

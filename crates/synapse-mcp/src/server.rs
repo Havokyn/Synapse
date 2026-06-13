@@ -177,6 +177,7 @@ pub(crate) mod command_audit;
 mod context;
 pub(crate) use context::AgentTranscriptSnapshotRow;
 pub(crate) mod drain;
+pub(crate) mod escalation;
 mod everquest_autocombat;
 mod everquest_contextgraph;
 mod everquest_domain;
@@ -534,7 +535,8 @@ impl SynapseService {
             + Self::reality_tool_router()
             + Self::m3_tool_router()
             + Self::m4_tool_router()
-            + Self::notify_tool_router();
+            + Self::notify_tool_router()
+            + Self::escalation_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface
         // unless the operator opts in (SYNAPSE_ENABLE_EVERQUEST). No capability
         // is lost — visibility is gated. rmcp builds the tool list once per
