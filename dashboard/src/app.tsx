@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import {
@@ -6,6 +6,8 @@ import {
   CheckCircle2,
   Gauge,
   LayoutDashboard,
+  LogIn,
+  LogOut,
   Moon,
   RefreshCw,
   Rows3,
@@ -32,9 +34,13 @@ import {
 import {
   buildAgents,
   buildToolCalls,
+  fetchDashboardAuthStatus,
   fetchDashboardState,
+  loginDashboard,
+  logoutDashboard,
   panelData,
   type AgentSummary,
+  type DashboardAuthStatus,
   type DashboardState,
   type FleetStatus
 } from "@/lib/dashboard-state";
@@ -48,9 +54,15 @@ export function App() {
   const setTheme = useUiStore((state) => state.setTheme);
   const selectedAgentId = useUiStore((state) => state.selectedAgentId);
   const setSelectedAgentId = useUiStore((state) => state.setSelectedAgentId);
+  const authQuery = useQuery({
+    queryKey: ["dashboard-auth"],
+    queryFn: fetchDashboardAuthStatus,
+    retry: false
+  });
   const query = useQuery({
     queryKey: ["dashboard-state"],
-    queryFn: fetchDashboardState
+    queryFn: fetchDashboardState,
+    enabled: authQuery.data?.authenticated === true
   });
 
   useEffect(() => {
@@ -83,8 +95,23 @@ export function App() {
   const freshnessMs = state ? Date.now() - state.generated_at_unix_ms : undefined;
   const stale = query.isError || (freshnessMs !== undefined && freshnessMs > 10000);
 
+  if (authQuery.data?.authenticated !== true) {
+    return (
+      <AppShell sidebar={<Sidebar state={state} auth={authQuery.data} />}>
+        <LoginView
+          auth={authQuery.data}
+          pending={authQuery.isLoading}
+          onAuthenticated={() => {
+            authQuery.refetch();
+            query.refetch();
+          }}
+        />
+      </AppShell>
+    );
+  }
+
   return (
-    <AppShell sidebar={<Sidebar state={state} />}>
+    <AppShell sidebar={<Sidebar state={state} auth={authQuery.data} />}>
       <PageHeader
         title="Fleet Overview"
         subtitle={
@@ -101,6 +128,23 @@ export function App() {
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Refresh</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() =>
+                    logoutDashboard().then(() => {
+                      authQuery.refetch();
+                    })
+                  }
+                  aria-label="Lock dashboard"
+                >
+                  <LogOut aria-hidden="true" className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Lock</TooltipContent>
             </Tooltip>
             <DensityControl density={density} setDensity={setDensity} />
             <label className="flex items-center gap-2 text-sm text-secondary">
@@ -208,7 +252,71 @@ export function App() {
   );
 }
 
-function Sidebar({ state }: { state?: DashboardState }) {
+function LoginView({
+  auth,
+  pending,
+  onAuthenticated
+}: {
+  auth?: DashboardAuthStatus;
+  pending: boolean;
+  onAuthenticated: () => void;
+}) {
+  const [credential, setCredential] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await loginDashboard(credential);
+      setCredential("");
+      onAuthenticated();
+    } catch (loginError) {
+      setError(rawText(loginError) || "Access denied");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <>
+      <PageHeader
+        title="Dashboard Access"
+        subtitle={<span>{pending ? "Checking session" : auth?.authenticated ? "Session active" : "Session required"}</span>}
+        actions={<span className="text-sm text-secondary">Loopback only</span>}
+      />
+      <Section
+        title="Unlock"
+        tier="overview"
+        questions={[
+          "Is a dashboard session active?",
+          "Can the operator mint a cookie session?",
+          "Did the login fail closed?"
+        ]}
+      >
+        <form className="max-w-md space-y-3" onSubmit={submit}>
+          <label className="block text-sm text-secondary">
+            <span className="mb-1 block text-label font-medium uppercase text-muted">Access token</span>
+            <input
+              className="h-10 w-full rounded-md border border-border bg-surface-1 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              type="password"
+              value={credential}
+              autoComplete="off"
+              onChange={(event) => setCredential(event.target.value)}
+            />
+          </label>
+          {error ? <div className="text-sm text-danger-fg">{error}</div> : null}
+          <Button type="submit" variant="primary" disabled={!credential.trim() || submitting}>
+            <LogIn aria-hidden="true" className="h-4 w-4" />
+            Unlock
+          </Button>
+        </form>
+      </Section>
+    </>
+  );
+}
+
+function Sidebar({ state, auth }: { state?: DashboardState; auth?: DashboardAuthStatus }) {
   const health = asRecord(panelData(state?.daemon));
   return (
     <nav className="space-y-4" aria-label="Dashboard">
@@ -230,6 +338,10 @@ function Sidebar({ state }: { state?: DashboardState }) {
       <div className="rounded-lg border border-border bg-surface-2 p-3">
         <div className="text-label font-medium uppercase text-muted">Loopback</div>
         <div className="mt-1 truncate font-mono text-sm text-primary">{state?.bind_addr || "pending"}</div>
+      </div>
+      <div className="rounded-lg border border-border bg-surface-2 p-3">
+        <div className="text-label font-medium uppercase text-muted">Auth</div>
+        <div className="mt-1 truncate font-mono text-sm text-primary">{auth?.authenticated ? auth.method : "locked"}</div>
       </div>
     </nav>
   );

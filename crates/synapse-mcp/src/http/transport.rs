@@ -31,9 +31,12 @@ use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    http::auth::{self, HttpAuth},
     http::session,
     http::sse::{self, SseState},
+    http::{
+        auth::{self, HttpAuth},
+        dashboard_auth::{self, CsrfPolicy, DashboardAuth},
+    },
     m2::M2ServiceConfig,
     m3::M3ServiceConfig,
     m4::M4ServiceConfig,
@@ -54,6 +57,7 @@ struct HttpState {
     shutdown_cancel: CancellationToken,
     drain_state: crate::server::drain::DaemonDrainState,
     sse_state: SseState,
+    dashboard_auth: DashboardAuth,
     /// Journal handle for the push-telemetry ingress (#899); the same DB the
     /// MCP session store writes through.
     agent_events_db: Arc<Db>,
@@ -421,6 +425,8 @@ fn router(
         session_lifecycle.clone(),
         shutdown_cancel.child_token(),
     );
+    let dashboard_auth =
+        DashboardAuth::new(Arc::clone(&agent_events_db), Arc::clone(&auth), bind_addr);
     let state = HttpState {
         bind_addr,
         health_service,
@@ -428,6 +434,7 @@ fn router(
         shutdown_cancel: shutdown_cancel.clone(),
         drain_state: drain_state.clone(),
         sse_state,
+        dashboard_auth,
         agent_events_db,
     };
     let protected_routes = Router::new()
@@ -478,6 +485,10 @@ fn router(
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard_index))
         .route("/dashboard/assets/{asset}", get(dashboard_asset))
+        .route("/dashboard/auth/status", get(dashboard_auth_status))
+        .route("/dashboard/auth/login", post(dashboard_auth_login))
+        .route("/dashboard/auth/logout", post(dashboard_auth_logout))
+        .route("/dashboard/auth/failures", get(dashboard_auth_failures))
         .route("/dashboard/state.json", get(dashboard_state))
         .route(
             "/dashboard/local-model-spawn",
@@ -1275,6 +1286,7 @@ struct DashboardStateResponse {
     generated_at_unix_ms: u64,
     bind_addr: String,
     token_policy: &'static str,
+    auth: DashboardPanel,
     daemon: DashboardPanel,
     sessions: DashboardPanel,
     lease: DashboardPanel,
@@ -1342,6 +1354,41 @@ struct DashboardStorageSummary {
     cf_sizes: BTreeMap<String, u64>,
     cf_row_counts: BTreeMap<String, u64>,
     audit_retention_policy_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardLoginRequest {
+    credential: String,
+}
+
+#[derive(Serialize)]
+struct DashboardAuthStatusResponse {
+    ok: bool,
+    authenticated: bool,
+    method: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csrf_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_unix_ms: Option<u64>,
+    source_of_truth: &'static str,
+}
+
+#[derive(Serialize)]
+struct DashboardAuthLoginResponse {
+    ok: bool,
+    authenticated: bool,
+    method: &'static str,
+    csrf_token: String,
+    expires_unix_ms: u64,
+    source_of_truth: &'static str,
+}
+
+#[derive(Serialize)]
+struct DashboardAuthLogoutResponse {
+    ok: bool,
+    revoked_row_key: Option<String>,
+    source_of_truth: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1430,8 +1477,109 @@ async fn dashboard_asset(
     }
 }
 
+async fn dashboard_auth_status(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    match state
+        .dashboard_auth
+        .status(&headers, "GET", "/dashboard/auth/status")
+    {
+        Ok(status) => with_dashboard_security_headers(
+            Json(DashboardAuthStatusResponse {
+                ok: true,
+                authenticated: status.authenticated,
+                method: dashboard_auth_method_label(&status.method),
+                csrf_token: status.csrf_token,
+                expires_unix_ms: status.expires_unix_ms,
+                source_of_truth: "CF_KV dashboard-auth/v1",
+            })
+            .into_response(),
+        ),
+        Err(response) => with_dashboard_security_headers(response),
+    }
+}
+
+async fn dashboard_auth_login(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardLoginRequest>,
+) -> Response {
+    match state.dashboard_auth.login(
+        &headers,
+        "POST",
+        "/dashboard/auth/login",
+        &request.credential,
+    ) {
+        Ok(login) => {
+            let max_age_ms = login
+                .expires_unix_ms
+                .saturating_sub(dashboard_unix_time_ms());
+            let cookie = match dashboard_auth::session_cookie_header(
+                &login.session_cookie_value,
+                max_age_ms,
+            ) {
+                Ok(cookie) => cookie,
+                Err(response) => return with_dashboard_security_headers(response),
+            };
+            let mut response = with_dashboard_security_headers(
+                Json(DashboardAuthLoginResponse {
+                    ok: true,
+                    authenticated: true,
+                    method: "cookie",
+                    csrf_token: login.csrf_token,
+                    expires_unix_ms: login.expires_unix_ms,
+                    source_of_truth: "CF_KV dashboard-auth/v1",
+                })
+                .into_response(),
+            );
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+            response
+        }
+        Err(response) => with_dashboard_security_headers(response),
+    }
+}
+
+async fn dashboard_auth_logout(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    match state
+        .dashboard_auth
+        .logout(&headers, "POST", "/dashboard/auth/logout")
+    {
+        Ok(logout) => {
+            let mut response = with_dashboard_security_headers(
+                Json(DashboardAuthLogoutResponse {
+                    ok: true,
+                    revoked_row_key: logout.revoked_row_key,
+                    source_of_truth: "CF_KV dashboard-auth/v1",
+                })
+                .into_response(),
+            );
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                dashboard_auth::clear_session_cookie_header(),
+            );
+            response
+        }
+        Err(response) => with_dashboard_security_headers(response),
+    }
+}
+
+async fn dashboard_auth_failures(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "GET",
+        "/dashboard/auth/failures",
+        CsrfPolicy::NotRequired,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    with_dashboard_security_headers(Json(state.dashboard_auth.snapshot()).into_response())
+}
+
 async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = dashboard_local_only(&state, &headers) {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "GET",
+        "/dashboard/state.json",
+        CsrfPolicy::NotRequired,
+    ) {
         return with_dashboard_security_headers(response);
     }
     let active_sessions = state.session_manager.sessions.read().await.len();
@@ -1467,6 +1615,7 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         generated_at_unix_ms: dashboard_unix_time_ms(),
         bind_addr: state.bind_addr.to_string(),
         token_policy: "dashboard responses never include bearer tokens",
+        auth: DashboardPanel::ok("CF_KV dashboard-auth/v1", state.dashboard_auth.snapshot()),
         daemon: DashboardPanel::ok("health", &health),
         sessions,
         lease,
@@ -1495,7 +1644,12 @@ async fn dashboard_local_model_spawn(
     headers: HeaderMap,
     Json(request): Json<DashboardLocalModelSpawnRequest>,
 ) -> Response {
-    if let Err(response) = dashboard_local_only(&state, &headers) {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/local-model-spawn",
+        CsrfPolicy::Required,
+    ) {
         return with_dashboard_security_headers(response);
     }
     let params = match dashboard_local_model_spawn_params(request) {
@@ -1573,6 +1727,13 @@ fn dashboard_local_model_spawn_params(
 fn trim_optional_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn dashboard_auth_method_label(method: &dashboard_auth::DashboardAuthMethod) -> &'static str {
+    match method {
+        dashboard_auth::DashboardAuthMethod::Bearer => "bearer",
+        dashboard_auth::DashboardAuthMethod::Cookie => "cookie",
+    }
 }
 
 fn dashboard_error_response(
@@ -1855,12 +2016,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-BhBZc0Rv.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-DEsmbRp9.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-Da2C2yR8.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-CcVpm2I5.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-BhBZc0Rv.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-DEsmbRp9.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-Da2C2yR8.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-CcVpm2I5.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]

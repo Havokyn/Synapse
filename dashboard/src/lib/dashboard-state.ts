@@ -12,6 +12,7 @@ export interface DashboardState {
   generated_at_unix_ms: number;
   bind_addr: string;
   token_policy: string;
+  auth: DashboardPanel;
   daemon: DashboardPanel;
   sessions: DashboardPanel;
   lease: DashboardPanel;
@@ -63,8 +64,86 @@ export interface ToolCallSummary {
   raw: unknown;
 }
 
+export interface DashboardAuthStatus {
+  ok: boolean;
+  authenticated: boolean;
+  method: "cookie" | "bearer";
+  csrf_token?: string;
+  expires_unix_ms?: number;
+  source_of_truth: string;
+}
+
+let csrfToken: string | null = null;
+
+export function dashboardCsrfToken() {
+  return csrfToken;
+}
+
+function setCsrfToken(value?: string | null) {
+  csrfToken = value || null;
+}
+
+export async function fetchDashboardAuthStatus(): Promise<DashboardAuthStatus> {
+  const response = await fetch("/dashboard/auth/status", {
+    cache: "no-store",
+    credentials: "same-origin"
+  });
+  if (response.status === 401) {
+    setCsrfToken(null);
+    return {
+      ok: false,
+      authenticated: false,
+      method: "cookie",
+      source_of_truth: "CF_KV dashboard-auth/v1"
+    };
+  }
+  if (!response.ok) {
+    throw new Error(`dashboard auth failed: ${response.status}`);
+  }
+  const status = (await response.json()) as DashboardAuthStatus;
+  setCsrfToken(status.csrf_token);
+  return status;
+}
+
+export async function loginDashboard(credential: string): Promise<DashboardAuthStatus> {
+  const response = await fetch("/dashboard/auth/login", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ credential })
+  });
+  if (!response.ok) {
+    setCsrfToken(null);
+    throw new Error(`dashboard login failed: ${response.status}`);
+  }
+  const status = (await response.json()) as DashboardAuthStatus;
+  setCsrfToken(status.csrf_token);
+  return status;
+}
+
+export async function logoutDashboard(): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const response = await fetch("/dashboard/auth/logout", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers
+  });
+  setCsrfToken(null);
+  if (!response.ok) {
+    throw new Error(`dashboard logout failed: ${response.status}`);
+  }
+}
+
 export async function fetchDashboardState(): Promise<DashboardState> {
-  const response = await fetch("/dashboard/state.json", { cache: "no-store" });
+  const response = await fetch("/dashboard/state.json", {
+    cache: "no-store",
+    credentials: "same-origin"
+  });
   if (!response.ok) {
     throw new Error(`dashboard state failed: ${response.status}`);
   }

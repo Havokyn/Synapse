@@ -1,4 +1,5 @@
 mod auth;
+mod dashboard_auth;
 mod session;
 pub mod sse;
 mod transport;

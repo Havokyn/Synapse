@@ -28,14 +28,14 @@ enum TokenSource {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum AuthFailure {
+pub(super) enum AuthFailure {
     Missing,
     Malformed,
     Invalid,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum OriginFailure {
+pub(super) enum OriginFailure {
     HostMissing,
     HostMalformed,
     HostRefused,
@@ -55,7 +55,7 @@ impl HttpAuth {
     }
 
     #[cfg(test)]
-    fn from_token(token: &str) -> Self {
+    pub(super) fn from_token(token: &str) -> Self {
         Self {
             token_digest: digest_token(token),
             source: TokenSource::Env,
@@ -70,7 +70,7 @@ impl HttpAuth {
         }
     }
 
-    fn authorize(&self, headers: &HeaderMap) -> Result<(), AuthFailure> {
+    pub(super) fn authorize(&self, headers: &HeaderMap) -> Result<(), AuthFailure> {
         let token = bearer_token(headers)?;
         if self.token_matches(token) {
             Ok(())
@@ -79,12 +79,15 @@ impl HttpAuth {
         }
     }
 
-    fn validate_origin_and_host(&self, headers: &HeaderMap) -> Result<(), OriginFailure> {
+    pub(super) fn validate_origin_and_host(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(), OriginFailure> {
         validate_host(headers)?;
         validate_origin(headers, self.bind_addr)
     }
 
-    fn token_matches(&self, candidate: &str) -> bool {
+    pub(super) fn token_matches(&self, candidate: &str) -> bool {
         let candidate_digest = digest_token(candidate);
         bool::from(
             self.token_digest
