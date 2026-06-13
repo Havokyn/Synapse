@@ -1,9 +1,10 @@
-//! `agent_query` tool end-to-end FSV (#911): real daemon binary, real RocksDB,
-//! real MCP JSON-RPC. Plants a synthetic agent's `CF_AGENT_EVENTS` journal and
-//! `CF_AGENT_TRANSCRIPTS` rows physically, launches the daemon over that exact
-//! database, then drives `agent_query` through the wire and reconciles every
-//! reconstructed field against the rows that were planted. Ends with a physical
-//! readback proving the journal rows are the ones the snapshot reported on.
+//! `agent_query` tool integration regression (#911): real daemon binary, real
+//! `RocksDB`, real MCP JSON-RPC. Plants a synthetic agent's `CF_AGENT_EVENTS`
+//! journal and `CF_AGENT_TRANSCRIPTS` rows physically, launches the daemon over
+//! that exact database, then drives `agent_query` through the wire and
+//! reconciles every reconstructed field against the rows that were planted.
+//! Ends with a physical readback proving the journal rows are the ones the
+//! snapshot reported on.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,17 +20,15 @@ use synapse_storage::{
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
-const SPAWN: &str = "agent-spawn-fsv-1";
-const SESSION: &str = "session-fsv-1";
+const SPAWN: &str = "agent-spawn-query-1";
+const SESSION: &str = "session-query-1";
 
 fn now_ns() -> u64 {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos(),
-    )
-    .expect("ns fits u64")
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
 fn structured(result: &Value) -> anyhow::Result<Value> {
@@ -47,15 +46,18 @@ fn plant_event(
     spawn_id: Option<&str>,
     session_id: Option<&str>,
     decorate: impl FnOnce(&mut AgentEventRecord),
-) {
+) -> anyhow::Result<()> {
     let mut record = AgentEventRecord::new(ts_ns, kind);
     record.spawn_id = spawn_id.map(ToOwned::to_owned);
     record.session_id = session_id.map(ToOwned::to_owned);
     decorate(&mut record);
-    record.validate().expect("planted journal row valid");
-    let value = serde_json::to_vec(&record).expect("serialize journal row");
+    record
+        .validate()
+        .map_err(|error| anyhow::anyhow!("planted journal row valid: {error}"))?;
+    let value = serde_json::to_vec(&record).context("serialize journal row")?;
     db.put_batch_pressure_bypass(cf::CF_AGENT_EVENTS, [(agent_event_key(ts_ns, seq), value)])
-        .expect("write journal row");
+        .context("write journal row")?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -67,9 +69,33 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
     let base = now_ns().saturating_sub(60_000_000_000); // ~60s ago, inside lookback
     {
         let db = Db::open(&db_path, SCHEMA_VERSION)?;
-        plant_event(&db, base + 1, 0, AgentEventKind::SpawnRequested, Some(SPAWN), None, |_| {});
-        plant_event(&db, base + 2, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
-        plant_event(&db, base + 3, 0, AgentEventKind::TurnStarted, Some(SPAWN), Some(SESSION), |_| {});
+        plant_event(
+            &db,
+            base + 1,
+            0,
+            AgentEventKind::SpawnRequested,
+            Some(SPAWN),
+            None,
+            |_| {},
+        )?;
+        plant_event(
+            &db,
+            base + 2,
+            0,
+            AgentEventKind::SpawnReady,
+            Some(SPAWN),
+            Some(SESSION),
+            |_| {},
+        )?;
+        plant_event(
+            &db,
+            base + 3,
+            0,
+            AgentEventKind::TurnStarted,
+            Some(SPAWN),
+            Some(SESSION),
+            |_| {},
+        )?;
         plant_event(
             &db,
             base + 4,
@@ -80,9 +106,10 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
             |record| {
                 record.attributes.tool_name = Some("Grep".to_owned());
                 record.attributes.tool_call_id = Some("call-grep".to_owned());
-                record.payload = json!({"tool_input_bytes": 19, "tool_input_sha256": "c".repeat(64)});
+                record.payload =
+                    json!({"tool_input_bytes": 19, "tool_input_sha256": "c".repeat(64)});
             },
-        );
+        )?;
         plant_event(
             &db,
             base + 5,
@@ -95,7 +122,7 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
                 record.attributes.tool_call_id = Some("call-grep".to_owned());
                 record.payload = json!({"duration_ms": 8});
             },
-        );
+        )?;
         // Currently inside an Edit tool.
         plant_event(
             &db,
@@ -107,9 +134,10 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
             |record| {
                 record.attributes.tool_name = Some("Edit".to_owned());
                 record.attributes.tool_call_id = Some("call-edit".to_owned());
-                record.payload = json!({"tool_input_bytes": 55, "tool_input_sha256": "d".repeat(64)});
+                record.payload =
+                    json!({"tool_input_bytes": 55, "tool_input_sha256": "d".repeat(64)});
             },
-        );
+        )?;
 
         // Transcript: one assistant line with known usage.
         let mut tr = AgentTranscriptRecord::new(
@@ -137,30 +165,42 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
             total_cost_micro_usd: None,
             model_usage: Vec::new(),
         });
-        tr.validate().expect("planted transcript row valid");
-        let value = serde_json::to_vec(&tr).expect("serialize transcript row");
+        tr.validate()
+            .map_err(|error| anyhow::anyhow!("planted transcript row valid: {error}"))?;
+        let value = serde_json::to_vec(&tr).context("serialize transcript row")?;
         db.put_batch_pressure_bypass(
             cf::CF_AGENT_TRANSCRIPTS,
             [(agent_transcript_key(SPAWN, 1), value)],
         )
-        .expect("write transcript row");
+        .context("write transcript row")?;
     } // db dropped -> lock released
 
     // ---- Launch the real daemon over that database. ----
     let db_path_string = db_path.to_string_lossy().into_owned();
-    let mut client = StdioMcpClient::launch_and_init_with_env(
-        None,
-        &[("SYNAPSE_DB", db_path_string.as_str())],
-    )
-    .await?;
+    let mut client =
+        StdioMcpClient::launch_and_init_with_env(None, &[("SYNAPSE_DB", db_path_string.as_str())])
+            .await?;
 
     // ---- Drive agent_query through the wire. ----
-    let response = structured(&client.tools_call("agent_query", json!({"session_id": SESSION})).await?)?;
+    let response = structured(
+        &client
+            .tools_call("agent_query", json!({"session_id": SESSION}))
+            .await?,
+    )?;
 
-    ensure!(response["found"] == json!(true), "agent must be found: {response}");
+    ensure!(
+        response["found"] == json!(true),
+        "agent must be found: {response}"
+    );
     ensure!(response["spawn_id"] == json!(SPAWN), "spawn_id: {response}");
-    ensure!(response["session_id"] == json!(SESSION), "session_id: {response}");
-    ensure!(response["state"] == json!("working"), "state must be working: {response}");
+    ensure!(
+        response["session_id"] == json!(SESSION),
+        "session_id: {response}"
+    );
+    ensure!(
+        response["state"] == json!("working"),
+        "state must be working: {response}"
+    );
 
     // Current = in-flight Edit; last completed = Grep (8ms).
     ensure!(
@@ -181,14 +221,32 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
     );
 
     // Recent events: all six planted, oldest first.
-    let events = response["recent_events"].as_array().context("recent_events array")?;
-    ensure!(events.len() == 6, "expected 6 events, got {}: {response}", events.len());
-    ensure!(events[0]["kind"] == json!("spawn_requested"), "first event: {response}");
+    let events = response["recent_events"]
+        .as_array()
+        .context("recent_events array")?;
+    ensure!(
+        events.len() == 6,
+        "expected 6 events, got {}: {response}",
+        events.len()
+    );
+    ensure!(
+        events[0]["kind"] == json!("spawn_requested"),
+        "first event: {response}"
+    );
 
     // Tokens this turn reconcile exactly with the planted usage row.
-    ensure!(response["turn"]["input_tokens"] == json!(800), "input tokens: {response}");
-    ensure!(response["turn"]["output_tokens"] == json!(150), "output tokens: {response}");
-    ensure!(response["turn"]["cache_read_input_tokens"] == json!(12_000), "cache read: {response}");
+    ensure!(
+        response["turn"]["input_tokens"] == json!(800),
+        "input tokens: {response}"
+    );
+    ensure!(
+        response["turn"]["output_tokens"] == json!(150),
+        "output tokens: {response}"
+    );
+    ensure!(
+        response["turn"]["cache_read_input_tokens"] == json!(12_000),
+        "cache read: {response}"
+    );
     ensure!(
         response["turn"]["total_tokens"] == json!(800 + 150 + 12_000 + 400),
         "total tokens: {response}"
@@ -203,9 +261,14 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
     );
 
     // task is null (not fabricated); its source names #910.
-    ensure!(response["task"] == json!(null), "task must be null: {response}");
     ensure!(
-        response["sources"]["task"].as_str().is_some_and(|s| s.contains("#910")),
+        response["task"] == json!(null),
+        "task must be null: {response}"
+    );
+    ensure!(
+        response["sources"]["task"]
+            .as_str()
+            .is_some_and(|s| s.contains("#910")),
         "task source names #910: {response}"
     );
 
@@ -215,9 +278,14 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
             .tools_call("agent_query", json!({"session_id": "session-nope"}))
             .await?,
     )?;
-    ensure!(unknown["found"] == json!(false), "unknown session found=false: {unknown}");
     ensure!(
-        unknown["recent_events"].as_array().is_some_and(Vec::is_empty),
+        unknown["found"] == json!(false),
+        "unknown session found=false: {unknown}"
+    );
+    ensure!(
+        unknown["recent_events"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
         "unknown session has no events: {unknown}"
     );
 
@@ -231,12 +299,16 @@ async fn agent_query_tool_reconstructs_a_planted_agent_end_to_end() -> anyhow::R
     let mut matched = 0_usize;
     for (_key, value) in &rows {
         let record: AgentEventRecord = decode_json(value).context("decode journal row")?;
-        if record.spawn_id.as_deref() == Some(SPAWN) || record.session_id.as_deref() == Some(SESSION)
+        if record.spawn_id.as_deref() == Some(SPAWN)
+            || record.session_id.as_deref() == Some(SESSION)
         {
             matched += 1;
         }
     }
-    ensure!(matched == 6, "physical CF_AGENT_EVENTS holds 6 rows for the agent, found {matched}");
+    ensure!(
+        matched == 6,
+        "physical CF_AGENT_EVENTS holds 6 rows for the agent, found {matched}"
+    );
 
     Ok(())
 }
