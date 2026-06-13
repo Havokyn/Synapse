@@ -203,7 +203,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Cancel a durable background shell job by exact job id, terminating only the recorded local job-owned process tree and returning status/log/process readback. SSH jobs report remote cleanup as unverified unless the job status contains remote pid/process-group metadata."
+        description = "Cancel a durable background shell job by exact job id, terminating the recorded local job-owned process tree and returning status/log/process readback. Direct SSH jobs with a tracked remote pid/process-group attempt bounded remote cleanup and report whether that cleanup was verified; untracked SSH modes fail closed with the remote cleanup handle/status marked unverified."
     )]
     pub async fn act_run_shell_cancel(
         &self,

@@ -106,7 +106,16 @@ const SHELL_REMOTE_TRANSPORT_LOCAL: &str = "local";
 const SHELL_REMOTE_TRANSPORT_SSH: &str = "ssh";
 const SHELL_REMOTE_CLEANUP_NOT_APPLICABLE: &str = "not_applicable";
 const SHELL_REMOTE_CLEANUP_NOT_TRACKED: &str = "remote_process_not_tracked";
+const SHELL_REMOTE_CLEANUP_TRACKING_PENDING: &str = "remote_process_tracking_pending";
+const SHELL_REMOTE_CLEANUP_TRACKED: &str = "remote_process_tracked";
+const SHELL_REMOTE_CLEANUP_VERIFIED: &str = "remote_cleanup_verified";
 const SHELL_REMOTE_CLEANUP_UNVERIFIED: &str = "remote_cleanup_unverified";
+const SHELL_REMOTE_CLEANUP_FAILED: &str = "remote_cleanup_failed";
+const SHELL_REMOTE_PROCESS_MARKER: &str = "SYNAPSE_REMOTE_PROCESS_V1";
+const SHELL_REMOTE_CLEANUP_MARKER: &str = "SYNAPSE_REMOTE_CLEANUP_V1";
+const SHELL_REMOTE_METADATA_PREFIX_BYTES: usize = 128 * 1024;
+const SHELL_REMOTE_METADATA_WAIT_MS: u64 = 1_500;
+const SHELL_REMOTE_CLEANUP_TIMEOUT_MS: u64 = 15_000;
 pub const SHELL_PATTERN_TOO_BROAD: &str = "SHELL_PATTERN_TOO_BROAD";
 pub const LAUNCH_PATTERN_TOO_BROAD: &str = "LAUNCH_PATTERN_TOO_BROAD";
 
@@ -1564,7 +1573,7 @@ pub fn start_authorized_shell_job(
 
     let stdout_file = open_shell_job_output(&paths.stdout_path, "stdout", &job_id)?;
     let stderr_file = open_shell_job_output(&paths.stderr_path, "stderr", &job_id)?;
-    let spawned = match spawn_shell_job_child(&params, stdout_file, stderr_file, context) {
+    let spawned = match spawn_shell_job_child(&params, &job_id, stdout_file, stderr_file, context) {
         Ok(spawned) => spawned,
         Err(error) => {
             let mut status = shell_job_status_record(
@@ -1686,9 +1695,11 @@ pub fn shell_job_status(
     let paths = shell_job_paths_for_id(session_id, &params.job_id)?;
     let mut job = read_shell_job_status(&paths.status_path, &params.job_id)?;
     job = reconcile_shell_job_process_state(job, &paths)?;
+    refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
     let mut running = shell_job_process_still_running(&job);
     if shell_job_live_status(&job.status) && !running {
         job = reconcile_shell_job_process_state(job, &paths)?;
+        refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
         running = shell_job_process_still_running(&job);
     }
     let tail_bytes =
@@ -1977,6 +1988,11 @@ pub fn cancel_shell_job(
         ensure_shell_job_remote_scope_from_process_tree(&mut job);
         job.cancel_requested = true;
         job.status = "cancel_requested".to_owned();
+        let _ = wait_for_shell_job_remote_metadata(
+            &mut job,
+            &paths,
+            Duration::from_millis(SHELL_REMOTE_METADATA_WAIT_MS),
+        )?;
         write_shell_job_status(&paths.status_path, &job)?;
         if let Some(pid) = job.pid {
             let termination = terminate_shell_job_process_tree(pid);
@@ -1986,22 +2002,37 @@ pub fn cancel_shell_job(
         } else {
             termination_status = "pid_unavailable".to_owned();
         }
-        mark_shell_job_remote_cleanup_unverified(
-            &mut job,
-            "act_run_shell_cancel",
-            &termination_status,
-        );
+        refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
+        let _remote_cleanup_status =
+            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel");
+        if job.remote_process_scope.remote_cleanup_required
+            && !job.remote_process_scope.remote_cleanup_verified
+            && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
+        {
+            mark_shell_job_remote_cleanup_unverified(
+                &mut job,
+                "act_run_shell_cancel",
+                &termination_status,
+            );
+        }
         termination_status =
             remote_aware_termination_status(&termination_status, &job.remote_process_scope);
         write_shell_job_status(&paths.status_path, &job)?;
     } else if job.remote_process_scope.remote_cleanup_required
         && !job.remote_process_scope.remote_cleanup_verified
     {
-        mark_shell_job_remote_cleanup_unverified(
-            &mut job,
-            "act_run_shell_cancel",
-            &termination_status,
-        );
+        refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
+        let _remote_cleanup_status =
+            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel");
+        if !job.remote_process_scope.remote_cleanup_verified
+            && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
+        {
+            mark_shell_job_remote_cleanup_unverified(
+                &mut job,
+                "act_run_shell_cancel",
+                &termination_status,
+            );
+        }
         termination_status =
             remote_aware_termination_status(&termination_status, &job.remote_process_scope);
         write_shell_job_status(&paths.status_path, &job)?;
@@ -5580,18 +5611,34 @@ fn ssh_remote_process_scope(
     evidence: impl Into<String>,
 ) -> ActRunShellRemoteProcessScope {
     let client = ssh_family_client_for_executable(command).unwrap_or("ssh");
+    let mut cleanup_status = SHELL_REMOTE_CLEANUP_NOT_TRACKED.to_owned();
+    let mut detection_evidence = vec![format!("{}:{}", evidence.into(), executable_leaf(command))];
+    if client == "ssh" {
+        if let Some(parts) = ssh_direct_command_parts(args) {
+            if parts.remote_command.is_some() {
+                if let Some(reason) = parts.tracking_unsupported_reason {
+                    detection_evidence.push(format!("remote_tracking_unsupported:{reason}"));
+                } else {
+                    cleanup_status = SHELL_REMOTE_CLEANUP_TRACKING_PENDING.to_owned();
+                    detection_evidence.push(format!(
+                        "remote_tracking_pending:setsid_stderr_marker:{SHELL_REMOTE_PROCESS_MARKER}"
+                    ));
+                }
+            }
+        }
+    }
     ActRunShellRemoteProcessScope {
         transport: SHELL_REMOTE_TRANSPORT_SSH.to_owned(),
         local_process_scope: "local_ssh_client_process_tree".to_owned(),
         remote_cleanup_required: true,
         remote_cleanup_verified: false,
-        remote_cleanup_status: SHELL_REMOTE_CLEANUP_NOT_TRACKED.to_owned(),
+        remote_cleanup_status: cleanup_status,
         remote_identity: shell_transfer_remote_identity(client, args),
         remote_process_id: None,
         remote_process_group_id: None,
         remote_cleanup_error_code: None,
         remote_cleanup_message: None,
-        detection_evidence: vec![format!("{}:{}", evidence.into(), executable_leaf(command))],
+        detection_evidence,
     }
 }
 
@@ -5613,8 +5660,98 @@ fn executable_leaf(command: &str) -> &str {
 }
 
 fn ssh_remote_identity(args: &[String]) -> Option<String> {
+    if let Some(parts) = ssh_direct_command_parts(args) {
+        return Some(parts.remote_identity);
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SshCommandParts {
+    control_args: Vec<String>,
+    remote_identity: String,
+    remote_command: Option<String>,
+    tracking_unsupported_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SshRemoteTrackingPlan {
+    spawn_args: Vec<String>,
+    remote_identity: String,
+    remote_command: String,
+    marker: String,
+}
+
+fn shell_job_spawn_args(params: &ActRunShellStartParams, job_id: &str) -> Vec<String> {
+    if let Some(plan) = ssh_remote_tracking_plan(&params.command, &params.args, job_id) {
+        tracing::info!(
+            code = "M4_ACT_RUN_SHELL_SSH_REMOTE_TRACKING_ENABLED",
+            job_id,
+            remote_identity = %plan.remote_identity,
+            marker = %plan.marker,
+            remote_command_sha256 = %sha256_hex(plan.remote_command.as_bytes()),
+            "act_run_shell_start will capture SSH remote pid/process-group metadata"
+        );
+        return plan.spawn_args;
+    }
+    params.args.clone()
+}
+
+fn ssh_remote_tracking_plan(
+    command: &str,
+    args: &[String],
+    job_id: &str,
+) -> Option<SshRemoteTrackingPlan> {
+    if ssh_family_client_for_executable(command) != Some("ssh") {
+        return None;
+    }
+    let parts = ssh_direct_command_parts(args)?;
+    if parts.tracking_unsupported_reason.is_some() {
+        return None;
+    }
+    let remote_command = parts.remote_command?;
+    if remote_command.trim().is_empty() {
+        return None;
+    }
+
+    let marker = format!("{SHELL_REMOTE_PROCESS_MARKER} job_id={job_id}");
+    let remote_wrapper = ssh_remote_tracking_command(&marker, &remote_command);
+    let mut spawn_args = parts.control_args.clone();
+    spawn_args.push(remote_wrapper);
+    Some(SshRemoteTrackingPlan {
+        spawn_args,
+        remote_identity: parts.remote_identity,
+        remote_command,
+        marker,
+    })
+}
+
+fn ssh_remote_tracking_command(marker: &str, remote_command: &str) -> String {
+    const SCRIPT: &str = r#"marker=$1
+cmd=$2
+if ! command -v setsid >/dev/null 2>&1; then
+  printf '%s error=setsid_unavailable\n' "$marker" >&2
+  exit 127
+fi
+setsid sh -c "$cmd" &
+child=$!
+pgid=$child
+sid=$(ps -o sid= -p "$child" 2>/dev/null | tr -d '[:space:]' || true)
+printf '%s pid=%s pgid=%s sid=%s\n' "$marker" "$child" "$pgid" "$sid" >&2
+wait "$child"
+"#;
+    format!(
+        "sh -c {} synapse-remote-tracker {} {}",
+        posix_single_quote(SCRIPT),
+        posix_single_quote(marker),
+        posix_single_quote(remote_command)
+    )
+}
+
+fn ssh_direct_command_parts(args: &[String]) -> Option<SshCommandParts> {
     let mut index = 0;
     let mut options_done = false;
+    let mut tracking_unsupported_reason = None;
     while index < args.len() {
         let arg = trim_arg_quotes(&args[index]);
         if arg.is_empty() {
@@ -5627,6 +5764,9 @@ fn ssh_remote_identity(args: &[String]) -> Option<String> {
             continue;
         }
         if !options_done && arg.starts_with('-') && arg != "-" {
+            if tracking_unsupported_reason.is_none() {
+                tracking_unsupported_reason = ssh_option_remote_tracking_unsupported_reason(arg);
+            }
             index += if ssh_option_consumes_next(arg, args.get(index + 1)) {
                 2
             } else {
@@ -5634,9 +5774,48 @@ fn ssh_remote_identity(args: &[String]) -> Option<String> {
             };
             continue;
         }
-        return Some(arg.to_owned());
+        let remote_command = if index + 1 < args.len() {
+            Some(args[index + 1..].join(" "))
+        } else {
+            None
+        };
+        return Some(SshCommandParts {
+            control_args: args[..=index].to_vec(),
+            remote_identity: arg.to_owned(),
+            remote_command,
+            tracking_unsupported_reason,
+        });
     }
     None
+}
+
+fn ssh_option_remote_tracking_unsupported_reason(arg: &str) -> Option<&'static str> {
+    if ssh_short_option_has_flag(arg, 'N') {
+        return Some("ssh_no_remote_command_flag");
+    }
+    if ssh_short_option_has_flag(arg, 'f') {
+        return Some("ssh_backgrounds_before_command");
+    }
+    if ssh_short_option_has_flag(arg, 's') {
+        return Some("ssh_subsystem_requested");
+    }
+    if ssh_short_option_has_flag(arg, 'W') {
+        return Some("ssh_stdio_forwarding_requested");
+    }
+    if ssh_short_option_has_flag(arg, 'O') {
+        return Some("ssh_multiplex_control_command");
+    }
+    if ssh_short_option_has_flag(arg, 'Q') {
+        return Some("ssh_query_command");
+    }
+    None
+}
+
+fn ssh_short_option_has_flag(arg: &str, flag: char) -> bool {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    !rest.starts_with('-') && rest.chars().any(|ch| ch == flag)
 }
 
 fn ssh_option_consumes_next(arg: &str, next: Option<&String>) -> bool {
@@ -5745,13 +5924,400 @@ fn mark_shell_job_remote_cleanup_unverified(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteProcessMetadata {
+    job_id: String,
+    pid: String,
+    pgid: String,
+    sid: Option<String>,
+}
+
+fn refresh_shell_job_remote_metadata_from_outputs(
+    job: &mut ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+) -> Result<bool, ErrorData> {
+    if job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH {
+        return Ok(false);
+    }
+    if job.remote_process_scope.remote_process_id.is_some()
+        && job.remote_process_scope.remote_process_group_id.is_some()
+    {
+        return Ok(false);
+    }
+    let stderr_prefix =
+        read_file_prefix_lossy(&paths.stderr_path, SHELL_REMOTE_METADATA_PREFIX_BYTES)?;
+    let stderr_tail = tail_file_lossy(&paths.stderr_path, SHELL_JOB_TAIL_DEFAULT_BYTES as usize)?;
+    let metadata = parse_remote_process_metadata(&stderr_prefix, &job.job_id)
+        .or_else(|| parse_remote_process_metadata(&stderr_tail, &job.job_id));
+    let Some(metadata) = metadata else {
+        return Ok(false);
+    };
+    apply_remote_process_metadata(job, metadata);
+    Ok(true)
+}
+
+fn wait_for_shell_job_remote_metadata(
+    job: &mut ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+    timeout: Duration,
+) -> Result<bool, ErrorData> {
+    let started = Instant::now();
+    loop {
+        if refresh_shell_job_remote_metadata_from_outputs(job, paths)? {
+            return Ok(true);
+        }
+        if started.elapsed() >= timeout {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn parse_remote_process_metadata(
+    stderr: &str,
+    expected_job_id: &str,
+) -> Option<RemoteProcessMetadata> {
+    for line in stderr.lines() {
+        let Some(rest) = line.strip_prefix(SHELL_REMOTE_PROCESS_MARKER) else {
+            continue;
+        };
+        let fields = parse_marker_fields(rest);
+        let job_id = fields.get("job_id")?;
+        if job_id != expected_job_id {
+            continue;
+        }
+        let pid = fields.get("pid")?;
+        let pgid = fields.get("pgid")?;
+        if !valid_remote_process_number(pid) || !valid_remote_process_number(pgid) {
+            continue;
+        }
+        let sid = fields
+            .get("sid")
+            .filter(|value| valid_remote_process_number(value))
+            .cloned();
+        return Some(RemoteProcessMetadata {
+            job_id: job_id.clone(),
+            pid: pid.clone(),
+            pgid: pgid.clone(),
+            sid,
+        });
+    }
+    None
+}
+
+fn apply_remote_process_metadata(job: &mut ActRunShellJobStatus, metadata: RemoteProcessMetadata) {
+    job.remote_process_scope.remote_process_id = Some(metadata.pid.clone());
+    job.remote_process_scope.remote_process_group_id = Some(metadata.pgid.clone());
+    job.remote_process_scope.remote_cleanup_verified = false;
+    job.remote_process_scope.remote_cleanup_status = SHELL_REMOTE_CLEANUP_TRACKED.to_owned();
+    job.remote_process_scope.remote_cleanup_error_code = None;
+    job.remote_process_scope.remote_cleanup_message = Some(format!(
+        "SSH remote process group tracked for cleanup: job_id={} remote_pid={} remote_pgid={}",
+        metadata.job_id, metadata.pid, metadata.pgid
+    ));
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        format!(
+            "remote_process_marker:{SHELL_REMOTE_PROCESS_MARKER}:pid={}:pgid={}",
+            metadata.pid, metadata.pgid
+        ),
+    );
+    if let Some(sid) = metadata.sid {
+        push_unique_evidence(
+            &mut job.remote_process_scope.detection_evidence,
+            format!("remote_session_id:{sid}"),
+        );
+    }
+}
+
+fn push_unique_evidence(evidence: &mut Vec<String>, value: String) {
+    if !evidence.iter().any(|existing| existing == &value) {
+        evidence.push(value);
+    }
+}
+
+fn parse_marker_fields(rest: &str) -> BTreeMap<String, String> {
+    rest.split_whitespace()
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn valid_remote_process_number(value: &str) -> bool {
+    value
+        .parse::<u32>()
+        .is_ok_and(|parsed| parsed > 1 && value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn attempt_shell_job_remote_cleanup(
+    job: &mut ActRunShellJobStatus,
+    trigger: &'static str,
+) -> Option<String> {
+    if job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH
+        || !job.remote_process_scope.remote_cleanup_required
+        || job.remote_process_scope.remote_cleanup_verified
+    {
+        return None;
+    }
+    let Some(pid) = job.remote_process_scope.remote_process_id.clone() else {
+        return None;
+    };
+    let Some(pgid) = job.remote_process_scope.remote_process_group_id.clone() else {
+        return None;
+    };
+    if !valid_remote_process_number(&pid) || !valid_remote_process_number(&pgid) {
+        mark_shell_job_remote_cleanup_failed(
+            job,
+            trigger,
+            "remote_process_metadata_invalid",
+            "remote pid/process-group metadata was present but failed validation",
+        );
+        return Some("remote_cleanup_metadata_invalid".to_owned());
+    }
+    let Some(parts) = ssh_direct_command_parts(&job.args) else {
+        mark_shell_job_remote_cleanup_failed(
+            job,
+            trigger,
+            "ssh_destination_unavailable",
+            "remote process metadata exists but the original SSH destination could not be parsed",
+        );
+        return Some("remote_cleanup_destination_unavailable".to_owned());
+    };
+    let cleanup_command = ssh_remote_cleanup_command(&pid, &pgid);
+    let mut cleanup_args = parts.control_args;
+    cleanup_args.push(cleanup_command);
+    let output = run_shell_cleanup_command_with_timeout(
+        &job.command,
+        &cleanup_args,
+        Duration::from_millis(SHELL_REMOTE_CLEANUP_TIMEOUT_MS),
+    );
+    let readback = match output {
+        Ok(readback) => readback,
+        Err(message) => {
+            mark_shell_job_remote_cleanup_failed(job, trigger, "cleanup_command_failed", &message);
+            return Some("remote_cleanup_command_failed".to_owned());
+        }
+    };
+    let cleanup_status = parse_remote_cleanup_status(&readback.stdout, &pid, &pgid);
+    match cleanup_status.as_deref() {
+        Some("already_gone" | "terminated" | "killed") => {
+            job.remote_process_scope.remote_cleanup_verified = true;
+            job.remote_process_scope.remote_cleanup_status =
+                SHELL_REMOTE_CLEANUP_VERIFIED.to_owned();
+            job.remote_process_scope.remote_cleanup_error_code = None;
+            job.remote_process_scope.remote_cleanup_message = Some(format!(
+                "{trigger} verified SSH remote cleanup for remote pid {pid}, process group {pgid}; cleanup command status={}",
+                cleanup_status.unwrap()
+            ));
+            push_unique_evidence(
+                &mut job.remote_process_scope.detection_evidence,
+                format!("remote_cleanup_marker:{SHELL_REMOTE_CLEANUP_MARKER}:pgid={pgid}"),
+            );
+            if job.error_code.as_deref()
+                == Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED)
+            {
+                job.error_code = None;
+                job.error_message = None;
+            }
+            Some("remote_cleanup_verified".to_owned())
+        }
+        Some("still_running") => {
+            mark_shell_job_remote_cleanup_failed(
+                job,
+                trigger,
+                "remote_process_still_running",
+                &format!(
+                    "SSH remote cleanup command returned still_running for pid {pid}, pgid {pgid}"
+                ),
+            );
+            Some("remote_cleanup_still_running".to_owned())
+        }
+        _ => {
+            mark_shell_job_remote_cleanup_failed(
+                job,
+                trigger,
+                "cleanup_readback_unrecognized",
+                &format!(
+                    "SSH remote cleanup command did not produce a verified cleanup marker; exit={:?}; stdout_sha256={}; stderr_sha256={}",
+                    readback.exit_code,
+                    sha256_hex(readback.stdout.as_bytes()),
+                    sha256_hex(readback.stderr.as_bytes())
+                ),
+            );
+            Some("remote_cleanup_readback_unrecognized".to_owned())
+        }
+    }
+}
+
+fn mark_shell_job_remote_cleanup_failed(
+    job: &mut ActRunShellJobStatus,
+    trigger: &'static str,
+    reason: &'static str,
+    detail: &str,
+) {
+    let remote_identity = job
+        .remote_process_scope
+        .remote_identity
+        .as_deref()
+        .unwrap_or("unknown_remote");
+    let pid = job
+        .remote_process_scope
+        .remote_process_id
+        .as_deref()
+        .unwrap_or("unknown_pid");
+    let pgid = job
+        .remote_process_scope
+        .remote_process_group_id
+        .as_deref()
+        .unwrap_or("unknown_pgid");
+    let message = format!(
+        "{trigger} could not verify SSH remote cleanup for {remote_identity}; remote_pid={pid}; remote_pgid={pgid}; reason={reason}; detail={detail}"
+    );
+    job.remote_process_scope.remote_cleanup_verified = false;
+    job.remote_process_scope.remote_cleanup_status = SHELL_REMOTE_CLEANUP_FAILED.to_owned();
+    job.remote_process_scope.remote_cleanup_error_code =
+        Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED.to_owned());
+    job.remote_process_scope.remote_cleanup_message = Some(message.clone());
+    job.error_code = Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED.to_owned());
+    job.error_message = Some(message);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CleanupCommandReadback {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_shell_cleanup_command_with_timeout(
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<CleanupCommandReadback, String> {
+    let mut child = StdCommand::new(command);
+    child
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_no_window_std(&mut child);
+    let mut child = child
+        .spawn()
+        .map_err(|error| format!("spawn cleanup ssh failed: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("poll cleanup ssh failed: {error}"))?
+        {
+            Some(_status) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("read cleanup ssh output failed: {error}"))?;
+                return Ok(CleanupCommandReadback {
+                    exit_code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "cleanup ssh timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn ssh_remote_cleanup_command(pid: &str, pgid: &str) -> String {
+    const SCRIPT: &str = r#"pid=$1
+pgid=$2
+case "$pid:$pgid" in
+  *[!0123456789:]*|:*|*:)
+    printf '%s pid=%s pgid=%s status=invalid_metadata\n' SYNAPSE_REMOTE_CLEANUP_V1 "$pid" "$pgid"
+    exit 2
+    ;;
+esac
+if ! kill -0 "$pid" 2>/dev/null; then
+  printf '%s pid=%s pgid=%s status=already_gone\n' SYNAPSE_REMOTE_CLEANUP_V1 "$pid" "$pgid"
+  exit 0
+fi
+kill -TERM -"$pgid" 2>/dev/null || true
+i=0
+while [ "$i" -lt 25 ]; do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    printf '%s pid=%s pgid=%s status=terminated\n' SYNAPSE_REMOTE_CLEANUP_V1 "$pid" "$pgid"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 0.2
+done
+kill -KILL -"$pgid" 2>/dev/null || true
+i=0
+while [ "$i" -lt 25 ]; do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    printf '%s pid=%s pgid=%s status=killed\n' SYNAPSE_REMOTE_CLEANUP_V1 "$pid" "$pgid"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 0.2
+done
+printf '%s pid=%s pgid=%s status=still_running\n' SYNAPSE_REMOTE_CLEANUP_V1 "$pid" "$pgid"
+exit 1
+"#;
+    format!(
+        "sh -c {} synapse-remote-cleanup {} {}",
+        posix_single_quote(SCRIPT),
+        posix_single_quote(pid),
+        posix_single_quote(pgid)
+    )
+}
+
+fn parse_remote_cleanup_status(
+    stdout: &str,
+    expected_pid: &str,
+    expected_pgid: &str,
+) -> Option<String> {
+    for line in stdout.lines() {
+        let Some(rest) = line.strip_prefix(SHELL_REMOTE_CLEANUP_MARKER) else {
+            continue;
+        };
+        let fields = parse_marker_fields(rest);
+        if fields.get("pid").map(String::as_str) != Some(expected_pid) {
+            continue;
+        }
+        if fields.get("pgid").map(String::as_str) != Some(expected_pgid) {
+            continue;
+        }
+        return fields.get("status").cloned();
+    }
+    None
+}
+
 fn remote_aware_termination_status(
     local_termination_status: &str,
     remote_process_scope: &ActRunShellRemoteProcessScope,
 ) -> String {
-    if !remote_process_scope.remote_cleanup_required || remote_process_scope.remote_cleanup_verified
-    {
+    if !remote_process_scope.remote_cleanup_required {
         return local_termination_status.to_owned();
+    }
+    if remote_process_scope.remote_cleanup_verified {
+        return match local_termination_status {
+            "terminated" => "local_ssh_client_terminated_remote_cleanup_verified".to_owned(),
+            "already_exited" => {
+                "local_ssh_client_already_exited_remote_cleanup_verified".to_owned()
+            }
+            "pid_unavailable" => {
+                "local_ssh_client_pid_unavailable_remote_cleanup_verified".to_owned()
+            }
+            other => format!("{other}:remote_cleanup_verified"),
+        };
     }
     match local_termination_status {
         "terminated" => "local_ssh_client_terminated_remote_cleanup_unverified".to_owned(),
@@ -5866,12 +6432,14 @@ fn open_shell_job_output(
 
 fn spawn_shell_job_child(
     params: &ActRunShellStartParams,
+    job_id: &str,
     stdout_file: fs::File,
     stderr_file: fs::File,
     context: Option<&ShellExecutionContext>,
 ) -> Result<SpawnedShellChild, ErrorData> {
     let mut command = TokioCommand::new(&params.command);
-    command.args(&params.args);
+    let spawn_args = shell_job_spawn_args(params, job_id);
+    command.args(&spawn_args);
     if let Some(working_dir) = &params.working_dir {
         command.current_dir(working_dir);
     }
@@ -6257,6 +6825,36 @@ fn tail_file_lossy(path: &Path, limit_bytes: usize) -> Result<String, ErrorData>
             }),
         )
     })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_file_prefix_lossy(path: &Path, limit_bytes: usize) -> Result<String, ErrorData> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("act_run_shell_status failed to open shell job output: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "path": path,
+                "reason": "job_output_open_read_failed",
+            }),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(u64::try_from(limit_bytes).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            shell_tool_error(
+                error_codes::STORAGE_READ_FAILED,
+                format!("act_run_shell_status failed to read shell job output prefix: {error}"),
+                json!({
+                    "code": error_codes::STORAGE_READ_FAILED,
+                    "path": path,
+                    "reason": "job_output_prefix_read_failed",
+                }),
+            )
+        })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -7201,6 +7799,13 @@ fn quote_command_part(part: &str) -> String {
     }
     let escaped = part.replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn posix_single_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn elapsed_ms_u32(started: Instant) -> u32 {
@@ -8281,7 +8886,13 @@ mod tests {
         assert!(!scope.remote_cleanup_verified);
         assert_eq!(
             scope.remote_cleanup_status,
-            SHELL_REMOTE_CLEANUP_NOT_TRACKED
+            SHELL_REMOTE_CLEANUP_TRACKING_PENDING
+        );
+        assert!(
+            scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence.contains(SHELL_REMOTE_PROCESS_MARKER))
         );
     }
 
@@ -8302,6 +8913,149 @@ mod tests {
         );
         assert_eq!(background_identity.as_deref(), Some("aiwonder"));
         assert_eq!(config_identity.as_deref(), Some("aiwonder"));
+    }
+
+    #[test]
+    fn shell_remote_tracking_plan_wraps_direct_ssh_remote_command() {
+        let args = vec![
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+            "aiwonder".to_owned(),
+            "bash -lc 'exec -a synapse940 sleep 60'".to_owned(),
+        ];
+
+        let plan = ssh_remote_tracking_plan("ssh.exe", &args, "issue940-track")
+            .expect("direct ssh remote command should be tracking-capable");
+
+        println!(
+            "readback=act_run_shell_remote_tracking edge=wrap before=args:{args:?} after={plan:?}"
+        );
+        assert_eq!(plan.remote_identity, "aiwonder");
+        assert_eq!(
+            plan.remote_command,
+            "bash -lc 'exec -a synapse940 sleep 60'"
+        );
+        assert_eq!(plan.spawn_args[0], "-o");
+        assert_eq!(plan.spawn_args[1], "BatchMode=yes");
+        assert_eq!(plan.spawn_args[2], "aiwonder");
+        let remote_wrapper = plan
+            .spawn_args
+            .last()
+            .expect("wrapper command should be appended after destination");
+        assert!(remote_wrapper.contains("setsid sh -c"));
+        assert!(remote_wrapper.contains("SYNAPSE_REMOTE_PROCESS_V1 job_id=issue940-track"));
+        assert!(remote_wrapper.contains("bash -lc"));
+    }
+
+    #[test]
+    fn shell_remote_tracking_plan_refuses_ssh_modes_without_cleanup_handle() {
+        let forwarding = vec![
+            "-N".to_owned(),
+            "-L".to_owned(),
+            "127.0.0.1:1:127.0.0.1:1".to_owned(),
+            "aiwonder".to_owned(),
+        ];
+        let subsystem = vec!["-s".to_owned(), "aiwonder".to_owned(), "sftp".to_owned()];
+
+        let forwarding_plan = ssh_remote_tracking_plan("ssh.exe", &forwarding, "issue940-forward");
+        let subsystem_plan = ssh_remote_tracking_plan("ssh.exe", &subsystem, "issue940-subsystem");
+        let subsystem_scope =
+            ssh_remote_process_scope("ssh.exe", &subsystem, "regression_subsystem");
+
+        println!(
+            "readback=act_run_shell_remote_tracking edge=unsupported before=-N:{forwarding:?},-s:{subsystem:?} after=-N:{forwarding_plan:?},-s:{subsystem_plan:?},scope:{subsystem_scope:?}"
+        );
+        assert!(forwarding_plan.is_none());
+        assert!(subsystem_plan.is_none());
+        assert_eq!(
+            subsystem_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_NOT_TRACKED
+        );
+        assert!(
+            subsystem_scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence.contains("remote_tracking_unsupported"))
+        );
+    }
+
+    #[test]
+    fn shell_remote_process_marker_updates_cleanup_handle() {
+        let mut scope = ssh_remote_process_scope(
+            "ssh.exe",
+            &["aiwonder".to_owned(), "sleep 60".to_owned()],
+            "regression_marker",
+        );
+        let mut status = ActRunShellJobStatus {
+            schema_version: 4,
+            job_id: "issue940-marker".to_owned(),
+            session_id: None,
+            status: "running".to_owned(),
+            pid: Some(4242),
+            command: "ssh.exe".to_owned(),
+            command_metadata_policy: SHELL_COMMAND_METADATA_POLICY.to_owned(),
+            args: vec!["aiwonder".to_owned(), "sleep 60".to_owned()],
+            command_line: "ssh.exe aiwonder \"sleep 60\"".to_owned(),
+            args_redacted: false,
+            command_line_redacted: false,
+            args_original_count: 2,
+            args_original_bytes: 17,
+            args_sha256: "args-sha".to_owned(),
+            command_line_original_bytes: 27,
+            command_line_sha256: "command-sha".to_owned(),
+            working_dir: None,
+            session_dir: None,
+            effective_working_dir: None,
+            env_keys: Vec::new(),
+            session_env_keys: Vec::new(),
+            timeout_ms: None,
+            started_at: "2026-06-13T00:00:00Z".to_owned(),
+            completed_at: None,
+            duration_ms: None,
+            exit_code: None,
+            timed_out: false,
+            cancel_requested: false,
+            error_code: None,
+            error_message: None,
+            stdout_path: "stdout.log".to_owned(),
+            stderr_path: "stderr.log".to_owned(),
+            status_path: "status.json".to_owned(),
+            request_sha256: "request-sha".to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+            remote_process_scope: scope.clone(),
+            diagnostics: None,
+        };
+        let stderr = "noise\nSYNAPSE_REMOTE_PROCESS_V1 job_id=issue940-marker pid=12345 pgid=12345 sid=12345\n";
+        let metadata = parse_remote_process_metadata(stderr, "issue940-marker")
+            .expect("marker line should parse");
+
+        apply_remote_process_metadata(&mut status, metadata);
+        scope = status.remote_process_scope.clone();
+
+        println!(
+            "readback=act_run_shell_remote_tracking edge=marker_parse before={stderr:?} after={scope:?}"
+        );
+        assert_eq!(scope.remote_cleanup_status, SHELL_REMOTE_CLEANUP_TRACKED);
+        assert_eq!(scope.remote_process_id.as_deref(), Some("12345"));
+        assert_eq!(scope.remote_process_group_id.as_deref(), Some("12345"));
+        assert!(!scope.remote_cleanup_verified);
+        assert!(
+            scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence.contains("remote_session_id:12345"))
+        );
+    }
+
+    #[test]
+    fn shell_remote_cleanup_command_uses_dash_compatible_negative_pgid() {
+        let command = ssh_remote_cleanup_command("12345", "12345");
+
+        println!("readback=act_run_shell_remote_cleanup edge=dash_kill_syntax after={command:?}");
+        assert!(command.contains("kill -TERM -\"$pgid\""));
+        assert!(command.contains("kill -KILL -\"$pgid\""));
+        assert!(!command.contains("kill -TERM --"));
+        assert!(!command.contains("kill -KILL --"));
     }
 
     #[test]
