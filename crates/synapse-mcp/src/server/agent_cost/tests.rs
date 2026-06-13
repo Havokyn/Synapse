@@ -62,8 +62,14 @@ fn write_row(
     role: TranscriptRole,
     usage: Option<TranscriptUsage>,
 ) {
-    let mut record =
-        AgentTranscriptRecord::new(ts_ns, spawn_id.to_owned(), line_no, source, 16, "a".repeat(64));
+    let mut record = AgentTranscriptRecord::new(
+        ts_ns,
+        spawn_id.to_owned(),
+        line_no,
+        source,
+        16,
+        "a".repeat(64),
+    );
     record.status = TranscriptParseStatus::Parsed;
     record.role = Some(role);
     record.event_kind = Some(event_kind.to_owned());
@@ -177,7 +183,9 @@ fn price_put_list_delete_roundtrip_physical_rows() {
 
     let mut params = fable_price();
     params.model_id = "  Claude-Fable-5 ".to_owned();
-    let put = service.agent_cost_price_put_impl(params).expect("put price");
+    let put = service
+        .agent_cost_price_put_impl(params)
+        .expect("put price");
     assert_eq!(put.price.model_id, "claude-fable-5");
     assert_eq!(put.price.input_micro_usd_per_mtok, 3_000_000);
     assert_eq!(put.price.cache_read_micro_usd_per_mtok, 300_000);
@@ -232,13 +240,55 @@ fn claude_bills_result_row_not_partial_assistant_rows() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     let spawn = "agent-spawn-claude1";
-    write_row(&db, spawn, 1, 100, TranscriptSource::ClaudeStreamJson, "system/init", Some("claude-fable-5"), TranscriptRole::System, None);
-    write_row(&db, spawn, 2, 110, TranscriptSource::ClaudeStreamJson, "assistant", Some("claude-fable-5"), TranscriptRole::Assistant, Some(claude_usage(3684, 6, 20866, 4563, None)));
-    write_row(&db, spawn, 3, 120, TranscriptSource::ClaudeStreamJson, "assistant", Some("claude-fable-5"), TranscriptRole::Assistant, Some(claude_usage(2, 73, 20959, 8899, None)));
-    write_row(&db, spawn, 4, 130, TranscriptSource::ClaudeStreamJson, "result/success", Some("claude-fable-5"), TranscriptRole::Result, Some(claude_usage(4118, 1906, 283040, 22189, Some(864_631))));
+    write_row(
+        &db,
+        spawn,
+        1,
+        100,
+        TranscriptSource::ClaudeStreamJson,
+        "system/init",
+        Some("claude-fable-5"),
+        TranscriptRole::System,
+        None,
+    );
+    write_row(
+        &db,
+        spawn,
+        2,
+        110,
+        TranscriptSource::ClaudeStreamJson,
+        "assistant",
+        Some("claude-fable-5"),
+        TranscriptRole::Assistant,
+        Some(claude_usage(3684, 6, 20866, 4563, None)),
+    );
+    write_row(
+        &db,
+        spawn,
+        3,
+        120,
+        TranscriptSource::ClaudeStreamJson,
+        "assistant",
+        Some("claude-fable-5"),
+        TranscriptRole::Assistant,
+        Some(claude_usage(2, 73, 20959, 8899, None)),
+    );
+    write_row(
+        &db,
+        spawn,
+        4,
+        130,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("claude-fable-5"),
+        TranscriptRole::Result,
+        Some(claude_usage(4118, 1906, 283040, 22189, Some(864_631))),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
@@ -308,9 +358,39 @@ fn codex_takes_cumulative_max_and_subtracts_cache() {
         .expect("price");
 
     let spawn = "agent-spawn-codex1";
-    write_row(&db, spawn, 1, 200, TranscriptSource::CodexExecJson, "thread.started", Some("gpt-5.2"), TranscriptRole::System, None);
-    write_row(&db, spawn, 2, 210, TranscriptSource::CodexExecJson, "turn.completed", Some("gpt-5.2"), TranscriptRole::Result, Some(codex_usage(50_000, 1_000, 30_000, 500)));
-    write_row(&db, spawn, 3, 220, TranscriptSource::CodexExecJson, "turn.completed", Some("gpt-5.2"), TranscriptRole::Result, Some(codex_usage(144_733, 2_110, 103_296, 1_380)));
+    write_row(
+        &db,
+        spawn,
+        1,
+        200,
+        TranscriptSource::CodexExecJson,
+        "thread.started",
+        Some("gpt-5.2"),
+        TranscriptRole::System,
+        None,
+    );
+    write_row(
+        &db,
+        spawn,
+        2,
+        210,
+        TranscriptSource::CodexExecJson,
+        "turn.completed",
+        Some("gpt-5.2"),
+        TranscriptRole::Result,
+        Some(codex_usage(50_000, 1_000, 30_000, 500)),
+    );
+    write_row(
+        &db,
+        spawn,
+        3,
+        220,
+        TranscriptSource::CodexExecJson,
+        "turn.completed",
+        Some("gpt-5.2"),
+        TranscriptRole::Result,
+        Some(codex_usage(144_733, 2_110, 103_296, 1_380)),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
@@ -339,6 +419,83 @@ fn codex_takes_cumulative_max_and_subtracts_cache() {
     assert_eq!(s.source_reported_micro_usd, None);
 }
 
+#[test]
+fn local_model_usage_sums_per_turn_finished_rows() {
+    let temp = TempDir::new().expect("tempdir");
+    let service = service_with_db(temp.path());
+    let db = db_of(&service);
+    service
+        .agent_cost_price_put_impl(AgentCostPricePutParams {
+            model_id: "gemma4:e4b".to_owned(),
+            provider: Some("local".to_owned()),
+            input_usd_per_mtok: 0.0,
+            output_usd_per_mtok: 0.0,
+            cache_read_usd_per_mtok: 0.0,
+            cache_creation_usd_per_mtok: 0.0,
+            cache_creation_5m_usd_per_mtok: None,
+            cache_creation_1h_usd_per_mtok: None,
+        })
+        .expect("price local model at zero");
+
+    let spawn = "agent-spawn-local-cost";
+    write_row(
+        &db,
+        spawn,
+        1,
+        100,
+        TranscriptSource::LocalModelJson,
+        "local.thread.started",
+        Some("gemma4:e4b"),
+        TranscriptRole::System,
+        None,
+    );
+    write_row(
+        &db,
+        spawn,
+        2,
+        110,
+        TranscriptSource::LocalModelJson,
+        "local.turn.finished",
+        Some("gemma4:e4b"),
+        TranscriptRole::Result,
+        Some(TranscriptUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            ..TranscriptUsage::default()
+        }),
+    );
+    write_row(
+        &db,
+        spawn,
+        3,
+        120,
+        TranscriptSource::LocalModelJson,
+        "local.turn.finished",
+        Some("gemma4:e4b"),
+        TranscriptRole::Result,
+        Some(TranscriptUsage {
+            input_tokens: Some(30),
+            output_tokens: Some(10),
+            ..TranscriptUsage::default()
+        }),
+    );
+
+    let out = service
+        .agent_cost_impl(cost_params(Some(spawn), None, None))
+        .expect("rollup");
+    let s = &out.per_spawn[0];
+    assert_eq!(s.status, "complete");
+    assert_eq!(s.source.as_deref(), Some("local_model_json"));
+    assert_eq!(s.authoritative_line_no, Some(3));
+    assert_eq!(s.usage.input_tokens, 130);
+    assert_eq!(s.usage.output_tokens, 30);
+    assert_eq!(s.total_tokens, 160);
+    match &s.cost {
+        CostOutcome::Priced { cost } => assert_eq!(cost.total_micro_usd, 0),
+        CostOutcome::Unpriced { .. } => panic!("local model is priced"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
@@ -349,7 +506,17 @@ fn unpriced_model_surfaces_without_guessing() {
     let service = service_with_db(temp.path());
     let db = db_of(&service);
     let spawn = "agent-spawn-unpriced";
-    write_row(&db, spawn, 1, 300, TranscriptSource::ClaudeStreamJson, "result/success", Some("mystery-model"), TranscriptRole::Result, Some(claude_usage(100, 200, 0, 0, Some(42))));
+    write_row(
+        &db,
+        spawn,
+        1,
+        300,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("mystery-model"),
+        TranscriptRole::Result,
+        Some(claude_usage(100, 200, 0, 0, Some(42))),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
@@ -371,7 +538,17 @@ fn running_agent_with_no_terminal_row_is_incomplete_not_billed() {
     let service = service_with_db(temp.path());
     let db = db_of(&service);
     let spawn = "agent-spawn-running";
-    write_row(&db, spawn, 1, 400, TranscriptSource::ClaudeStreamJson, "assistant", Some("claude-fable-5"), TranscriptRole::Assistant, Some(claude_usage(10, 2, 0, 0, None)));
+    write_row(
+        &db,
+        spawn,
+        1,
+        400,
+        TranscriptSource::ClaudeStreamJson,
+        "assistant",
+        Some("claude-fable-5"),
+        TranscriptRole::Assistant,
+        Some(claude_usage(10, 2, 0, 0, None)),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
@@ -389,7 +566,17 @@ fn time_window_excludes_rows_outside_range() {
     let service = service_with_db(temp.path());
     let db = db_of(&service);
     let spawn = "agent-spawn-window";
-    write_row(&db, spawn, 1, 500, TranscriptSource::ClaudeStreamJson, "result/success", Some("mystery"), TranscriptRole::Result, Some(claude_usage(100, 100, 0, 0, None)));
+    write_row(
+        &db,
+        spawn,
+        1,
+        500,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("mystery"),
+        TranscriptRole::Result,
+        Some(claude_usage(100, 100, 0, 0, None)),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), Some(600), Some(700)))
@@ -397,7 +584,10 @@ fn time_window_excludes_rows_outside_range() {
     // The row is physically scanned but filtered out of the window, so the
     // spawn contributes nothing and is not listed.
     assert_eq!(out.scanned_rows, 1);
-    assert!(out.per_spawn.is_empty(), "out-of-window row must not appear");
+    assert!(
+        out.per_spawn.is_empty(),
+        "out-of-window row must not appear"
+    );
     assert_eq!(out.fleet.spawns_total, 0);
 
     // Widening the window to include ts=500 surfaces the spawn and bills it.
@@ -413,12 +603,44 @@ fn fleet_scan_aggregates_multiple_spawns_and_models() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     // Two Claude spawns on the priced model, one Codex spawn unpriced.
-    write_row(&db, "agent-spawn-a", 1, 100, TranscriptSource::ClaudeStreamJson, "result/success", Some("claude-fable-5"), TranscriptRole::Result, Some(claude_usage(1_000_000, 0, 0, 0, Some(1))));
-    write_row(&db, "agent-spawn-b", 1, 100, TranscriptSource::ClaudeStreamJson, "result/success", Some("claude-fable-5"), TranscriptRole::Result, Some(claude_usage(2_000_000, 0, 0, 0, Some(2))));
-    write_row(&db, "agent-spawn-c", 1, 100, TranscriptSource::CodexExecJson, "turn.completed", Some("gpt-5.2"), TranscriptRole::Result, Some(codex_usage(500, 0, 0, 0)));
+    write_row(
+        &db,
+        "agent-spawn-a",
+        1,
+        100,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("claude-fable-5"),
+        TranscriptRole::Result,
+        Some(claude_usage(1_000_000, 0, 0, 0, Some(1))),
+    );
+    write_row(
+        &db,
+        "agent-spawn-b",
+        1,
+        100,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("claude-fable-5"),
+        TranscriptRole::Result,
+        Some(claude_usage(2_000_000, 0, 0, 0, Some(2))),
+    );
+    write_row(
+        &db,
+        "agent-spawn-c",
+        1,
+        100,
+        TranscriptSource::CodexExecJson,
+        "turn.completed",
+        Some("gpt-5.2"),
+        TranscriptRole::Result,
+        Some(codex_usage(500, 0, 0, 0)),
+    );
 
     let out = service
         .agent_cost_impl(cost_params(None, None, None))
@@ -465,6 +687,7 @@ fn plant_spawn_dir(root: &Path, spawn_id: &str, source: TranscriptSource, stdout
     let marker = match source {
         TranscriptSource::ClaudeStreamJson => "claude-mcp-config.json",
         TranscriptSource::CodexExecJson => "codex-notify.ps1",
+        TranscriptSource::LocalModelJson => "local-model-runner.json",
     };
     std::fs::write(log_dir.join(marker), b"{}").expect("marker");
     std::fs::write(log_dir.join("stdout.jsonl"), stdout).expect("stdout");
@@ -477,21 +700,24 @@ fn plant_spawn_dir(root: &Path, spawn_id: &str, source: TranscriptSource, stdout
 }
 
 fn authoritative_row(db: &Db, spawn_id: &str, want_kind_prefix: &str) -> AgentTranscriptRecord {
-    db.scan_cf_prefix(cf::CF_AGENT_TRANSCRIPTS, &agent_transcript_spawn_prefix(spawn_id))
-        .expect("scan")
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let (_id, line) = decode_agent_transcript_key(&key).expect("key");
-            let record: AgentTranscriptRecord = serde_json::from_slice(&value).expect("decode");
-            record
-                .event_kind
-                .as_deref()
-                .is_some_and(|k| k.starts_with(want_kind_prefix))
-                .then_some((line, record))
-        })
-        .max_by_key(|(line, _)| *line)
-        .map(|(_, record)| record)
-        .expect("authoritative row present")
+    db.scan_cf_prefix(
+        cf::CF_AGENT_TRANSCRIPTS,
+        &agent_transcript_spawn_prefix(spawn_id),
+    )
+    .expect("scan")
+    .into_iter()
+    .filter_map(|(key, value)| {
+        let (_id, line) = decode_agent_transcript_key(&key).expect("key");
+        let record: AgentTranscriptRecord = serde_json::from_slice(&value).expect("decode");
+        record
+            .event_kind
+            .as_deref()
+            .is_some_and(|k| k.starts_with(want_kind_prefix))
+            .then_some((line, record))
+    })
+    .max_by_key(|(line, _)| *line)
+    .map(|(_, record)| record)
+    .expect("authoritative row present")
 }
 
 #[test]
@@ -503,9 +729,17 @@ fn fsv_claude_real_fixture_multi_model_attribution_reconciles_to_zero() {
     let spawn = "agent-spawn-claudefsv";
 
     // 1. Ingest the REAL Claude capture through the production #900 parser.
-    let log_dir = plant_spawn_dir(root.path(), spawn, TranscriptSource::ClaudeStreamJson, CLAUDE_REAL_STREAM);
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn,
+        TranscriptSource::ClaudeStreamJson,
+        CLAUDE_REAL_STREAM,
+    );
     let outcome = ingest_spawn_dir_once(&db, spawn, &log_dir, false).expect("ingest");
-    assert_eq!(outcome.new_invalid_rows, 0, "a real capture must parse fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "a real capture must parse fully"
+    );
 
     // 2. Source of truth: the physical result row carries the cache-creation
     //    TTL split (#949 part 3) and the per-model breakdown (#949 part 2).
@@ -517,7 +751,11 @@ fn fsv_claude_real_fixture_multi_model_attribution_reconciles_to_zero() {
     assert_eq!(usage.total_cost_micro_usd, Some(864_631));
     // The real session used TWO models; the top-level usage reflects only the
     // primary (claude-fable-5), so the breakdown is required for exactness.
-    assert_eq!(usage.model_usage.len(), 2, "fixture is a multi-model session");
+    assert_eq!(
+        usage.model_usage.len(),
+        2,
+        "fixture is a multi-model session"
+    );
     let fable = usage
         .model_usage
         .iter()
@@ -535,14 +773,20 @@ fn fsv_claude_real_fixture_multi_model_attribution_reconciles_to_zero() {
     assert_eq!(haiku.cost_micro_usd, Some(1_331)); // $0.001331
     println!(
         "FSV[claude] modelUsage: fable={:?} haiku={:?} top_level_cc_1h={:?} session_cost_micro={:?}",
-        fable.cost_micro_usd, haiku.cost_micro_usd,
-        usage.cache_creation_1h_input_tokens, usage.total_cost_micro_usd
+        fable.cost_micro_usd,
+        haiku.cost_micro_usd,
+        usage.cache_creation_1h_input_tokens,
+        usage.total_cost_micro_usd
     );
 
     // 3. Price BOTH models at their real published rates (with TTL tiers) and
     //    roll up.
-    service.agent_cost_price_put_impl(fable_price_real()).expect("price fable");
-    service.agent_cost_price_put_impl(haiku_price_real()).expect("price haiku");
+    service
+        .agent_cost_price_put_impl(fable_price_real())
+        .expect("price fable");
+    service
+        .agent_cost_price_put_impl(haiku_price_real())
+        .expect("price haiku");
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
         .expect("rollup");
@@ -573,14 +817,22 @@ fn fsv_claude_real_fixture_multi_model_attribution_reconciles_to_zero() {
     // 6. The per-spawn breakdown carries both priced models, each matching the
     //    CLI's own per-model costUSD.
     assert_eq!(s.models.len(), 2);
-    let fable_cost = s.models.iter().find(|m| m.model == "claude-fable-5").expect("fable");
+    let fable_cost = s
+        .models
+        .iter()
+        .find(|m| m.model == "claude-fable-5")
+        .expect("fable");
     let fable_computed = match &fable_cost.cost {
         CostOutcome::Priced { cost } => cost.total_micro_usd,
         CostOutcome::Unpriced { .. } => panic!("fable priced"),
     };
     assert_eq!(fable_computed, 863_300);
     assert_eq!(fable_cost.source_reported_micro_usd, Some(863_300));
-    let haiku_cost = s.models.iter().find(|m| m.model == "claude-haiku-4-5-20251001").expect("haiku");
+    let haiku_cost = s
+        .models
+        .iter()
+        .find(|m| m.model == "claude-haiku-4-5-20251001")
+        .expect("haiku");
     let haiku_computed = match &haiku_cost.cost {
         CostOutcome::Priced { cost } => cost.total_micro_usd,
         CostOutcome::Unpriced { .. } => panic!("haiku priced"),
@@ -606,9 +858,16 @@ fn fsv_claude_partial_pricing_surfaces_unpriced_side_model() {
     let root = TempDir::new().expect("spawn root");
     let spawn = "agent-spawn-claudepartial";
 
-    let log_dir = plant_spawn_dir(root.path(), spawn, TranscriptSource::ClaudeStreamJson, CLAUDE_REAL_STREAM);
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn,
+        TranscriptSource::ClaudeStreamJson,
+        CLAUDE_REAL_STREAM,
+    );
     ingest_spawn_dir_once(&db, spawn, &log_dir, false).expect("ingest");
-    service.agent_cost_price_put_impl(fable_price_real()).expect("price fable only");
+    service
+        .agent_cost_price_put_impl(fable_price_real())
+        .expect("price fable only");
 
     let out = service
         .agent_cost_impl(cost_params(Some(spawn), None, None))
@@ -621,7 +880,10 @@ fn fsv_claude_partial_pricing_surfaces_unpriced_side_model() {
     assert_eq!(computed, 863_300, "only fable's cost is computed");
     // Delta == exactly haiku's cost ($0.001331): the gap is surfaced, not hidden.
     assert_eq!(s.reconciliation_delta_micro_usd, Some(864_631 - 863_300));
-    assert_eq!(out.fleet.unpriced_models, vec!["claude-haiku-4-5-20251001".to_owned()]);
+    assert_eq!(
+        out.fleet.unpriced_models,
+        vec!["claude-haiku-4-5-20251001".to_owned()]
+    );
 }
 
 #[test]
@@ -632,9 +894,17 @@ fn fsv_codex_real_fixture_bills_cumulative_turn_with_cache_subtracted() {
     let root = TempDir::new().expect("spawn root");
     let spawn = "agent-spawn-codexfsv";
 
-    let log_dir = plant_spawn_dir(root.path(), spawn, TranscriptSource::CodexExecJson, CODEX_REAL_STREAM);
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn,
+        TranscriptSource::CodexExecJson,
+        CODEX_REAL_STREAM,
+    );
     let outcome = ingest_spawn_dir_once(&db, spawn, &log_dir, false).expect("ingest");
-    assert_eq!(outcome.new_invalid_rows, 0, "a real capture must parse fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "a real capture must parse fully"
+    );
 
     // Source of truth: the real turn.completed row.
     let turn = authoritative_row(&db, spawn, "turn.completed");
@@ -644,7 +914,9 @@ fn fsv_codex_real_fixture_bills_cumulative_turn_with_cache_subtracted() {
     assert_eq!(usage.output_tokens, Some(2_110));
     println!(
         "FSV[codex] physical turn row: in={:?} cached={:?} out={:?} reasoning={:?}",
-        usage.input_tokens, usage.cache_read_input_tokens, usage.output_tokens,
+        usage.input_tokens,
+        usage.cache_read_input_tokens,
+        usage.output_tokens,
         usage.reasoning_output_tokens
     );
 
@@ -678,7 +950,12 @@ fn fsv_codex_real_fixture_priced_via_spawn_manifest_model() {
     let root = TempDir::new().expect("spawn root");
     let spawn = "agent-spawn-codexmanifest";
 
-    let log_dir = plant_spawn_dir(root.path(), spawn, TranscriptSource::CodexExecJson, CODEX_REAL_STREAM);
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn,
+        TranscriptSource::CodexExecJson,
+        CODEX_REAL_STREAM,
+    );
     // Write the real manifest shape act_spawn_agent emits.
     std::fs::write(
         log_dir.join("spawn-manifest.json"),
@@ -687,7 +964,10 @@ fn fsv_codex_real_fixture_priced_via_spawn_manifest_model() {
     .expect("manifest");
 
     let outcome = ingest_spawn_dir_once(&db, spawn, &log_dir, false).expect("ingest");
-    assert_eq!(outcome.new_invalid_rows, 0, "a real capture must parse fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "a real capture must parse fully"
+    );
 
     // FSV: the physical turn.completed row now carries the manifest model.
     let turn = authoritative_row(&db, spawn, "turn.completed");
@@ -696,7 +976,10 @@ fn fsv_codex_real_fixture_priced_via_spawn_manifest_model() {
         Some("gpt-5-codex"),
         "manifest model must be stamped onto Codex rows"
     );
-    println!("FSV[codex] manifest-stamped model on physical row: {:?}", turn.model);
+    println!(
+        "FSV[codex] manifest-stamped model on physical row: {:?}",
+        turn.model
+    );
 
     // Price the model and confirm the Codex spawn is now PRICED, not unknown.
     service
@@ -727,7 +1010,10 @@ fn fsv_codex_real_fixture_priced_via_spawn_manifest_model() {
             assert_eq!(cost.output_micro_usd, 21_100);
             assert_eq!(cost.cache_read_micro_usd, 12_912);
             assert_eq!(cost.total_micro_usd, 85_808);
-            println!("FSV[codex] priced via manifest model: total_micro={}", cost.total_micro_usd);
+            println!(
+                "FSV[codex] priced via manifest model: total_micro={}",
+                cost.total_micro_usd
+            );
         }
         CostOutcome::Unpriced { model_id } => panic!("must be priced, got unpriced {model_id}"),
     }
@@ -741,5 +1027,9 @@ fn range_with_since_ge_until_is_rejected() {
     let err = service
         .agent_cost_impl(cost_params(None, Some(10), Some(10)))
         .expect_err("must reject");
-    assert!(err.message.contains("AGENT_COST_RANGE_INVALID"), "{:?}", err.message);
+    assert!(
+        err.message.contains("AGENT_COST_RANGE_INVALID"),
+        "{:?}",
+        err.message
+    );
 }

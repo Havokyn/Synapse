@@ -107,6 +107,9 @@ pub enum TranscriptSource {
     /// Codex `exec --json` stdout (verified against the
     /// `thread.*`/`turn.*`/`item.*` event vocabulary).
     CodexExecJson,
+    /// Synapse local-model runner stdout (`synapse-mcp --mode local-agent`)
+    /// event vocabulary.
+    LocalModelJson,
 }
 
 /// Parse outcome for one source line.
@@ -321,7 +324,9 @@ impl AgentTranscriptRecord {
             );
         }
         if self.line_no == 0 {
-            return Err("AGENT_TRANSCRIPT_INVALID: line_no is 1-based; 0 is unaddressable".to_owned());
+            return Err(
+                "AGENT_TRANSCRIPT_INVALID: line_no is 1-based; 0 is unaddressable".to_owned(),
+            );
         }
         if self.status == TranscriptParseStatus::Invalid && self.parse_error.is_none() {
             return Err(

@@ -293,7 +293,9 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 
 pub(crate) fn infer_agent_kind(client_name: &str) -> String {
     let lower = client_name.to_ascii_lowercase();
-    if lower.contains("codex") {
+    if lower.contains("synapse-local-model-agent") || lower.contains("local-model") {
+        "local-model".to_owned()
+    } else if lower.contains("codex") {
         "codex".to_owned()
     } else if lower.contains("claude") {
         "claude".to_owned()

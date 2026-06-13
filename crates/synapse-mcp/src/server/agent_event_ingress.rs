@@ -32,7 +32,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value, json};
-use synapse_core::{AgentEventRecord, GenAiOperationName};
+use synapse_core::{AgentEndState, AgentEventRecord, GenAiOperationName};
 use synapse_storage::{Db, StorageError};
 
 use super::agent_events::{AgentEventWriteReadback, record_agent_event, unix_time_ns_now};
@@ -98,6 +98,7 @@ pub(crate) struct AgentEventIngressIdentity {
 pub(crate) enum AgentEventIngressSource {
     ClaudeCodeHooks,
     CodexNotify,
+    LocalModelRunner,
 }
 
 impl AgentEventIngressSource {
@@ -105,6 +106,7 @@ impl AgentEventIngressSource {
         match self {
             Self::ClaudeCodeHooks => "claude_code_hooks",
             Self::CodexNotify => "codex_notify",
+            Self::LocalModelRunner => "local_model_runner",
         }
     }
 
@@ -112,6 +114,7 @@ impl AgentEventIngressSource {
         match raw {
             "claude_code_hooks" => Some(Self::ClaudeCodeHooks),
             "codex_notify" => Some(Self::CodexNotify),
+            "local_model_runner" => Some(Self::LocalModelRunner),
             _ => None,
         }
     }
@@ -228,7 +231,9 @@ pub(crate) fn validate_ingress_identity(
     let Some(source) = AgentEventIngressSource::parse(source_raw) else {
         return Err(refuse_malformed(
             Some(spawn_id),
-            format!("unknown source {source_raw:?}; expected claude_code_hooks or codex_notify"),
+            format!(
+                "unknown source {source_raw:?}; expected claude_code_hooks, codex_notify, or local_model_runner"
+            ),
         ));
     };
     validate_spawn_id_shape(spawn_id).map_err(|detail| refuse_malformed(Some(spawn_id), detail))?;
@@ -289,6 +294,9 @@ pub(crate) fn ingest_agent_event(
         }
         AgentEventIngressSource::CodexNotify => {
             normalize_codex_notify_event(&identity.spawn_id, object)
+        }
+        AgentEventIngressSource::LocalModelRunner => {
+            normalize_local_model_runner_event(&identity.spawn_id, object)
         }
     }
     .map_err(|detail| refuse_malformed(Some(&identity.spawn_id), detail))?;
@@ -537,6 +545,147 @@ fn normalize_codex_notify_event(
     Ok(record)
 }
 
+fn normalize_local_model_runner_event(
+    spawn_id: &str,
+    object: &Map<String, Value>,
+) -> Result<AgentEventRecord, String> {
+    use synapse_core::AgentEventKind as Kind;
+
+    let event_name = required_str(object, "event")?;
+    let mut record = AgentEventRecord::new(unix_time_ns_now(), Kind::StateChanged);
+    record.spawn_id = Some(spawn_id.to_owned());
+    if let Some(session_id) = object
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        record.session_id = Some(session_id.to_owned());
+    }
+    record.attributes.provider_name = Some("local".to_owned());
+    record.attributes.agent_name = Some("synapse-local-model-agent".to_owned());
+    if let Some(conversation_id) = object
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("session_id").and_then(Value::as_str))
+    {
+        record.attributes.conversation_id = Some(conversation_id.to_owned());
+    }
+    if let Some(model) = object.get("model").and_then(Value::as_str) {
+        record.attributes.request_model = Some(model.to_owned());
+        record.attributes.response_model = Some(model.to_owned());
+    }
+
+    let mut payload = Map::new();
+    insert_optional_str(&mut payload, object, "registry_name");
+    if let Some(turn_index) = object.get("turn_index").and_then(Value::as_u64) {
+        payload.insert("turn_index".to_owned(), Value::from(turn_index));
+    }
+
+    match event_name {
+        "state_changed" => {
+            record.kind = Kind::StateChanged;
+            insert_optional_str(&mut payload, object, "state_from");
+            if let Some(state_from) = object.get("state_from").and_then(Value::as_str) {
+                record.state_from = Some(state_from.to_owned());
+            }
+            if let Some(state_to) = object.get("state_to").and_then(Value::as_str) {
+                record.state_to = Some(state_to.to_owned());
+            }
+            if let Some(reason) = object.get("reason_code").and_then(Value::as_str) {
+                record.reason_code = Some(reason.to_owned());
+            }
+            for field in ["before_chars", "after_chars", "limit_chars", "tool_count"] {
+                if let Some(value) = object.get(field).and_then(Value::as_u64) {
+                    payload.insert(field.to_owned(), Value::from(value));
+                }
+            }
+        }
+        "turn_started" => {
+            record.kind = Kind::TurnStarted;
+            record.attributes.operation_name = Some(GenAiOperationName::Chat);
+            record.reason_code = Some("local_turn_started".to_owned());
+        }
+        "turn_finished" => {
+            record.kind = Kind::TurnFinished;
+            record.attributes.operation_name = Some(GenAiOperationName::Chat);
+            record.reason_code = Some("local_turn_finished".to_owned());
+            apply_local_usage(&mut record, &mut payload, object)?;
+            insert_optional_str(&mut payload, object, "finish_reason");
+        }
+        "tool_call_started" => {
+            record.kind = Kind::ToolCallStarted;
+            record.attributes.operation_name = Some(GenAiOperationName::ExecuteTool);
+            record.attributes.tool_name = Some(required_str(object, "tool_name")?.to_owned());
+            if let Some(call_id) = object.get("tool_call_id").and_then(Value::as_str) {
+                record.attributes.tool_call_id = Some(call_id.to_owned());
+            }
+            insert_value_digest(&mut payload, object, "tool_arguments");
+        }
+        "tool_call_finished" => {
+            record.kind = Kind::ToolCallFinished;
+            record.attributes.operation_name = Some(GenAiOperationName::ExecuteTool);
+            record.attributes.tool_name = Some(required_str(object, "tool_name")?.to_owned());
+            if let Some(call_id) = object.get("tool_call_id").and_then(Value::as_str) {
+                record.attributes.tool_call_id = Some(call_id.to_owned());
+            }
+            if let Some(error_code) = object
+                .get("error_code")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                record.attributes.error_type = Some(error_code.to_owned());
+                record.reason_code = Some(error_code.to_owned());
+            }
+            insert_value_digest(&mut payload, object, "tool_response");
+        }
+        "exited" => {
+            record.kind = Kind::Exited;
+            record.end_state = Some(match object.get("end_state").and_then(Value::as_str) {
+                Some("success") => AgentEndState::Success,
+                Some("error") => AgentEndState::Error,
+                _ => AgentEndState::Indeterminate,
+            });
+            if let Some(reason) = object.get("reason_code").and_then(Value::as_str) {
+                record.reason_code = Some(reason.to_owned());
+            }
+            if let Some(error_code) = object
+                .get("error_code")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                record.attributes.error_type = Some(error_code.to_owned());
+            }
+        }
+        other => {
+            return Err(format!(
+                "local model runner event {other:?} is not supported"
+            ));
+        }
+    }
+
+    if !payload.is_empty() {
+        record.payload = Value::Object(payload);
+    }
+    Ok(record)
+}
+
+fn apply_local_usage(
+    record: &mut AgentEventRecord,
+    payload: &mut Map<String, Value>,
+    object: &Map<String, Value>,
+) -> Result<(), String> {
+    let usage = object
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "local turn_finished requires object usage".to_owned())?;
+    record.attributes.usage_input_tokens = usage.get("prompt_tokens").and_then(Value::as_u64);
+    record.attributes.usage_output_tokens = usage.get("completion_tokens").and_then(Value::as_u64);
+    if let Some(total) = usage.get("total_tokens").and_then(Value::as_u64) {
+        payload.insert("usage_total_tokens".to_owned(), Value::from(total));
+    }
+    Ok(())
+}
+
 fn required_str<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, String> {
     object
         .get(field)
@@ -597,6 +746,8 @@ mod tests {
     const NOTIFICATION_PERMISSION_PROMPT: &str = r#"{"session_id":"75346593-bb30-4162-ac6d-4e548101f7b8","transcript_path":"C:\\x.jsonl","cwd":"C:\\code\\hookprobe","hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#;
     /// Shape from the Codex docs/config.md notify example (kebab-case keys).
     const CODEX_TURN_COMPLETE: &str = r#"{"type":"agent-turn-complete","thread-id":"b5f6c1c2-1111-2222-3333-444455556666","turn-id":"12345","cwd":"C:\\code\\hookprobe","input-messages":["Rename foo to bar."],"last-assistant-message":"Rename complete."}"#;
+    const LOCAL_TOOL_FINISHED: &str = r#"{"event":"tool_call_finished","session_id":"local-model-test-session","conversation_id":"local-model-test-thread","model":"gemma4:e4b","registry_name":"ollama-gemma4-e4b","turn_index":1,"tool_name":"workspace_put","tool_call_id":"call_1","tool_response":{"ok":true,"value":{"actual":4}},"error_code":""}"#;
+    const LOCAL_TURN_FINISHED: &str = r#"{"event":"turn_finished","session_id":"local-model-test-session","conversation_id":"local-model-test-thread","model":"gemma4:e4b","registry_name":"ollama-gemma4-e4b","turn_index":1,"finish_reason":"tool_calls","usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#;
 
     fn parse(body: &str) -> Map<String, Value> {
         serde_json::from_str::<Value>(body)
@@ -698,6 +849,48 @@ mod tests {
         assert_eq!(payload["input_message_count"], 1);
         assert!(payload.contains_key("last_assistant_message_sha256"));
         record.validate().expect("record validates");
+    }
+
+    #[test]
+    fn local_model_runner_events_normalize_to_local_provider_metadata() {
+        let record = normalize_local_model_runner_event(SPAWN_ID, &parse(LOCAL_TOOL_FINISHED))
+            .expect("local tool event must normalize");
+        assert_eq!(record.kind, AgentEventKind::ToolCallFinished);
+        assert_eq!(record.spawn_id.as_deref(), Some(SPAWN_ID));
+        assert_eq!(
+            record.session_id.as_deref(),
+            Some("local-model-test-session")
+        );
+        assert_eq!(record.attributes.provider_name.as_deref(), Some("local"));
+        assert_eq!(
+            record.attributes.conversation_id.as_deref(),
+            Some("local-model-test-thread")
+        );
+        assert_eq!(
+            record.attributes.tool_name.as_deref(),
+            Some("workspace_put")
+        );
+        assert_eq!(record.attributes.tool_call_id.as_deref(), Some("call_1"));
+        let payload = record.payload.as_object().expect("payload");
+        assert_eq!(payload["turn_index"], 1);
+        assert!(payload.contains_key("tool_response_sha256"));
+        assert!(
+            !serde_json::to_string(&record)
+                .expect("serialize")
+                .contains("\"actual\":4"),
+            "tool response content must be digested, not stored verbatim"
+        );
+        record.validate().expect("record validates");
+
+        let turn = normalize_local_model_runner_event(SPAWN_ID, &parse(LOCAL_TURN_FINISHED))
+            .expect("local turn event must normalize");
+        assert_eq!(turn.kind, AgentEventKind::TurnFinished);
+        assert_eq!(turn.attributes.usage_input_tokens, Some(100));
+        assert_eq!(turn.attributes.usage_output_tokens, Some(20));
+        assert_eq!(
+            turn.payload.as_object().expect("payload")["usage_total_tokens"],
+            120
+        );
     }
 
     #[test]

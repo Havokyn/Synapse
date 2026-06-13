@@ -19,6 +19,15 @@ const CLAUDE_REAL_STREAM: &str = include_str!("../../../tests/fixtures/claude_st
 /// Real captured Codex `exec --json` run (18 lines, ends with
 /// `turn.completed`).
 const CODEX_REAL_STREAM: &str = include_str!("../../../tests/fixtures/codex_exec_real.jsonl");
+const LOCAL_MODEL_STREAM: &str = r#"{"type":"local.thread.started","conversation_id":"local-model-test-thread","model":"gemma4:e4b","registry_name":"ollama-gemma4-e4b","tool_count":107}
+{"type":"local.turn.started","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":1}
+{"type":"local.assistant.message","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":1,"content":"","finish_reason":"tool_calls","raw_response_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"type":"local.tool_call.started","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":1,"tool_name":"workspace_put","tool_call_id":"call_1","arguments":"{\"run_id\":\"issue931-test\",\"key\":\"result\",\"value\":{\"actual\":4}}"}
+{"type":"local.tool_call.finished","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":1,"tool_name":"workspace_put","tool_call_id":"call_1","status":"ok","result":{"ok":true}}
+{"type":"local.turn.finished","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":1,"finish_reason":"tool_calls","usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}
+{"type":"local.context.truncated","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":2,"before_chars":2048,"after_chars":1024,"limit_chars":1024}
+{"type":"local.error","conversation_id":"local-model-test-thread","model":"gemma4:e4b","turn_index":2,"error_code":"MODEL_ENDPOINT_UNREACHABLE","error_detail":"MODEL_ENDPOINT_UNREACHABLE: synthetic"}
+"#;
 
 fn open_temp_db() -> (tempfile::TempDir, Db) {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -39,6 +48,7 @@ fn plant_spawn_dir(
     let marker = match source {
         TranscriptSource::ClaudeStreamJson => "claude-mcp-config.json",
         TranscriptSource::CodexExecJson => "codex-notify.ps1",
+        TranscriptSource::LocalModelJson => "local-model-runner.json",
     };
     std::fs::write(log_dir.join(marker), b"{}").expect("write marker");
     std::fs::write(log_dir.join("stdout.jsonl"), stdout_content).expect("write stdout");
@@ -63,7 +73,10 @@ fn scan_spawn_rows(db: &Db, spawn_id: &str) -> Vec<(u64, AgentTranscriptRecord)>
     rows.iter()
         .map(|(key, value)| {
             let (decoded_id, line_no) = decode_agent_transcript_key(key).expect("key must decode");
-            assert_eq!(decoded_id, spawn_id, "prefix scan must stay within the spawn");
+            assert_eq!(
+                decoded_id, spawn_id,
+                "prefix scan must stay within the spawn"
+            );
             let record: AgentTranscriptRecord = decode_json(value).expect("row must decode");
             assert_eq!(record.line_no, line_no, "key and record line_no must agree");
             (line_no, record)
@@ -95,7 +108,10 @@ fn claude_real_stream_reconciles_line_for_line() {
         outcome.source_complete
     );
     assert_eq!(outcome.lines_ingested_total, source_lines);
-    assert_eq!(outcome.new_invalid_rows, 0, "a real capture must parse fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "a real capture must parse fully"
+    );
     assert!(outcome.source_complete, "terminal completion must finalize");
 
     let rows = scan_spawn_rows(&db, spawn_id);
@@ -145,7 +161,10 @@ fn claude_real_stream_reconciles_line_for_line() {
     assert_eq!(result.role, Some(TranscriptRole::Result));
     assert_eq!(result.event_kind.as_deref(), Some("result/success"));
     let usage = result.usage.as_ref().expect("result line carries usage");
-    assert!(usage.input_tokens.is_some(), "usage must carry input tokens");
+    assert!(
+        usage.input_tokens.is_some(),
+        "usage must carry input tokens"
+    );
     assert!(
         usage.total_cost_micro_usd.is_some(),
         "result must carry the reported cost"
@@ -194,7 +213,10 @@ fn codex_real_stream_reconciles_line_for_line() {
         outcome.new_parsed_rows, outcome.new_invalid_rows, outcome.lines_ingested_total
     );
     assert_eq!(outcome.lines_ingested_total, source_lines);
-    assert_eq!(outcome.new_invalid_rows, 0, "a real capture must parse fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "a real capture must parse fully"
+    );
 
     let rows = scan_spawn_rows(&db, spawn_id);
     assert_eq!(rows.len() as u64, source_lines);
@@ -250,6 +272,74 @@ fn codex_real_stream_reconciles_line_for_line() {
 }
 
 #[test]
+fn local_model_stream_reconciles_usage_tool_calls_and_errors() {
+    let (_temp, db) = open_temp_db();
+    let root = tempfile::tempdir().expect("spawn root");
+    let spawn_id = "agent-spawn-local-realshape";
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn_id,
+        TranscriptSource::LocalModelJson,
+        LOCAL_MODEL_STREAM,
+    );
+    mark_completed(&log_dir);
+
+    let outcome =
+        ingest_spawn_dir_once(&db, spawn_id, &log_dir, false).expect("ingest must succeed");
+    assert_eq!(outcome.new_invalid_rows, 0);
+    assert_eq!(
+        outcome.lines_ingested_total,
+        LOCAL_MODEL_STREAM.lines().count() as u64
+    );
+
+    let rows = scan_spawn_rows(&db, spawn_id);
+    assert_eq!(rows.len(), LOCAL_MODEL_STREAM.lines().count());
+    assert!(
+        rows.iter()
+            .all(|(_line, record)| record.conversation_id.as_deref()
+                == Some("local-model-test-thread")),
+        "conversation id must stamp every parsed local row"
+    );
+    let tool_started = rows
+        .iter()
+        .map(|(_line, record)| record)
+        .find(|record| record.event_kind.as_deref() == Some("local.tool_call.started"))
+        .expect("tool row");
+    assert_eq!(tool_started.role, Some(TranscriptRole::Tool));
+    assert_eq!(tool_started.tool_calls[0].tool_name, "workspace_put");
+    assert_eq!(
+        tool_started.tool_calls[0].tool_call_id.as_deref(),
+        Some("call_1")
+    );
+    assert!(
+        tool_started.tool_calls[0]
+            .arguments
+            .as_deref()
+            .expect("arguments")
+            .contains("issue931-test")
+    );
+    let usage_row = rows
+        .iter()
+        .map(|(_line, record)| record)
+        .find(|record| record.event_kind.as_deref() == Some("local.turn.finished"))
+        .expect("usage row");
+    let usage = usage_row.usage.as_ref().expect("usage");
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.output_tokens, Some(20));
+    let error_row = rows
+        .iter()
+        .map(|(_line, record)| record)
+        .find(|record| record.event_kind.as_deref() == Some("local.error"))
+        .expect("error row");
+    assert!(
+        error_row
+            .source_error
+            .as_deref()
+            .is_some_and(|detail| detail.contains("MODEL_ENDPOINT_UNREACHABLE"))
+    );
+}
+
+#[test]
 fn planted_garbage_line_is_counted_and_ingestion_continues() {
     let (_temp, db) = open_temp_db();
     let root = tempfile::tempdir().expect("spawn root");
@@ -274,7 +364,10 @@ fn planted_garbage_line_is_counted_and_ingestion_continues() {
         "edge=garbage_line after: parsed={} invalid={} total={}",
         outcome.new_parsed_rows, outcome.new_invalid_rows, outcome.lines_ingested_total
     );
-    assert_eq!(outcome.new_invalid_rows, 1, "exactly the planted line fails");
+    assert_eq!(
+        outcome.new_invalid_rows, 1,
+        "exactly the planted line fails"
+    );
     assert_eq!(outcome.lines_ingested_total, lines.len() as u64);
 
     let rows = scan_spawn_rows(&db, spawn_id);
@@ -378,7 +471,12 @@ fn empty_stream_finalizes_with_zero_rows() {
     let (_temp, db) = open_temp_db();
     let root = tempfile::tempdir().expect("spawn root");
     let spawn_id = "agent-spawn-empty";
-    let log_dir = plant_spawn_dir(root.path(), spawn_id, TranscriptSource::ClaudeStreamJson, "");
+    let log_dir = plant_spawn_dir(
+        root.path(),
+        spawn_id,
+        TranscriptSource::ClaudeStreamJson,
+        "",
+    );
 
     let outcome = ingest_spawn_dir_once(&db, spawn_id, &log_dir, true).expect("finalize empty");
     println!(
@@ -410,7 +508,10 @@ fn unattributable_spawn_dir_is_a_sticky_error() {
     let error =
         ingest_spawn_dir_once(&db, spawn_id, &log_dir, false).expect_err("must refuse to guess");
     println!("edge=unknown_format error={error}");
-    assert!(error.contains("TRANSCRIPT_SOURCE_FORMAT_UNKNOWN"), "{error}");
+    assert!(
+        error.contains("TRANSCRIPT_SOURCE_FORMAT_UNKNOWN"),
+        "{error}"
+    );
     let outcome = ingest_spawn_dir_once(&db, spawn_id, &log_dir, false).expect("parked");
     assert!(outcome.skipped);
 }
@@ -490,7 +591,10 @@ fn crlf_line_endings_hash_identically_to_lf() {
     }
     // The recorded hash must equal a straight sha256 of the logical line.
     let first_line = CODEX_REAL_STREAM.lines().next().expect("line");
-    assert_eq!(lf_rows[0].1.raw_line_sha256, sha256_hex(first_line.as_bytes()));
+    assert_eq!(
+        lf_rows[0].1.raw_line_sha256,
+        sha256_hex(first_line.as_bytes())
+    );
 }
 
 #[test]

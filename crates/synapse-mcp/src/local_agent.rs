@@ -1,0 +1,1299 @@
+use std::{
+    collections::BTreeMap,
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process::ExitCode,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, bail};
+use futures_util::StreamExt;
+use reqwest::Url;
+use rmcp::{
+    ServiceExt,
+    model::{
+        CallToolRequestParams, ClientCapabilities, ClientInfo, Content, Implementation, JsonObject,
+        Tool,
+    },
+    transport::streamable_http_client::{
+        StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    },
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+#[derive(Clone, Debug)]
+pub(crate) struct LocalAgentCli {
+    pub model_name: Option<String>,
+    pub task: Option<String>,
+    pub task_file: Option<PathBuf>,
+    pub mcp_url: String,
+    pub spawn_id: Option<String>,
+    pub log_dir: Option<PathBuf>,
+    pub max_turns: u32,
+    pub timeout_ms: u64,
+    pub context_char_limit: usize,
+    pub tool_parse_retry_limit: u32,
+    pub no_stream: bool,
+    pub allow_non_loopback: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalModelListResult {
+    rows: Vec<LocalModelRegistryRow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LocalModelRegistryRow {
+    name: String,
+    base_url: String,
+    model_id: String,
+    enabled: bool,
+    allow_non_loopback: bool,
+    api_key_env_var: Option<String>,
+    api_shape: String,
+    context_length: Option<u64>,
+    max_tools: Option<usize>,
+    last_probe: Option<LocalModelProbe>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LocalModelProbe {
+    healthy: bool,
+    error_code: Option<String>,
+    error_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct Usage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+impl Usage {
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            prompt_tokens: value.get("prompt_tokens").and_then(Value::as_u64)?,
+            completion_tokens: value.get("completion_tokens").and_then(Value::as_u64)?,
+            total_tokens: value.get("total_tokens").and_then(Value::as_u64)?,
+        })
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OpenAiToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChatCompletion {
+    content: String,
+    tool_calls: Vec<OpenAiToolCall>,
+    finish_reason: Option<String>,
+    usage: Option<Usage>,
+    raw_sha256: String,
+}
+
+#[derive(Default)]
+struct StreamingToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+struct Runner {
+    cli: LocalAgentCli,
+    spawn_id: String,
+    log_dir: PathBuf,
+    stdout: File,
+    token: String,
+    event_url: Url,
+    endpoint_url: Url,
+    endpoint_api_key: Option<String>,
+    registry: LocalModelRegistryRow,
+    tools: Vec<Tool>,
+    openai_tools: Vec<Value>,
+    messages: Vec<Value>,
+    conversation_id: String,
+    total_usage: Usage,
+    turn_count: u32,
+    tool_call_count: u64,
+    parse_error_count: u32,
+    truncated_context_count: u32,
+    http: reqwest::Client,
+}
+
+pub(crate) async fn run_from_cli(cli: LocalAgentCli) -> anyhow::Result<ExitCode> {
+    let mut runner = Runner::new(cli).await?;
+    let result = runner.run_loop().await;
+    match result {
+        Ok(()) => {
+            runner.write_success_status()?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            let code = error_code_from_detail(&detail);
+            runner.write_failure(code, &detail).await?;
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+impl Runner {
+    async fn new(cli: LocalAgentCli) -> anyhow::Result<Self> {
+        if cli.max_turns == 0 {
+            bail!("TOOL_PARAMS_INVALID: --local-agent-max-turns must be > 0");
+        }
+        if cli.timeout_ms == 0 {
+            bail!("TOOL_PARAMS_INVALID: --local-agent-timeout-ms must be > 0");
+        }
+        if cli.context_char_limit < 1024 {
+            bail!("TOOL_PARAMS_INVALID: --local-agent-context-char-limit must be >= 1024");
+        }
+        let model_name = non_empty(
+            cli.model_name.as_deref(),
+            "TOOL_PARAMS_INVALID: --local-agent-model is required",
+        )?;
+        let task = resolve_task(cli.task.as_deref(), cli.task_file.as_ref())?;
+        let spawn_id = cli
+            .spawn_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-spawn-local-{}", Uuid::now_v7().simple()));
+        validate_spawn_id(&spawn_id)?;
+        let log_dir = match cli.log_dir.clone() {
+            Some(path) => path,
+            None => local_agent_spawn_root_dir()?.join(&spawn_id),
+        };
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("create local-agent log dir {}", log_dir.display()))?;
+        let stdout_path = log_dir.join("stdout.jsonl");
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stdout_path)
+            .with_context(|| format!("open {}", stdout_path.display()))?;
+        let token = crate::http::load_token_value().context("load Synapse bearer token")?;
+        let client_info = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("synapse-local-model-agent", env!("CARGO_PKG_VERSION")),
+        );
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(cli.mcp_url.clone())
+                .auth_header(token.clone()),
+        );
+        let mut mcp = client_info
+            .serve(transport)
+            .await
+            .context("initialize Synapse MCP local-agent session")?;
+        let tools = mcp
+            .peer()
+            .list_all_tools()
+            .await
+            .context("client-parity tools/list failed")?;
+        if tools.is_empty() {
+            bail!("MODEL_TOOLS_UNSUPPORTED: Synapse tools/list returned zero tools");
+        }
+        let _health = call_mcp_tool_json(mcp.peer(), "health", Map::new())
+            .await
+            .context("call Synapse health tool")?;
+        let mut list_args = Map::new();
+        list_args.insert("name".to_owned(), Value::from(model_name.to_owned()));
+        list_args.insert("include_disabled".to_owned(), Value::from(true));
+        list_args.insert("limit".to_owned(), Value::from(10));
+        let registry_value = call_mcp_tool_json(mcp.peer(), "local_model_list", list_args)
+            .await
+            .context("call Synapse local_model_list tool")?;
+        let registry_result: LocalModelListResult = serde_json::from_value(registry_value)
+            .context("decode local_model_list structured content")?;
+        let registry = registry_result
+            .rows
+            .into_iter()
+            .find(|row| row.name == model_name)
+            .with_context(|| format!("LOCAL_MODEL_NOT_FOUND: registry row {model_name:?}"))?;
+        validate_registry_row(&registry)?;
+        let endpoint_url = chat_completions_endpoint(&registry, cli.allow_non_loopback)?;
+        let endpoint_api_key = match registry.api_key_env_var.as_deref() {
+            Some(name) => Some(
+                std::env::var(name)
+                    .with_context(|| format!("LOCAL_MODEL_API_KEY_MISSING: env {name}"))?,
+            ),
+            None => None,
+        };
+        let event_url = agent_event_url(&cli.mcp_url, &spawn_id)?;
+        let openai_tools = tools.iter().map(openai_tool_from_mcp).collect::<Vec<_>>();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(cli.timeout_ms))
+            .build()
+            .context("build local-agent HTTP client")?;
+        let conversation_id = format!("local-model-{}", Uuid::now_v7().simple());
+        write_json_file(
+            log_dir.join("local-model-runner.json"),
+            &json!({
+                "schema_version": 1,
+                "spawn_id": spawn_id,
+                "registry_name": registry.name,
+                "model": registry.model_id,
+                "mcp_url": cli.mcp_url,
+                "endpoint_url": endpoint_url.as_str(),
+                "context_length": registry.context_length,
+                "registry_max_tools": registry.max_tools,
+                "mcp_tool_count": tools.len(),
+                "started_at_unix_ms": unix_time_ms_now(),
+            }),
+        )?;
+        write_json_file(
+            log_dir.join("task-started.json"),
+            &json!({
+                "schema_version": 1,
+                "spawn_id": spawn_id,
+                "registry_name": registry.name,
+                "model": registry.model_id,
+                "conversation_id": conversation_id,
+                "tool_count": tools.len(),
+                "endpoint_url": endpoint_url.as_str(),
+                "started_at_unix_ms": unix_time_ms_now(),
+            }),
+        )?;
+        std::fs::write(log_dir.join("prompt.txt"), &task)
+            .with_context(|| format!("write {}", log_dir.join("prompt.txt").display()))?;
+        write_json_file(
+            log_dir.join("completion-status.json"),
+            &json!({
+                "schema_version": 1,
+                "spawn_id": spawn_id,
+                "status": "running",
+                "state": "running",
+                "started_at_unix_ms": unix_time_ms_now(),
+            }),
+        )?;
+        let mut messages = Vec::new();
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt(),
+        }));
+        messages.push(json!({
+            "role": "user",
+            "content": task,
+        }));
+        let mut runner = Self {
+            cli,
+            spawn_id,
+            log_dir,
+            stdout,
+            token,
+            event_url,
+            endpoint_url,
+            endpoint_api_key,
+            registry,
+            tools,
+            openai_tools,
+            messages,
+            conversation_id,
+            total_usage: Usage::default(),
+            turn_count: 0,
+            tool_call_count: 0,
+            parse_error_count: 0,
+            truncated_context_count: 0,
+            http,
+        };
+        runner.write_line(json!({
+            "type": "local.thread.started",
+            "conversation_id": runner.conversation_id,
+            "model": runner.registry.model_id,
+            "registry_name": runner.registry.name,
+            "tool_count": runner.tools.len(),
+        }))?;
+        runner
+            .post_event(json!({
+                "event": "state_changed",
+                "session_id": runner.conversation_id,
+                "conversation_id": runner.conversation_id,
+                "model": runner.registry.model_id,
+                "registry_name": runner.registry.name,
+                "state_to": "live",
+                "reason_code": "local_agent_started",
+                "tool_count": runner.tools.len(),
+            }))
+            .await?;
+        let _ = mcp.close().await;
+        Ok(runner)
+    }
+
+    async fn run_loop(&mut self) -> anyhow::Result<()> {
+        let started = Instant::now();
+        let mut used_any_tool = false;
+        for turn in 1..=self.cli.max_turns {
+            if started.elapsed() > Duration::from_millis(self.cli.timeout_ms) {
+                bail!(
+                    "MODEL_ENDPOINT_UNREACHABLE: local-agent timeout exceeded before turn {turn}"
+                );
+            }
+            self.turn_count = turn;
+            self.write_line(json!({
+                "type": "local.turn.started",
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "turn_index": turn,
+            }))?;
+            self.post_event(json!({
+                "event": "turn_started",
+                "session_id": self.conversation_id,
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "registry_name": self.registry.name,
+                "turn_index": turn,
+            }))
+            .await?;
+            self.truncate_context_if_needed().await?;
+            let completion = self.chat_completion().await?;
+            self.write_line(json!({
+                "type": "local.assistant.message",
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "turn_index": turn,
+                "content": completion.content,
+                "finish_reason": completion.finish_reason,
+                "raw_response_sha256": completion.raw_sha256,
+            }))?;
+            self.messages.push(assistant_message(&completion));
+            if let Some(usage) = completion.usage.clone() {
+                self.total_usage.add(&usage);
+                self.write_line(json!({
+                    "type": "local.turn.finished",
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "turn_index": turn,
+                    "finish_reason": completion.finish_reason,
+                    "usage": usage,
+                }))?;
+                self.post_event(json!({
+                    "event": "turn_finished",
+                    "session_id": self.conversation_id,
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "registry_name": self.registry.name,
+                    "turn_index": turn,
+                    "finish_reason": completion.finish_reason,
+                    "usage": usage,
+                }))
+                .await?;
+            }
+            if completion.tool_calls.is_empty() {
+                if used_any_tool {
+                    std::fs::write(self.log_dir.join("final-message.txt"), &completion.content)
+                        .with_context(|| {
+                            format!("write {}", self.log_dir.join("final-message.txt").display())
+                        })?;
+                    self.post_event(json!({
+                        "event": "exited",
+                        "session_id": self.conversation_id,
+                        "conversation_id": self.conversation_id,
+                        "model": self.registry.model_id,
+                        "registry_name": self.registry.name,
+                        "end_state": "success",
+                        "reason_code": "local_agent_completed",
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+                bail!("MODEL_TOOLS_UNSUPPORTED: model returned no tool calls on the first turn");
+            }
+            used_any_tool = true;
+            for call in completion.tool_calls {
+                self.execute_tool_call(call).await?;
+            }
+        }
+        bail!(
+            "LOCAL_AGENT_TURN_LIMIT: local model did not finish within {} turns",
+            self.cli.max_turns
+        )
+    }
+
+    async fn execute_tool_call(&mut self, call: OpenAiToolCall) -> anyhow::Result<()> {
+        self.tool_call_count = self.tool_call_count.saturating_add(1);
+        self.write_line(json!({
+            "type": "local.tool_call.started",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "tool_call_id": call.id,
+            "arguments": call.arguments,
+        }))?;
+        self.post_event(json!({
+            "event": "tool_call_started",
+            "session_id": self.conversation_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "tool_call_id": call.id,
+            "tool_arguments": string_json_or_value(&call.arguments),
+        }))
+        .await?;
+        let args = match parse_tool_arguments(&call.arguments) {
+            Ok(args) => args,
+            Err(error) => {
+                self.parse_error_count = self.parse_error_count.saturating_add(1);
+                let detail = format!("TOOL_CALL_ARGUMENTS_NOT_JSON: {error}");
+                let result_value = json!({ "error": detail });
+                self.write_line(json!({
+                    "type": "local.tool_parse_error",
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "turn_index": self.turn_count,
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "error_code": "MODEL_TOOL_ARGUMENTS_INVALID",
+                    "error_detail": detail,
+                }))?;
+                self.messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": detail,
+                }));
+                self.post_event(json!({
+                    "event": "tool_call_finished",
+                    "session_id": self.conversation_id,
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "registry_name": self.registry.name,
+                    "turn_index": self.turn_count,
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "tool_response": result_value,
+                    "error_code": "MODEL_TOOL_ARGUMENTS_INVALID",
+                }))
+                .await?;
+                if self.parse_error_count > self.cli.tool_parse_retry_limit {
+                    bail!(
+                        "MODEL_TOOLS_UNSUPPORTED: malformed tool-call arguments exceeded retry limit {}",
+                        self.cli.tool_parse_retry_limit
+                    );
+                }
+                return Ok(());
+            }
+        };
+        let client_info = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("synapse-local-model-agent", env!("CARGO_PKG_VERSION")),
+        );
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(self.cli.mcp_url.clone())
+                .auth_header(self.token.clone()),
+        );
+        let mut mcp = client_info
+            .serve(transport)
+            .await
+            .context("initialize Synapse MCP session for tool call")?;
+        let result = match mcp
+            .peer()
+            .call_tool(CallToolRequestParams::new(call.name.clone()).with_arguments(args))
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let detail = format!("SYNAPSE_TOOL_CALL_FAILED: {}: {error}", call.name);
+                let result_value = json!({ "error": detail });
+                let _ = mcp.close().await;
+                self.messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": detail,
+                }));
+                self.write_line(json!({
+                    "type": "local.tool_call.finished",
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "turn_index": self.turn_count,
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "status": "error",
+                    "error_code": "SYNAPSE_TOOL_CALL_FAILED",
+                    "result": result_value,
+                }))?;
+                self.post_event(json!({
+                    "event": "tool_call_finished",
+                    "session_id": self.conversation_id,
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "registry_name": self.registry.name,
+                    "turn_index": self.turn_count,
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "tool_response": result_value,
+                    "error_code": "SYNAPSE_TOOL_CALL_FAILED",
+                }))
+                .await?;
+                bail!("{detail}");
+            }
+        };
+        let is_error = result.is_error.unwrap_or(false);
+        let result_value = tool_result_value(&result);
+        let result_text = bounded_result_text(&result_value);
+        let _ = mcp.close().await;
+        self.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": result_text,
+        }));
+        self.write_line(json!({
+            "type": "local.tool_call.finished",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "tool_call_id": call.id,
+            "status": if is_error { "error" } else { "ok" },
+            "result": result_value,
+        }))?;
+        self.post_event(json!({
+            "event": "tool_call_finished",
+            "session_id": self.conversation_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "tool_call_id": call.id,
+            "tool_response": result_value,
+            "error_code": if is_error { "SYNAPSE_TOOL_ERROR" } else { "" },
+        }))
+        .await?;
+        Ok(())
+    }
+
+    async fn chat_completion(&self) -> anyhow::Result<ChatCompletion> {
+        let mut body = json!({
+            "model": self.registry.model_id,
+            "messages": self.messages,
+            "tools": self.openai_tools,
+            "tool_choice": "auto",
+            "temperature": 0,
+            "stream": !self.cli.no_stream,
+        });
+        if !self.cli.no_stream {
+            body["stream_options"] = json!({"include_usage": true});
+        }
+        let mut request = self.http.post(self.endpoint_url.clone()).json(&body);
+        if let Some(api_key) = &self.endpoint_api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!("MODEL_ENDPOINT_UNREACHABLE: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("MODEL_ENDPOINT_UNREACHABLE: endpoint returned HTTP {status}: {body}");
+        }
+        if self.cli.no_stream {
+            let text = response.text().await.context("read non-stream response")?;
+            parse_non_stream_response(&text)
+        } else {
+            parse_streaming_response(response).await
+        }
+    }
+
+    async fn truncate_context_if_needed(&mut self) -> anyhow::Result<()> {
+        let current = serde_json::to_string(&self.messages)
+            .context("serialize local-agent context for length check")?;
+        if current.chars().count() <= self.cli.context_char_limit {
+            return Ok(());
+        }
+        let before_chars = current.chars().count();
+        while self.messages.len() > 2 {
+            let current = serde_json::to_string(&self.messages)?;
+            if current.chars().count() <= self.cli.context_char_limit {
+                break;
+            }
+            self.messages.remove(2);
+        }
+        let after_chars = serde_json::to_string(&self.messages)?.chars().count();
+        self.truncated_context_count = self.truncated_context_count.saturating_add(1);
+        self.write_line(json!({
+            "type": "local.context.truncated",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "before_chars": before_chars,
+            "after_chars": after_chars,
+            "limit_chars": self.cli.context_char_limit,
+        }))?;
+        self.post_event(json!({
+            "event": "state_changed",
+            "session_id": self.conversation_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "state_to": "live",
+            "reason_code": "local_context_truncated",
+            "before_chars": before_chars,
+            "after_chars": after_chars,
+            "limit_chars": self.cli.context_char_limit,
+        }))
+        .await?;
+        if after_chars > self.cli.context_char_limit {
+            bail!(
+                "LOCAL_AGENT_CONTEXT_OVERFLOW: context is {after_chars} chars after truncation, limit {}",
+                self.cli.context_char_limit
+            );
+        }
+        Ok(())
+    }
+
+    async fn post_event(&self, body: Value) -> anyhow::Result<()> {
+        let response = self
+            .http
+            .post(self.event_url.clone())
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .context("POST local model event ingress")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!("AGENT_EVENT_INGRESS_WRITE_FAILED: HTTP {status}: {text}");
+        }
+        Ok(())
+    }
+
+    fn write_line(&mut self, value: Value) -> anyhow::Result<()> {
+        serde_json::to_writer(&mut self.stdout, &value).context("write local-agent stdout JSON")?;
+        self.stdout
+            .write_all(b"\n")
+            .context("write local-agent stdout newline")?;
+        self.stdout.flush().context("flush local-agent stdout")?;
+        Ok(())
+    }
+
+    fn write_success_status(&self) -> anyhow::Result<()> {
+        write_json_file(
+            self.log_dir.join("completion-status.json"),
+            &json!({
+                "schema_version": 1,
+                "spawn_id": self.spawn_id,
+                "status": "ok",
+                "state": "complete",
+                "exit_code": 0,
+                "turn_count": self.turn_count,
+                "tool_call_count": self.tool_call_count,
+                "parse_error_count": self.parse_error_count,
+                "truncated_context_count": self.truncated_context_count,
+                "usage": self.total_usage,
+                "completed_at_unix_ms": unix_time_ms_now(),
+            }),
+        )
+    }
+
+    async fn write_failure(&mut self, code: &str, detail: &str) -> anyhow::Result<()> {
+        let _ = self.write_line(json!({
+            "type": "local.error",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "error_code": code,
+            "error_detail": detail,
+        }));
+        let _ = self
+            .post_event(json!({
+                "event": "exited",
+                "session_id": self.conversation_id,
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "registry_name": self.registry.name,
+                "end_state": "error",
+                "reason_code": code,
+                "error_code": code,
+            }))
+            .await;
+        write_json_file(
+            self.log_dir.join("completion-status.json"),
+            &json!({
+                "schema_version": 1,
+                "spawn_id": self.spawn_id,
+                "status": "failed",
+                "state": "dead",
+                "exit_code": 1,
+                "error_code": code,
+                "error_message": detail,
+                "turn_count": self.turn_count,
+                "tool_call_count": self.tool_call_count,
+                "parse_error_count": self.parse_error_count,
+                "truncated_context_count": self.truncated_context_count,
+                "usage": self.total_usage,
+                "completed_at_unix_ms": unix_time_ms_now(),
+            }),
+        )
+    }
+}
+
+async fn call_mcp_tool_json(
+    peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
+    name: &str,
+    arguments: JsonObject,
+) -> anyhow::Result<Value> {
+    let result = peer
+        .call_tool(CallToolRequestParams::new(name.to_owned()).with_arguments(arguments))
+        .await
+        .with_context(|| format!("MCP tool {name} call failed"))?;
+    if result.is_error.unwrap_or(false) {
+        bail!(
+            "MCP tool {name} returned isError=true: {}",
+            tool_result_value(&result)
+        );
+    }
+    Ok(tool_result_value(&result))
+}
+
+fn tool_result_value(result: &rmcp::model::CallToolResult) -> Value {
+    if let Some(value) = &result.structured_content {
+        return value.clone();
+    }
+    let text = result
+        .content
+        .iter()
+        .filter_map(content_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or(Value::String(text))
+    }
+}
+
+fn content_text(content: &Content) -> Option<String> {
+    content.as_text().map(|text| text.text.clone())
+}
+
+fn openai_tool_from_mcp(tool: &Tool) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": tool.name.as_ref(),
+            "description": tool.description.as_ref().map(|desc| desc.as_ref()).unwrap_or("Synapse MCP tool"),
+            "parameters": Value::Object((*tool.input_schema).clone()),
+        }
+    })
+}
+
+fn resolve_task(task: Option<&str>, task_file: Option<&PathBuf>) -> anyhow::Result<String> {
+    if let Some(task) = task.filter(|value| !value.trim().is_empty()) {
+        return Ok(task.to_owned());
+    }
+    if let Some(path) = task_file {
+        let task = std::fs::read_to_string(path)
+            .with_context(|| format!("read task file {}", path.display()))?;
+        if task.trim().is_empty() {
+            bail!("TOOL_PARAMS_INVALID: task file {} is empty", path.display());
+        }
+        return Ok(task);
+    }
+    bail!("TOOL_PARAMS_INVALID: --local-agent-task or --local-agent-task-file is required")
+}
+
+fn non_empty(value: Option<&str>, detail: &str) -> anyhow::Result<String> {
+    value
+        .filter(|text| !text.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!(detail.to_owned()))
+}
+
+fn validate_spawn_id(spawn_id: &str) -> anyhow::Result<()> {
+    if !spawn_id.starts_with("agent-spawn-") {
+        bail!("TOOL_PARAMS_INVALID: spawn id must start with agent-spawn-");
+    }
+    if spawn_id.len() > 128 {
+        bail!("TOOL_PARAMS_INVALID: spawn id exceeds 128 chars");
+    }
+    if !spawn_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        bail!("TOOL_PARAMS_INVALID: spawn id must contain only ASCII alphanumerics and dashes");
+    }
+    Ok(())
+}
+
+fn validate_registry_row(row: &LocalModelRegistryRow) -> anyhow::Result<()> {
+    if !row.enabled {
+        bail!(
+            "LOCAL_MODEL_DISABLED: registry row {:?} is disabled",
+            row.name
+        );
+    }
+    if row.api_shape != "open_ai_chat_completions" {
+        bail!(
+            "LOCAL_MODEL_API_SHAPE_UNSUPPORTED: {:?} is not open_ai_chat_completions",
+            row.api_shape
+        );
+    }
+    let Some(probe) = &row.last_probe else {
+        bail!(
+            "LOCAL_MODEL_UNPROBED: registry row {:?} has no last_probe",
+            row.name
+        );
+    };
+    if !probe.healthy {
+        bail!(
+            "LOCAL_MODEL_UNHEALTHY: {:?}: {} {}",
+            row.name,
+            probe.error_code.as_deref().unwrap_or("unknown"),
+            probe.error_detail.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn chat_completions_endpoint(
+    row: &LocalModelRegistryRow,
+    allow_non_loopback: bool,
+) -> anyhow::Result<Url> {
+    let mut url = Url::parse(&row.base_url)
+        .with_context(|| format!("LOCAL_MODEL_ENDPOINT_INVALID: {:?}", row.base_url))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        bail!("LOCAL_MODEL_ENDPOINT_INVALID: endpoint scheme must be http or https");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("LOCAL_MODEL_ENDPOINT_INVALID: endpoint must not contain query or fragment");
+    }
+    if !(row.allow_non_loopback || allow_non_loopback || is_loopback_url(&url)) {
+        bail!(
+            "LOCAL_MODEL_ENDPOINT_NON_LOOPBACK: non-loopback endpoints require explicit allowance"
+        );
+    }
+    let path = url.path().trim_end_matches('/');
+    let next = if path.ends_with("/chat/completions") {
+        path.to_owned()
+    } else if path.is_empty() || path == "/" {
+        "/v1/chat/completions".to_owned()
+    } else {
+        format!("{path}/chat/completions")
+    };
+    url.set_path(&next);
+    Ok(url)
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|addr| addr.is_loopback()),
+        None => false,
+    }
+}
+
+fn agent_event_url(mcp_url: &str, spawn_id: &str) -> anyhow::Result<Url> {
+    let mut url = Url::parse(mcp_url).context("parse local-agent MCP URL")?;
+    url.set_path("/agent-events");
+    url.set_query(Some(&format!(
+        "spawn_id={spawn_id}&source=local_model_runner"
+    )));
+    Ok(url)
+}
+
+fn parse_tool_arguments(raw: &str) -> anyhow::Result<JsonObject> {
+    if raw.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    let value: Value = serde_json::from_str(raw)?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("tool arguments must be a JSON object"))
+}
+
+fn string_json_or_value(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+}
+
+fn assistant_message(completion: &ChatCompletion) -> Value {
+    if completion.tool_calls.is_empty() {
+        json!({
+            "role": "assistant",
+            "content": completion.content,
+        })
+    } else {
+        let tool_calls = completion
+            .tool_calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "role": "assistant",
+            "content": if completion.content.is_empty() { Value::Null } else { Value::String(completion.content.clone()) },
+            "tool_calls": tool_calls,
+        })
+    }
+}
+
+fn parse_non_stream_response(text: &str) -> anyhow::Result<ChatCompletion> {
+    let value: Value = serde_json::from_str(text)
+        .with_context(|| format!("MODEL_RESPONSE_INVALID_JSON: {}", bounded_text(text, 4000)))?;
+    let choice = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| anyhow::anyhow!("MODEL_RESPONSE_INVALID: missing choices[0]"))?;
+    let message = choice
+        .get("message")
+        .ok_or_else(|| anyhow::anyhow!("MODEL_RESPONSE_INVALID: missing choices[0].message"))?;
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| calls.iter().filter_map(parse_tool_call_value).collect())
+        .unwrap_or_default();
+    Ok(ChatCompletion {
+        content,
+        tool_calls,
+        finish_reason: choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        usage: value.get("usage").and_then(Usage::from_value),
+        raw_sha256: sha256_hex(text.as_bytes()),
+    })
+}
+
+fn parse_tool_call_value(value: &Value) -> Option<OpenAiToolCall> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("call_missing_id")
+        .to_owned();
+    let function = value.get("function")?;
+    let name = function.get("name").and_then(Value::as_str)?.to_owned();
+    let arguments = match function.get("arguments") {
+        Some(Value::String(text)) => text.to_owned(),
+        Some(value) => value.to_string(),
+        None => "{}".to_owned(),
+    };
+    Some(OpenAiToolCall {
+        id,
+        name,
+        arguments,
+    })
+}
+
+async fn parse_streaming_response(response: reqwest::Response) -> anyhow::Result<ChatCompletion> {
+    let mut stream = response.bytes_stream();
+    let mut pending = String::new();
+    let mut raw = Vec::new();
+    let mut content = String::new();
+    let mut calls: BTreeMap<u64, StreamingToolCall> = BTreeMap::new();
+    let mut usage = None;
+    let mut finish_reason = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read streaming response chunk")?;
+        raw.extend_from_slice(&chunk);
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = pending.find('\n') {
+            let mut line = pending[..index].trim_end_matches('\r').to_owned();
+            pending = pending[index + 1..].to_owned();
+            line = line.trim().to_owned();
+            if !line.starts_with("data:") {
+                continue;
+            }
+            let data = line.trim_start_matches("data:").trim();
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(data)
+                .with_context(|| format!("MODEL_STREAM_CHUNK_INVALID_JSON: {data}"))?;
+            if let Some(next_usage) = value.get("usage").and_then(Usage::from_value) {
+                usage = Some(next_usage);
+            }
+            let Some(choice) = value
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+            else {
+                continue;
+            };
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                finish_reason = Some(reason.to_owned());
+            }
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
+            if let Some(piece) = delta.get("content").and_then(Value::as_str) {
+                content.push_str(piece);
+            }
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                for value in tool_calls {
+                    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let entry = calls.entry(index).or_default();
+                    if let Some(id) = value.get("id").and_then(Value::as_str) {
+                        entry.id = Some(id.to_owned());
+                    }
+                    if let Some(function) = value.get("function") {
+                        if let Some(name) = function.get("name").and_then(Value::as_str) {
+                            entry.name = Some(name.to_owned());
+                        }
+                        match function.get("arguments") {
+                            Some(Value::String(part)) => entry.arguments.push_str(part),
+                            Some(other) => entry.arguments.push_str(&other.to_string()),
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let tool_calls = calls
+        .into_iter()
+        .map(|(index, call)| OpenAiToolCall {
+            id: call.id.unwrap_or_else(|| format!("call_{index}")),
+            name: call.name.unwrap_or_default(),
+            arguments: call.arguments,
+        })
+        .filter(|call| !call.name.is_empty())
+        .collect::<Vec<_>>();
+    Ok(ChatCompletion {
+        content,
+        tool_calls,
+        finish_reason,
+        usage,
+        raw_sha256: sha256_hex(&raw),
+    })
+}
+
+fn bounded_result_text(value: &Value) -> String {
+    bounded_text(&value.to_string(), 16_000)
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_owned()
+    } else {
+        value.chars().take(max_chars).collect::<String>()
+    }
+}
+
+fn write_json_file(path: PathBuf, value: &Value) -> anyhow::Result<()> {
+    let encoded = serde_json::to_vec_pretty(value).context("serialize local-agent JSON file")?;
+    std::fs::write(&path, encoded).with_context(|| format!("write {}", path.display()))
+}
+
+fn local_agent_spawn_root_dir() -> anyhow::Result<PathBuf> {
+    let local_appdata = std::env::var_os("LOCALAPPDATA")
+        .context("LOCAL_MODEL_AGENT_LOG_ROOT_UNAVAILABLE: LOCALAPPDATA is not set")?;
+    Ok(PathBuf::from(local_appdata)
+        .join("Synapse")
+        .join("agent-spawns"))
+}
+
+fn system_prompt() -> &'static str {
+    "You are a local Synapse agent. Use the provided MCP tools to inspect and change state. Never invent tool results. When a task asks for a stored artifact, call the relevant Synapse tool and then read it back. Finish with a concise summary only after the needed tool calls have succeeded."
+}
+
+fn error_code_from_detail(detail: &str) -> &str {
+    for code in [
+        "MODEL_ENDPOINT_UNREACHABLE",
+        "MODEL_TOOLS_UNSUPPORTED",
+        "LOCAL_AGENT_CONTEXT_OVERFLOW",
+        "LOCAL_AGENT_TURN_LIMIT",
+        "AGENT_EVENT_INGRESS_WRITE_FAILED",
+        "LOCAL_MODEL_UNHEALTHY",
+        "LOCAL_MODEL_DISABLED",
+        "LOCAL_MODEL_UNPROBED",
+        "LOCAL_MODEL_ENDPOINT_NON_LOOPBACK",
+        "SYNAPSE_TOOL_CALL_FAILED",
+        "TOOL_PARAMS_INVALID",
+    ] {
+        if detail.contains(code) {
+            return code;
+        }
+    }
+    "LOCAL_MODEL_AGENT_FAILED"
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
+fn unix_time_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn local_model_endpoint_env_probe_requires_real_tool_call() -> anyhow::Result<()> {
+        let base_url = match std::env::var("SYNAPSE_LOCAL_AGENT_ITEST_BASE_URL") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => {
+                eprintln!(
+                    "SKIP_LOCAL_MODEL_ENDPOINT_ITEST: set SYNAPSE_LOCAL_AGENT_ITEST_BASE_URL and SYNAPSE_LOCAL_AGENT_ITEST_MODEL to run against a real OpenAI-compatible local endpoint"
+                );
+                return Ok(());
+            }
+        };
+        let model_id = match std::env::var("SYNAPSE_LOCAL_AGENT_ITEST_MODEL") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => {
+                eprintln!(
+                    "SKIP_LOCAL_MODEL_ENDPOINT_ITEST: SYNAPSE_LOCAL_AGENT_ITEST_MODEL is absent"
+                );
+                return Ok(());
+            }
+        };
+        let allow_non_loopback = std::env::var("SYNAPSE_LOCAL_AGENT_ITEST_ALLOW_NON_LOOPBACK")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        let row = LocalModelRegistryRow {
+            name: "env-local-agent-itest".to_owned(),
+            base_url,
+            model_id: model_id.clone(),
+            enabled: true,
+            allow_non_loopback,
+            api_key_env_var: None,
+            api_shape: "open_ai_chat_completions".to_owned(),
+            context_length: None,
+            max_tools: None,
+            last_probe: Some(LocalModelProbe {
+                healthy: true,
+                error_code: None,
+                error_detail: None,
+            }),
+        };
+        validate_registry_row(&row)?;
+        let endpoint = chat_completions_endpoint(&row, allow_non_loopback)?;
+        let nonce = format!("local-agent-itest-{}", Uuid::now_v7().simple());
+        let request_body = json!({
+            "model": model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return no prose. Call the requested tool exactly once."
+                },
+                {
+                    "role": "user",
+                    "content": format!("Call synapse_probe with nonce {nonce:?}.")
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "synapse_probe",
+                        "description": "Echo the provided nonce to prove structured tool calling works.",
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "nonce": { "type": "string" }
+                            },
+                            "required": ["nonce"]
+                        }
+                    }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": { "name": "synapse_probe" }
+            },
+            "stream": false,
+            "temperature": 0,
+            "max_tokens": 128
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        let mut request = client
+            .post(endpoint.clone())
+            .header(header::ACCEPT, "application/json")
+            .json(&request_body);
+        if let Ok(token) = std::env::var("SYNAPSE_LOCAL_AGENT_ITEST_API_KEY") {
+            if !token.trim().is_empty() {
+                request = request.bearer_auth(token);
+            }
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("real local endpoint {endpoint} request failed"))?;
+        let status = response.status();
+        let body = response.text().await.context("read endpoint response")?;
+        assert!(
+            status.is_success(),
+            "real local endpoint returned HTTP {status}: {}",
+            bounded_text(&body, 4000)
+        );
+        let completion = parse_non_stream_response(&body)?;
+        let call = completion
+            .tool_calls
+            .iter()
+            .find(|call| call.name == "synapse_probe")
+            .context("real endpoint did not return a synapse_probe tool call")?;
+        let args: Value = serde_json::from_str(&call.arguments)
+            .context("real endpoint returned malformed tool arguments")?;
+        assert_eq!(
+            args.get("nonce").and_then(Value::as_str),
+            Some(nonce.as_str()),
+            "real endpoint tool call nonce must match"
+        );
+        eprintln!(
+            "LOCAL_MODEL_ENDPOINT_ITEST_OK endpoint={} model={} prompt_tokens={:?} completion_tokens={:?}",
+            endpoint,
+            row.model_id,
+            completion.usage.as_ref().map(|usage| usage.prompt_tokens),
+            completion
+                .usage
+                .as_ref()
+                .map(|usage| usage.completion_tokens)
+        );
+        Ok(())
+    }
+}

@@ -50,8 +50,8 @@ use synapse_core::{
     ModelPrice, TranscriptModelUsage, TranscriptSource, error_codes,
 };
 use synapse_storage::{
-    Db, agent_transcripts::agent_transcript_spawn_prefix, agent_transcripts::decode_agent_transcript_key,
-    cf,
+    Db, agent_transcripts::agent_transcript_spawn_prefix,
+    agent_transcripts::decode_agent_transcript_key, cf,
 };
 
 use super::{
@@ -483,7 +483,10 @@ impl SynapseService {
         if let Some(spawn_id) = params.spawn_id.as_deref() {
             validate_spawn_id(spawn_id)?;
             let rows = db
-                .scan_cf_prefix(cf::CF_AGENT_TRANSCRIPTS, &agent_transcript_spawn_prefix(spawn_id))
+                .scan_cf_prefix(
+                    cf::CF_AGENT_TRANSCRIPTS,
+                    &agent_transcript_spawn_prefix(spawn_id),
+                )
                 .map_err(|error| mcp_error(error.code(), error.to_string()))?;
             for (key, value) in rows {
                 scanned_rows += 1;
@@ -574,7 +577,8 @@ impl SynapseService {
             // contributes its tokens (counted) but no cost (surfaced honestly
             // via `unpriced_models` and the per-model breakdown), so it never
             // inflates the spawn cost with a guess.
-            let mut spawn_models: Vec<AgentSpawnModelCost> = Vec::with_capacity(resolved.models.len());
+            let mut spawn_models: Vec<AgentSpawnModelCost> =
+                Vec::with_capacity(resolved.models.len());
             let mut spawn_computed: u64 = 0;
             let mut any_priced = false;
             for resolved_model in &resolved.models {
@@ -611,17 +615,18 @@ impl SynapseService {
                 };
 
                 // Fold into the per-model fleet aggregate.
-                let entry = per_model
-                    .entry(model_label.clone())
-                    .or_insert_with(|| AgentModelCost {
-                        model: model_label.clone(),
-                        priced: priced.is_some(),
-                        spawns: 0,
-                        usage: BillableUsage::default(),
-                        total_tokens: 0,
-                        computed_micro_usd: if priced.is_some() { Some(0) } else { None },
-                        source_reported_micro_usd: None,
-                    });
+                let entry =
+                    per_model
+                        .entry(model_label.clone())
+                        .or_insert_with(|| AgentModelCost {
+                            model: model_label.clone(),
+                            priced: priced.is_some(),
+                            spawns: 0,
+                            usage: BillableUsage::default(),
+                            total_tokens: 0,
+                            computed_micro_usd: if priced.is_some() { Some(0) } else { None },
+                            source_reported_micro_usd: None,
+                        });
                 entry.spawns += 1;
                 add_usage(&mut entry.usage, &model_usage);
                 entry.total_tokens = entry.total_tokens.saturating_add(model_total_tokens);
@@ -652,18 +657,21 @@ impl SynapseService {
                 let mut breakdown = CostBreakdown::default();
                 for model in &spawn_models {
                     if let CostOutcome::Priced { cost } = &model.cost {
-                        breakdown.input_micro_usd =
-                            breakdown.input_micro_usd.saturating_add(cost.input_micro_usd);
-                        breakdown.output_micro_usd =
-                            breakdown.output_micro_usd.saturating_add(cost.output_micro_usd);
+                        breakdown.input_micro_usd = breakdown
+                            .input_micro_usd
+                            .saturating_add(cost.input_micro_usd);
+                        breakdown.output_micro_usd = breakdown
+                            .output_micro_usd
+                            .saturating_add(cost.output_micro_usd);
                         breakdown.cache_read_micro_usd = breakdown
                             .cache_read_micro_usd
                             .saturating_add(cost.cache_read_micro_usd);
                         breakdown.cache_creation_micro_usd = breakdown
                             .cache_creation_micro_usd
                             .saturating_add(cost.cache_creation_micro_usd);
-                        breakdown.total_micro_usd =
-                            breakdown.total_micro_usd.saturating_add(cost.total_micro_usd);
+                        breakdown.total_micro_usd = breakdown
+                            .total_micro_usd
+                            .saturating_add(cost.total_micro_usd);
                     }
                 }
                 CostOutcome::Priced { cost: breakdown }
@@ -722,7 +730,6 @@ impl SynapseService {
             per_spawn,
         })
     }
-
 }
 
 /// Loads the full operator price table from `CF_KV`, keyed by normalized model
@@ -763,6 +770,10 @@ struct SpawnAccumulator {
     /// Max across `turn.completed` cumulative usage (Codex), with the line of
     /// the row carrying the running maximum.
     codex_max: Option<CodexMax>,
+    /// Sum across `local.turn.finished` rows. Local OpenAI-compatible
+    /// endpoints report per-turn prompt/completion usage, not a cumulative
+    /// terminal row.
+    local_sum: Option<LocalSum>,
     mixed_source: bool,
 }
 
@@ -789,6 +800,13 @@ struct CodexMax {
     input: u64,
     output: u64,
     cached: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalSum {
+    line_no: u64,
+    input: u64,
+    output: u64,
 }
 
 /// One model's resolved, canonical usage within a spawn. A single-model spawn
@@ -888,6 +906,14 @@ impl SpawnAccumulator {
                 entry.cached = entry.cached.max(usage.cache_read_input_tokens.unwrap_or(0));
                 entry.line_no = entry.line_no.max(record.line_no);
             }
+            TranscriptSource::LocalModelJson if kind == "local.turn.finished" => {
+                let entry = self.local_sum.get_or_insert_with(LocalSum::default);
+                entry.input = entry.input.saturating_add(usage.input_tokens.unwrap_or(0));
+                entry.output = entry
+                    .output
+                    .saturating_add(usage.output_tokens.unwrap_or(0));
+                entry.line_no = entry.line_no.max(record.line_no);
+            }
             _ => {}
         }
         Ok(())
@@ -901,8 +927,13 @@ impl SpawnAccumulator {
                  transcripts are corrupt",
             ));
         }
-        match (self.source, &self.claude_result, &self.codex_max) {
-            (Some(TranscriptSource::ClaudeStreamJson), Some(result), _) => {
+        match (
+            self.source,
+            &self.claude_result,
+            &self.codex_max,
+            &self.local_sum,
+        ) {
+            (Some(TranscriptSource::ClaudeStreamJson), Some(result), _, _) => {
                 let models = if result.model_usage.is_empty() {
                     // Single-model session: the result row carries the model's
                     // own exact cache-creation TTL split.
@@ -956,7 +987,7 @@ impl SpawnAccumulator {
                     line_no: result.line_no,
                 }))
             }
-            (Some(TranscriptSource::CodexExecJson), _, Some(codex)) => {
+            (Some(TranscriptSource::CodexExecJson), _, Some(codex), _) => {
                 let usage =
                     BillableUsage::from_codex_cumulative(codex.input, codex.output, codex.cached)
                         .map_err(|detail| mcp_error(error_codes::TOOL_INTERNAL_ERROR, detail))?;
@@ -971,6 +1002,28 @@ impl SpawnAccumulator {
                     usage,
                     source_reported_micro_usd: None,
                     line_no: codex.line_no,
+                }))
+            }
+            (Some(TranscriptSource::LocalModelJson), _, _, Some(local)) => {
+                let usage = BillableUsage {
+                    input_tokens: local.input,
+                    output_tokens: local.output,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                    cache_creation_5m_tokens: 0,
+                    cache_creation_1h_tokens: 0,
+                };
+                Ok(Some(ResolvedSpawn {
+                    source: TranscriptSource::LocalModelJson,
+                    model: self.model.clone(),
+                    models: vec![ResolvedModel {
+                        model: self.model.clone(),
+                        usage,
+                        source_reported_micro_usd: None,
+                    }],
+                    usage,
+                    source_reported_micro_usd: None,
+                    line_no: local.line_no,
                 }))
             }
             _ => Ok(None),
@@ -995,6 +1048,7 @@ fn source_label(source: TranscriptSource) -> String {
     match source {
         TranscriptSource::ClaudeStreamJson => "claude_stream_json".to_owned(),
         TranscriptSource::CodexExecJson => "codex_exec_json".to_owned(),
+        TranscriptSource::LocalModelJson => "local_model_json".to_owned(),
     }
 }
 
@@ -1025,10 +1079,7 @@ fn ingest_row(
     {
         return Ok(());
     }
-    spawns
-        .entry(spawn_id)
-        .or_default()
-        .observe(&record)
+    spawns.entry(spawn_id).or_default().observe(&record)
 }
 
 fn add_usage(acc: &mut BillableUsage, add: &BillableUsage) {

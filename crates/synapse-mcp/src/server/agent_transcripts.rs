@@ -211,15 +211,25 @@ fn detect_source(log_dir: &Path) -> Result<TranscriptSource, String> {
         || log_dir.join("claude-hook-settings.json").is_file()
         || log_dir.join("claude-debug.log").is_file();
     let codex = log_dir.join("codex-notify.ps1").is_file();
-    match (claude, codex) {
-        (true, false) => Ok(TranscriptSource::ClaudeStreamJson),
-        (false, true) => Ok(TranscriptSource::CodexExecJson),
-        (true, true) => Err(
-            "TRANSCRIPT_SOURCE_AMBIGUOUS: spawn dir carries both Claude and Codex launch artifacts"
+    let local = log_dir.join("local-model-runner.json").is_file();
+    let mut matches = Vec::new();
+    if claude {
+        matches.push(TranscriptSource::ClaudeStreamJson);
+    }
+    if codex {
+        matches.push(TranscriptSource::CodexExecJson);
+    }
+    if local {
+        matches.push(TranscriptSource::LocalModelJson);
+    }
+    match matches.as_slice() {
+        [source] => Ok(*source),
+        [] => Err(
+            "TRANSCRIPT_SOURCE_FORMAT_UNKNOWN: spawn dir carries neither Claude, Codex, nor local-model launch artifacts"
                 .to_owned(),
         ),
-        (false, false) => Err(
-            "TRANSCRIPT_SOURCE_FORMAT_UNKNOWN: spawn dir carries neither Claude nor Codex launch artifacts"
+        _ => Err(
+            "TRANSCRIPT_SOURCE_AMBIGUOUS: spawn dir carries multiple agent launch artifact families"
                 .to_owned(),
         ),
     }
@@ -802,7 +812,11 @@ fn parse_secs_env(name: &str, default: u64) -> anyhow::Result<u64> {
 /// Parses one raw source line into exactly one transcript row. Never fails:
 /// a line the pinned vocabulary cannot place becomes an `invalid` row that
 /// carries the structured reason.
-fn parse_line(raw_line: &[u8], line_no: u64, cursor: &mut TranscriptCursor) -> AgentTranscriptRecord {
+fn parse_line(
+    raw_line: &[u8],
+    line_no: u64,
+    cursor: &mut TranscriptCursor,
+) -> AgentTranscriptRecord {
     let mut record = AgentTranscriptRecord::new(
         unix_time_ns_now(),
         cursor.spawn_id.clone(),
@@ -835,6 +849,7 @@ fn parse_line(raw_line: &[u8], line_no: u64, cursor: &mut TranscriptCursor) -> A
     let result = match cursor.source {
         TranscriptSource::ClaudeStreamJson => parse_claude_object(object, &mut record, cursor),
         TranscriptSource::CodexExecJson => parse_codex_object(object, &mut record, cursor),
+        TranscriptSource::LocalModelJson => parse_local_model_object(object, &mut record, cursor),
     };
     if let Err(detail) = result {
         record.status = TranscriptParseStatus::Invalid;
@@ -1233,12 +1248,10 @@ fn parse_codex_object(
         "error" => {
             record.role = Some(TranscriptRole::System);
             record.event_kind = Some("error".to_owned());
-            record.source_error = Some(
-                object
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| Value::Object(object.clone()).to_string(), ToOwned::to_owned),
-            );
+            record.source_error = Some(object.get("message").and_then(Value::as_str).map_or_else(
+                || Value::Object(object.clone()).to_string(),
+                ToOwned::to_owned,
+            ));
             Ok(())
         }
         "item.started" | "item.updated" | "item.completed" => {
@@ -1288,9 +1301,12 @@ fn parse_codex_object(
                             bounded_json_string(arguments, AGENT_TRANSCRIPT_MAX_TOOL_ARGS_CHARS)
                         })
                         .unwrap_or_default();
-                    let result = item.get("result").filter(|value| !value.is_null()).map(
-                        |result| bounded_json_string(result, AGENT_TRANSCRIPT_MAX_TOOL_RESULT_CHARS),
-                    );
+                    let result =
+                        item.get("result")
+                            .filter(|value| !value.is_null())
+                            .map(|result| {
+                                bounded_json_string(result, AGENT_TRANSCRIPT_MAX_TOOL_RESULT_CHARS)
+                            });
                     record.tool_calls.push(TranscriptToolCall {
                         tool_name,
                         tool_call_id: item
@@ -1302,7 +1318,9 @@ fn parse_codex_object(
                         arguments_truncated,
                         result_summary: result.as_ref().map(|(text, _, _)| text.clone()),
                         result_bytes: result.as_ref().map(|(_, bytes, _)| *bytes),
-                        result_truncated: result.as_ref().is_some_and(|(_, _, truncated)| *truncated),
+                        result_truncated: result
+                            .as_ref()
+                            .is_some_and(|(_, _, truncated)| *truncated),
                         status,
                         exit_code: None,
                     });
@@ -1333,7 +1351,9 @@ fn parse_codex_object(
                         arguments_truncated,
                         result_summary: result.as_ref().map(|(text, _, _)| text.clone()),
                         result_bytes: result.as_ref().map(|(_, bytes, _)| *bytes),
-                        result_truncated: result.as_ref().is_some_and(|(_, _, truncated)| *truncated),
+                        result_truncated: result
+                            .as_ref()
+                            .is_some_and(|(_, _, truncated)| *truncated),
                         status,
                         exit_code: item.get("exit_code").and_then(Value::as_i64),
                     });
@@ -1352,6 +1372,162 @@ fn parse_codex_object(
         }
         other => Err(format!("UNKNOWN_EVENT_TYPE: {other}")),
     }
+}
+
+fn parse_local_model_object(
+    object: &Map<String, Value>,
+    record: &mut AgentTranscriptRecord,
+    cursor: &mut TranscriptCursor,
+) -> Result<(), String> {
+    let event_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "MISSING_TYPE: line has no string `type` field".to_owned())?;
+    record.event_kind = Some(event_type.to_owned());
+    if let Some(conversation_id) = object.get("conversation_id").and_then(Value::as_str) {
+        cursor.conversation_id = Some(conversation_id.to_owned());
+    }
+    if let Some(model) = object.get("model").and_then(Value::as_str) {
+        cursor.model = Some(model.to_owned());
+        record.model = Some(model.to_owned());
+    }
+    if let Some(turn) = object.get("turn_index").and_then(Value::as_u64) {
+        cursor.turn_index = turn;
+        record.turn_index = Some(turn);
+    }
+    match event_type {
+        "local.thread.started" => {
+            record.role = Some(TranscriptRole::System);
+            Ok(())
+        }
+        "local.turn.started" => {
+            record.role = Some(TranscriptRole::System);
+            Ok(())
+        }
+        "local.assistant.message" => {
+            record.role = Some(TranscriptRole::Assistant);
+            if let Some(content) = object.get("content").and_then(Value::as_str) {
+                set_content(record, content);
+            }
+            Ok(())
+        }
+        "local.turn.finished" => {
+            record.role = Some(TranscriptRole::Result);
+            let usage = object
+                .get("usage")
+                .ok_or_else(|| "LOCAL_TURN_FINISHED_MISSING_USAGE".to_owned())?;
+            record.usage = Some(TranscriptUsage {
+                input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+                output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_creation_5m_input_tokens: None,
+                cache_creation_1h_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_cost_micro_usd: None,
+                model_usage: Vec::new(),
+            });
+            Ok(())
+        }
+        "local.tool_call.started" => {
+            record.role = Some(TranscriptRole::Tool);
+            let tool_name = required_local_str(object, "tool_name")?.to_owned();
+            let (arguments, arguments_bytes, arguments_truncated) = object
+                .get("arguments")
+                .map(|arguments| {
+                    bounded_json_string(arguments, AGENT_TRANSCRIPT_MAX_TOOL_ARGS_CHARS)
+                })
+                .unwrap_or_default();
+            record.tool_calls.push(TranscriptToolCall {
+                tool_name,
+                tool_call_id: object
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                arguments: Some(arguments),
+                arguments_bytes: Some(arguments_bytes),
+                arguments_truncated,
+                status: Some("started".to_owned()),
+                ..TranscriptToolCall::default()
+            });
+            Ok(())
+        }
+        "local.tool_call.finished" => {
+            record.role = Some(TranscriptRole::Tool);
+            let tool_name = required_local_str(object, "tool_name")?.to_owned();
+            let result = object
+                .get("result")
+                .map(|value| bounded_json_string(value, AGENT_TRANSCRIPT_MAX_TOOL_RESULT_CHARS));
+            let status = object
+                .get("status")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            record.tool_calls.push(TranscriptToolCall {
+                tool_name,
+                tool_call_id: object
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                result_summary: result.as_ref().map(|(text, _, _)| text.clone()),
+                result_bytes: result.as_ref().map(|(_, bytes, _)| *bytes),
+                result_truncated: result.as_ref().is_some_and(|(_, _, truncated)| *truncated),
+                status,
+                ..TranscriptToolCall::default()
+            });
+            Ok(())
+        }
+        "local.tool_parse_error" => {
+            record.role = Some(TranscriptRole::Tool);
+            record.source_error = Some(
+                object
+                    .get("error_detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or("MODEL_TOOL_ARGUMENTS_INVALID")
+                    .to_owned(),
+            );
+            let tool_name = object
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            record.tool_calls.push(TranscriptToolCall {
+                tool_name,
+                tool_call_id: object
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                status: Some("error".to_owned()),
+                ..TranscriptToolCall::default()
+            });
+            Ok(())
+        }
+        "local.context.truncated" => {
+            record.role = Some(TranscriptRole::System);
+            set_content(record, &Value::Object(object.clone()).to_string());
+            Ok(())
+        }
+        "local.error" => {
+            record.role = Some(TranscriptRole::Result);
+            record.source_error = Some(
+                object
+                    .get("error_detail")
+                    .and_then(Value::as_str)
+                    .or_else(|| object.get("error_code").and_then(Value::as_str))
+                    .unwrap_or("local model runner error")
+                    .to_owned(),
+            );
+            Ok(())
+        }
+        other => Err(format!("UNKNOWN_EVENT_TYPE: {other}")),
+    }
+}
+
+fn required_local_str<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("required string field {field:?} is missing or empty"))
 }
 
 #[cfg(test)]

@@ -59,6 +59,7 @@ mod daemon_lifecycle;
 mod desktop_worker;
 mod doctor;
 mod http;
+mod local_agent;
 mod m1;
 mod m2;
 mod m3;
@@ -99,6 +100,8 @@ enum Mode {
     DesktopWorker,
     /// Enumerate/classify synapse-mcp processes; with --kill-stray, clean them.
     Doctor,
+    /// Run a registry-backed local model as a Synapse MCP client/agent.
+    LocalAgent,
 }
 
 #[derive(Debug, Parser)]
@@ -195,6 +198,46 @@ struct Cli {
     desktop_worker_json: Option<PathBuf>,
     #[arg(long, hide = true)]
     desktop_worker_bgra: Option<PathBuf>,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_MODEL", value_name = "NAME")]
+    local_agent_model: Option<String>,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_TASK", value_name = "TEXT")]
+    local_agent_task: Option<String>,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_TASK_FILE", value_name = "PATH")]
+    local_agent_task_file: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "SYNAPSE_LOCAL_AGENT_MCP_URL",
+        default_value = "http://127.0.0.1:7700/mcp"
+    )]
+    local_agent_mcp_url: String,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_SPAWN_ID", value_name = "ID")]
+    local_agent_spawn_id: Option<String>,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_LOG_DIR", value_name = "PATH")]
+    local_agent_log_dir: Option<PathBuf>,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_MAX_TURNS", default_value_t = 8)]
+    local_agent_max_turns: u32,
+    #[arg(
+        long,
+        env = "SYNAPSE_LOCAL_AGENT_TIMEOUT_MS",
+        default_value_t = 120_000
+    )]
+    local_agent_timeout_ms: u64,
+    #[arg(
+        long,
+        env = "SYNAPSE_LOCAL_AGENT_CONTEXT_CHAR_LIMIT",
+        default_value_t = 120_000
+    )]
+    local_agent_context_char_limit: usize,
+    #[arg(
+        long,
+        env = "SYNAPSE_LOCAL_AGENT_TOOL_PARSE_RETRY_LIMIT",
+        default_value_t = 2
+    )]
+    local_agent_tool_parse_retry_limit: u32,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_NO_STREAM")]
+    local_agent_no_stream: bool,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_ALLOW_NON_LOOPBACK")]
+    local_agent_allow_non_loopback: bool,
 }
 
 impl Cli {
@@ -315,6 +358,25 @@ async fn run() -> anyhow::Result<ExitCode> {
         drop(telemetry_guard);
         return Ok(code);
     }
+    if matches!(cli.mode, Mode::LocalAgent) {
+        let result = local_agent::run_from_cli(local_agent::LocalAgentCli {
+            model_name: cli.local_agent_model.clone(),
+            task: cli.local_agent_task.clone(),
+            task_file: cli.local_agent_task_file.clone(),
+            mcp_url: cli.local_agent_mcp_url.clone(),
+            spawn_id: cli.local_agent_spawn_id.clone(),
+            log_dir: cli.local_agent_log_dir.clone(),
+            max_turns: cli.local_agent_max_turns,
+            timeout_ms: cli.local_agent_timeout_ms,
+            context_char_limit: cli.local_agent_context_char_limit,
+            tool_parse_retry_limit: cli.local_agent_tool_parse_retry_limit,
+            no_stream: cli.local_agent_no_stream,
+            allow_non_loopback: cli.local_agent_allow_non_loopback,
+        })
+        .await;
+        drop(telemetry_guard);
+        return result;
+    }
 
     let dpi_awareness = synapse_capture::init_process_dpi_awareness()
         .context("initialize per-monitor DPI awareness")?;
@@ -380,9 +442,10 @@ async fn run() -> anyhow::Result<ExitCode> {
         | Mode::ChromeNativeHost
         | Mode::ApprovalProtocol
         | Mode::DesktopWorker
-        | Mode::Doctor => {
+        | Mode::Doctor
+        | Mode::LocalAgent => {
             unreachable!(
-                "connect, chrome-native-host, approval-protocol, desktop-worker, and doctor modes are handled before daemon setup"
+                "connect, chrome-native-host, approval-protocol, desktop-worker, doctor, and local-agent modes are handled before daemon setup"
             )
         }
     }

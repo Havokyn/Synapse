@@ -213,6 +213,7 @@ pub(crate) fn provider_for_agent_kind(agent_kind: &str) -> Option<String> {
     match agent_kind {
         "claude" => Some("anthropic".to_owned()),
         "codex" => Some("openai".to_owned()),
+        "local-model" => Some("local".to_owned()),
         _ => None,
     }
 }
