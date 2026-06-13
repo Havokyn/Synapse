@@ -10163,7 +10163,9 @@ mod tests {
 
         let response = match run_shell(&config, params).await {
             Ok(response) => response,
-            Err(error) => panic!("expired-budget command should return a timeout response: {error}"),
+            Err(error) => {
+                panic!("expired-budget command should return a timeout response: {error}")
+            }
         };
 
         println!("readback=act_run_shell edge=actionable_budget_error after=response:{response:?}");
@@ -10177,7 +10179,10 @@ mod tests {
             .error_message
             .as_deref()
             .expect("expired budget must carry an error message");
-        assert!(message.contains("400 ms"), "names the expired budget: {message}");
+        assert!(
+            message.contains("400 ms"),
+            "names the expired budget: {message}"
+        );
         assert!(
             message.contains("execution_mode=\"inline\""),
             "names the inline escape hatch: {message}"
