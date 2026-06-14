@@ -467,6 +467,15 @@ fn stroke_delay_ms(
 )]
 fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), ActionError> {
     activate_thread_dpi_awareness();
+    let desktop = virtual_desktop()?;
+    if !desktop.contains(point) {
+        return Err(ActionError::TargetInvalid {
+            detail: format!(
+                "{detail} point is outside the virtual desktop: requested={point:?} desktop={desktop:?}"
+            ),
+        });
+    }
+
     // Physical cursor APIs avoid DPI virtualization drift between the MCP
     // process and the operator-visible screen coordinate space. When this
     // succeeds, do not also send an absolute mouse-move packet: on mixed-DPI
@@ -536,7 +545,6 @@ fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), Ac
         }
     }
 
-    let desktop = virtual_desktop()?;
     send_input_batch(&[absolute_mouse_input_for_desktop(point, desktop)], detail)?;
     let send_input_actual = read_physical_cursor_position(detail)?;
     if cursor_readback_matches(point, send_input_actual) {

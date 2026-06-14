@@ -24,6 +24,16 @@ impl VirtualDesktop {
             None
         }
     }
+
+    #[must_use]
+    pub(super) fn contains(self, point: Point) -> bool {
+        let right_exclusive = i64::from(self.left) + i64::from(self.width);
+        let bottom_exclusive = i64::from(self.top) + i64::from(self.height);
+        i64::from(point.x) >= i64::from(self.left)
+            && i64::from(point.x) < right_exclusive
+            && i64::from(point.y) >= i64::from(self.top)
+            && i64::from(point.y) < bottom_exclusive
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -160,6 +170,22 @@ mod tests {
                 dy: ABSOLUTE_MOUSE_RANGE
             }
         );
+    }
+
+    #[test]
+    fn contains_rejects_points_outside_virtual_desktop() {
+        let desktop = VirtualDesktop {
+            left: 100,
+            top: 200,
+            width: 300,
+            height: 400,
+        };
+
+        assert!(desktop.contains(Point { x: 100, y: 200 }));
+        assert!(desktop.contains(Point { x: 399, y: 599 }));
+        assert!(!desktop.contains(Point { x: 99, y: 200 }));
+        assert!(!desktop.contains(Point { x: 400, y: 599 }));
+        assert!(!desktop.contains(Point { x: 100, y: 600 }));
     }
 
     #[test]
