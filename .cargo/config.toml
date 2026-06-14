@@ -18,5 +18,22 @@
 #   AVX2, and a v3 binary would crash (illegal-instruction / SIGILL) on them.
 #   To re-baseline higher (e.g. a known-modern fleet), change the value below to
 #   "x86-64-v3" or "x86-64-v4"; to pin to the local CPU only, use "native".
+# Linker: rust-lld (LLVM lld in MSVC/lld-link mode), shipped inside the toolchain
+# sysroot, chosen 2026-06-14 for build speed.
+#   Linking is a serial, whole-program step that dominates incremental rebuild
+#   time on Windows. The default MSVC `link.exe` is markedly slower than LLD;
+#   switching to rust-lld typically cuts link time by 2-5x with an IDENTICAL,
+#   fully-portable PE binary (the linker only assembles objects — codegen/LTO is
+#   unchanged, so runtime perf and the shipped release binary are unaffected).
+#
+#   `linker = "rust-lld"` resolves the bare name from the active toolchain's
+#   sysroot (no machine-specific path), so it auto-tracks `rustup update` and can
+#   never drift to a stale linker version. `linker-flavor=lld-link` tells the
+#   multi-call rust-lld binary to run in MSVC mode (it is not named `lld-link`,
+#   so the flavor must be explicit). Both flags are STABLE on 1.95 for the host
+#   target — verified empirically (cargo build -v shows lld-link, never link.exe).
+#   If rust-lld is ever missing, linking ERRORS LOUDLY — there is no silent
+#   fallback to link.exe. Re-baseline target-cpu notes below still apply.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=x86-64-v2"]
+linker = "rust-lld"
+rustflags = ["-C", "target-cpu=x86-64-v2", "-C", "linker-flavor=lld-link"]

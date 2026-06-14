@@ -125,11 +125,26 @@ expect_used = "deny"
 [profile.dev]
 opt-level = 0
 debug = "line-tables-only"
-# incremental disabled 2026-06-02: target/debug/incremental ballooned to 124 GB
-# (never GC'd by cargo). Matches the global ~/.cargo/config.toml incremental=false
-# on Windows and WSL. Correctness-neutral; only marginally slower edit-rebuilds.
-incremental = false
+# incremental RE-ENABLED 2026-06-14 for fast edit-rebuild cycles (the single
+# biggest lever for iterative dev speed — only the changed crate's modified
+# codegen units recompile instead of the whole crate).
+#
+# The 2026-06-02 disable was a blunt fix for a 124 GB target/debug/incremental
+# balloon. Root cause was NOT incremental being inherently unbounded (rustc
+# finalizes and prunes stale per-crate session dirs) — it was an unmanaged
+# target/ with no cleanup ever running, compounded across ~46 sibling worktrees.
+# That is now addressed structurally by scripts/repo-maintenance.ps1 (cargo-sweep
+# of artifacts unused >N days + stale-worktree pruning) on a scheduled task, so
+# incremental's disk cost stays bounded. This override only affects THIS repo;
+# the global ~/.cargo/config.toml `incremental = false` still governs others.
+incremental = true
 lto = false
+
+# Dependencies change rarely and are not stepped through in a debugger — drop
+# their debuginfo entirely so first-build and clean-rebuild link/compile less.
+# Workspace members keep line-tables-only (above) for useful panic backtraces.
+[profile.dev.package."*"]
+debug = false
 
 # release is the SHIPPED profile: the daemon-reinstall flow copies
 # target/release/synapse-mcp.exe into ~/.cargo/bin. Tuned 2026-06-14 for maximum

@@ -217,5 +217,28 @@ if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
     Die "synapse-setup.ps1 exited with code $LASTEXITCODE."
 }
 
+# ---------------------------------------------------------------------------
+# 5. DISK HYGIENE — ensure the scheduled maintenance task exists so stale git
+#    worktrees and Cargo target/ artifacts are pruned automatically and never
+#    pile up again (they previously grew to ~200 GB across ~46 worktrees and
+#    starved builds). Non-fatal: a scheduling hiccup must never block an update.
+# ---------------------------------------------------------------------------
+Step "Ensuring disk-hygiene maintenance task"
+try {
+    $taskScript = Join-Path $RepoRoot 'scripts\install-maintenance-task.ps1'
+    $pwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue)
+    if (-not (Test-Path $taskScript)) {
+        Info "scripts\install-maintenance-task.ps1 not found; skipping (older checkout?)."
+    } elseif (-not $pwshExe) {
+        Info "pwsh (PowerShell 7) not found; install it to enable auto-maintenance: winget install Microsoft.PowerShell"
+    } elseif (Get-ScheduledTask -TaskName 'SynapseRepoMaintenance' -ErrorAction SilentlyContinue) {
+        Info "Maintenance task already registered (weekly worktree+target cleanup). OK."
+    } else {
+        & $pwshExe.Source -NoProfile -ExecutionPolicy Bypass -File $taskScript | ForEach-Object { Info $_ }
+    }
+} catch {
+    Info "Could not ensure maintenance task ($($_.Exception.Message)). Register it manually with: pwsh -File scripts\install-maintenance-task.ps1"
+}
+
 Step "Done"
 Info "Synapse is updated, rebuilt, and reconnected. Run this script daily to stay current."
