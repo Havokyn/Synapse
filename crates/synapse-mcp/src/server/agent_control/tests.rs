@@ -54,7 +54,10 @@ fn kill_params_defaults_are_graceful() {
 fn kill_params_reject_unknown_fields() {
     let result: Result<AgentKillParams, _> =
         serde_json::from_value(json!({ "session_id": "s-1", "bogus": true }));
-    assert!(result.is_err(), "deny_unknown_fields must reject extra keys");
+    assert!(
+        result.is_err(),
+        "deny_unknown_fields must reject extra keys"
+    );
 }
 
 #[test]
@@ -180,6 +183,7 @@ fn register_spawned_victim(
                 log_dir: "C:\\temp\\fsv".to_owned(),
                 template_id: None,
                 template_version: None,
+                control: None,
             },
             now,
         );
@@ -370,7 +374,11 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
     // reported unavailable — never faked.
     assert!(response.delivered, "interrupt must be delivered");
     assert_eq!(response.delivered_via.as_deref(), Some("mailbox_interrupt"));
-    assert_eq!(response.channels.len(), 4, "all four ranked channels reported");
+    assert_eq!(
+        response.channels.len(),
+        4,
+        "all four ranked channels reported"
+    );
     let delivered: Vec<&str> = response
         .channels
         .iter()
@@ -464,7 +472,11 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
     assert_eq!(response.failed, 0);
     assert!(response.all_stopped);
     for outcome in &response.agents {
-        assert!(outcome.ok, "{} not stopped: {}", outcome.session_id, outcome.reason);
+        assert!(
+            outcome.ok,
+            "{} not stopped: {}",
+            outcome.session_id, outcome.reason
+        );
         assert!(outcome.surviving_process_ids.is_empty());
     }
 
@@ -480,7 +492,10 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
     // FSV: a single fleet_stop audit pair plus the per-agent kill rows exist.
     let audit = service.command_audit_snapshot().expect("audit snapshot");
     let fleet_rows = audit.rows.iter().filter(|r| r.tool == "fleet_stop").count();
-    assert!(fleet_rows >= 2, "expected intent+final fleet_stop rows, got {fleet_rows}");
+    assert!(
+        fleet_rows >= 2,
+        "expected intent+final fleet_stop rows, got {fleet_rows}"
+    );
 }
 
 #[tokio::test]
@@ -534,8 +549,20 @@ async fn fleet_stop_filters_by_agent_kind() {
     let service = fsv_service(temp.path());
     let codex_pid = spawn_victim();
     let claude_pid = spawn_victim();
-    register_spawned_victim(&service, "session-codex", "agent-spawn-codex", codex_pid, "codex");
-    register_spawned_victim(&service, "session-claude", "agent-spawn-claude", claude_pid, "claude");
+    register_spawned_victim(
+        &service,
+        "session-codex",
+        "agent-spawn-codex",
+        codex_pid,
+        "codex",
+    );
+    register_spawned_victim(
+        &service,
+        "session-claude",
+        "agent-spawn-claude",
+        claude_pid,
+        "claude",
+    );
 
     // Kill only the codex-kind agent.
     let response = service
@@ -551,9 +578,15 @@ async fn fleet_stop_filters_by_agent_kind() {
         .await
         .expect("filtered fleet_stop succeeds");
 
-    assert_eq!(response.matched, 1, "only the codex agent matched the filter");
+    assert_eq!(
+        response.matched, 1,
+        "only the codex agent matched the filter"
+    );
     assert_eq!(response.agents[0].agent_kind, "codex");
-    assert!(!crate::m4::process_exists(codex_pid), "codex agent must be killed");
+    assert!(
+        !crate::m4::process_exists(codex_pid),
+        "codex agent must be killed"
+    );
     assert!(
         crate::m4::process_exists(claude_pid),
         "the filtered-out claude agent must still be alive"

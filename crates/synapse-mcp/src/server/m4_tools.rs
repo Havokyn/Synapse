@@ -31,7 +31,7 @@ use crate::m3::local_models::{LocalModelApiShape, LocalModelRegistryRow};
 
 use super::{
     m1_tools::validate_target_window,
-    session_registry::{SpawnedAgentRead, unix_time_ms_now},
+    session_registry::{SpawnedAgentControlRead, SpawnedAgentRead, unix_time_ms_now},
 };
 
 const ACT_SPAWN_AGENT: &str = "act_spawn_agent";
@@ -41,6 +41,7 @@ const ACT_SPAWN_AGENT: &str = "act_spawn_agent";
 pub(crate) const AGENT_SPAWN_MANIFEST_FILENAME: &str = "spawn-manifest.json";
 /// Schema version stamped onto the spawn manifest.
 pub(crate) const AGENT_SPAWN_MANIFEST_VERSION: u32 = 1;
+const CODEX_APP_SERVER_RUNNER_SCRIPT: &str = include_str!("codex_app_server_runner.ps1");
 
 /// Builds the per-spawn manifest JSON. Records the CLI and, when the operator
 /// pinned one, the model — the authoritative model source the transcript
@@ -1311,6 +1312,42 @@ impl SynapseService {
                 ));
             }
         };
+        let control = match read_spawned_agent_control_artifact(&files, agent_kind) {
+            Ok(control) => control,
+            Err(error) => {
+                let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+                let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                    &files,
+                    &params,
+                    &spawn_id,
+                    "failed",
+                    "spawned agent wrote task-start readiness but the interrupt-control artifact was missing or invalid",
+                    json!({
+                        "reason": "spawned_agent_control_readback_failed",
+                        "control_error": error,
+                        "session_id": matched.session_id,
+                        "cleanup": cleanup,
+                    }),
+                );
+                return Err(agent_spawn_tool_error(
+                    error_codes::ACTION_AGENT_SPAWN_FAILED,
+                    "act_spawn_agent observed task-start readiness but failed to read Codex interrupt-control metadata; exact spawned PID cleanup was attempted",
+                    json!({
+                        "code": error_codes::ACTION_AGENT_SPAWN_FAILED,
+                        "reason": "spawned_agent_control_readback_failed",
+                        "spawn_id": spawn_id,
+                        "cli": agent_kind.as_str(),
+                        "launcher_process_id": launch_response.pid,
+                        "agent_process_id": matched.agent_process_id,
+                        "session_id": matched.session_id,
+                        "log_dir": files.log_dir.display().to_string(),
+                        "control_error": error,
+                        "cleanup": cleanup,
+                        "completion_artifacts": completion_artifacts,
+                    }),
+                ));
+            }
+        };
 
         let metadata = SpawnedAgentRead {
             spawn_id: spawn_id.clone(),
@@ -1323,6 +1360,7 @@ impl SynapseService {
             log_dir: files.log_dir.display().to_string(),
             template_id: params.template_id.clone(),
             template_version: params.template_version,
+            control,
         };
         if let Err(error) = self.record_spawned_agent_metadata(&matched.session_id, metadata) {
             let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
@@ -1846,6 +1884,14 @@ struct AgentSpawnFiles {
     /// Codex only: generated `notify` program POSTing turn-complete events
     /// to the same ingress (#899).
     notify_script_path: Option<PathBuf>,
+    /// Codex only: generated app-server runner script for interruptible turns.
+    codex_app_server_runner_path: Option<PathBuf>,
+    /// Codex only: control artifact with endpoint/thread/turn ids.
+    codex_app_server_control_path: Option<PathBuf>,
+    /// Codex only: raw app-server JSON-RPC event stream.
+    codex_app_server_events_path: Option<PathBuf>,
+    codex_app_server_stdout_path: Option<PathBuf>,
+    codex_app_server_stderr_path: Option<PathBuf>,
     /// Local-model only: marker file written by the #931 runner.
     local_model_runner_path: Option<PathBuf>,
 }
@@ -1875,6 +1921,26 @@ impl AgentSpawnFiles {
                 .map(|path| path.display().to_string()),
             notify_script_path: self
                 .notify_script_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            codex_app_server_runner_path: self
+                .codex_app_server_runner_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            codex_app_server_control_path: self
+                .codex_app_server_control_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            codex_app_server_events_path: self
+                .codex_app_server_events_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            codex_app_server_stdout_path: self
+                .codex_app_server_stdout_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            codex_app_server_stderr_path: self
+                .codex_app_server_stderr_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
             local_model_runner_path: self
@@ -2868,6 +2934,16 @@ fn prepare_agent_spawn_files(
         (agent_kind == ActSpawnAgentCli::Claude).then(|| log_dir.join("claude-hook-settings.json"));
     let notify_script_path =
         (agent_kind == ActSpawnAgentCli::Codex).then(|| log_dir.join("codex-notify.ps1"));
+    let codex_app_server_runner_path = (agent_kind == ActSpawnAgentCli::Codex)
+        .then(|| log_dir.join("codex-app-server-runner.ps1"));
+    let codex_app_server_control_path =
+        (agent_kind == ActSpawnAgentCli::Codex).then(|| log_dir.join("codex-control.json"));
+    let codex_app_server_events_path = (agent_kind == ActSpawnAgentCli::Codex)
+        .then(|| log_dir.join("codex-app-server-events.jsonl"));
+    let codex_app_server_stdout_path = (agent_kind == ActSpawnAgentCli::Codex)
+        .then(|| log_dir.join("codex-app-server.stdout.log"));
+    let codex_app_server_stderr_path = (agent_kind == ActSpawnAgentCli::Codex)
+        .then(|| log_dir.join("codex-app-server.stderr.log"));
     let local_model_runner_path = agent_kind
         .is_local_model()
         .then(|| log_dir.join("local-model-runner.json"));
@@ -2959,6 +3035,17 @@ fn prepare_agent_spawn_files(
             )
         })?;
     }
+    if let Some(runner_path) = &codex_app_server_runner_path {
+        fs::write(runner_path, CODEX_APP_SERVER_RUNNER_SCRIPT).map_err(|error| {
+            mcp_error(
+                error_codes::STORAGE_WRITE_FAILED,
+                format!(
+                    "act_spawn_agent failed to write Codex app-server runner {}: {error}",
+                    runner_path.display()
+                ),
+            )
+        })?;
+    }
 
     // Spawn manifest: the authoritative record of which CLI and (when the
     // operator pinned one) which model this spawn was launched with. The
@@ -2995,6 +3082,11 @@ fn prepare_agent_spawn_files(
         mcp_config_path,
         hook_settings_path,
         notify_script_path,
+        codex_app_server_runner_path,
+        codex_app_server_control_path,
+        codex_app_server_events_path,
+        codex_app_server_stdout_path,
+        codex_app_server_stderr_path,
         local_model_runner_path,
     })
 }
@@ -3290,33 +3382,60 @@ fn agent_spawn_powershell_script(
                     "act_spawn_agent internal error: missing Codex notify script path",
                 ));
             };
-            let mcp_url_config = format!(
-                "mcp_servers.synapse.url={}",
-                toml_string_literal(&params.mcp_url)
-            );
-            let notify_config = format!(
-                "notify=[\"powershell\",\"-NoLogo\",\"-NoProfile\",\"-NonInteractive\",\"-ExecutionPolicy\",\"Bypass\",\"-File\",{}]",
-                toml_string_literal(&notify_script_path.display().to_string())
-            );
-            // The Codex `exec --json` stream carries no model id, so passing it
-            // here (and recording it in the spawn manifest) is the only way the
-            // transcript ingester can attribute the spawn's cost (#949).
+            let Some(runner_path) = files.codex_app_server_runner_path.as_ref() else {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "act_spawn_agent internal error: missing Codex app-server runner path",
+                ));
+            };
+            let Some(control_path) = files.codex_app_server_control_path.as_ref() else {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "act_spawn_agent internal error: missing Codex app-server control path",
+                ));
+            };
+            let Some(events_path) = files.codex_app_server_events_path.as_ref() else {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "act_spawn_agent internal error: missing Codex app-server events path",
+                ));
+            };
+            let Some(app_stdout_path) = files.codex_app_server_stdout_path.as_ref() else {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "act_spawn_agent internal error: missing Codex app-server stdout path",
+                ));
+            };
+            let Some(app_stderr_path) = files.codex_app_server_stderr_path.as_ref() else {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "act_spawn_agent internal error: missing Codex app-server stderr path",
+                ));
+            };
             let model_arg = params
                 .model
                 .as_deref()
-                .map(|model| format!(",'-m',{}", ps_single_quote(model)))
+                .map(|model| {
+                    format!(
+                        "$codexRunnerArgs += @('-Model',{})\n",
+                        ps_single_quote(model)
+                    )
+                })
                 .unwrap_or_default();
             format!(
-                "$codexArgs = @('exec'{model_arg},'-C',{working_dir},'-s','danger-full-access','--json','-o',{final_message_path},'-c',{mcp_url_config},'-c','mcp_servers.synapse.bearer_token_env_var=\"SYNAPSE_BEARER_TOKEN\"','-c',{notify_config},'-')\n\
-$prompt | & codex @codexArgs 1> {stdout_path} 2> {stderr_path}\n\
+                "$codexRunnerArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',{runner_path},'-SpawnId',$spawnId,'-PromptPath',$spawnPromptPath,'-StdoutPath',$spawnStdoutPath,'-StderrPath',$spawnStderrPath,'-FinalMessagePath',$spawnFinalMessagePath,'-ControlPath',{control_path},'-EventsPath',{events_path},'-AppServerStdoutPath',{app_stdout_path},'-AppServerStderrPath',{app_stderr_path},'-WorkingDir',{working_dir},'-McpUrl',{mcp_url},'-NotifyScriptPath',{notify_script_path})\n\
+{model_arg}\
+& powershell.exe @codexRunnerArgs\n\
 ",
-                model_arg = model_arg,
+                runner_path = ps_single_quoted_path(runner_path),
+                control_path = ps_single_quoted_path(control_path),
+                events_path = ps_single_quoted_path(events_path),
+                app_stdout_path = ps_single_quoted_path(app_stdout_path),
+                app_stderr_path = ps_single_quoted_path(app_stderr_path),
                 working_dir = working_dir,
-                final_message_path = final_message_path,
-                mcp_url_config = ps_single_quote(&mcp_url_config),
-                notify_config = ps_single_quote(&notify_config),
-                stdout_path = stdout_path,
-                stderr_path = stderr_path,
+                mcp_url = ps_single_quote(&params.mcp_url),
+                notify_script_path = ps_single_quoted_path(notify_script_path),
+                model_arg = model_arg,
             )
         }
         ActSpawnAgentCli::Claude => {
@@ -3649,10 +3768,6 @@ fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn toml_string_literal(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
-}
-
 fn agent_spawn_wait_deadline(wait_timeout_ms: u64) -> Result<Instant, ErrorData> {
     if wait_timeout_ms > MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS {
         return Err(mcp_error(
@@ -3786,6 +3901,80 @@ fn read_agent_spawn_task_start_artifact(
     Ok(Some(AgentSpawnTaskStartRead { started_at_unix_ms }))
 }
 
+fn read_spawned_agent_control_artifact(
+    files: &AgentSpawnFiles,
+    agent_kind: ActSpawnAgentCli,
+) -> Result<Option<SpawnedAgentControlRead>, Value> {
+    if agent_kind != ActSpawnAgentCli::Codex {
+        return Ok(None);
+    }
+    let Some(path) = files.codex_app_server_control_path.as_ref() else {
+        return Err(json!({ "reason": "codex_control_path_missing" }));
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(json!({
+                "reason": "codex_control_artifact_missing",
+                "control_path": path.display().to_string(),
+            }));
+        }
+        Err(error) => {
+            return Err(json!({
+                "reason": "codex_control_artifact_read_failed",
+                "control_path": path.display().to_string(),
+                "error": error.to_string(),
+            }));
+        }
+    };
+    if bytes.is_empty() {
+        return Err(json!({
+            "reason": "codex_control_artifact_empty",
+            "control_path": path.display().to_string(),
+        }));
+    }
+    let control = serde_json::from_slice::<SpawnedAgentControlRead>(&bytes).map_err(|error| {
+        json!({
+            "reason": "codex_control_artifact_json_invalid",
+            "control_path": path.display().to_string(),
+            "bytes": bytes.len(),
+            "error": error.to_string(),
+            "text": String::from_utf8_lossy(&bytes).into_owned(),
+        })
+    })?;
+    let mut validation_errors = Vec::new();
+    if control.schema_version != 1 {
+        validation_errors.push("schema_version mismatch");
+    }
+    if control.protocol != "codex_app_server_ws" {
+        validation_errors.push("protocol mismatch");
+    }
+    if !control.endpoint.starts_with("ws://127.0.0.1:") {
+        validation_errors.push("endpoint must be loopback ws://127.0.0.1:<port>");
+    }
+    if control.control_path != path.display().to_string() {
+        validation_errors.push("control_path mismatch");
+    }
+    if control.thread_id.as_deref().is_none_or(str::is_empty) {
+        validation_errors.push("thread_id missing");
+    }
+    if control.turn_id.as_deref().is_none_or(str::is_empty) {
+        validation_errors.push("turn_id missing");
+    }
+    if control.app_server_process_id == 0 {
+        validation_errors.push("app_server_process_id missing");
+    }
+    if !validation_errors.is_empty() {
+        return Err(json!({
+            "reason": "codex_control_artifact_invalid",
+            "control_path": path.display().to_string(),
+            "validation_errors": validation_errors,
+            "control": control,
+        }));
+    }
+    Ok(Some(control))
+}
+
 fn read_json_file_lossy(path: &Path) -> Option<Value> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -3805,6 +3994,26 @@ fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
         "stderr_bytes": file_len(&files.stderr_path),
         "final_message_path": files.final_message_path.display().to_string(),
         "final_message_bytes": file_len(&files.final_message_path),
+        "codex_app_server_control_path": files
+            .codex_app_server_control_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "codex_app_server_control_bytes": files
+            .codex_app_server_control_path
+            .as_ref()
+            .map_or(0, |path| file_len(path)),
+        "codex_app_server_control": files
+            .codex_app_server_control_path
+            .as_ref()
+            .and_then(|path| read_json_file_lossy(path)),
+        "codex_app_server_events_path": files
+            .codex_app_server_events_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "codex_app_server_events_bytes": files
+            .codex_app_server_events_path
+            .as_ref()
+            .map_or(0, |path| file_len(path)),
     })
 }
 
@@ -4094,6 +4303,11 @@ mod tests {
             mcp_config_path: None,
             hook_settings_path: None,
             notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: None,
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
             local_model_runner_path: None,
         };
         fs::write(
@@ -4157,6 +4371,11 @@ mod tests {
             mcp_config_path: None,
             hook_settings_path: None,
             notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: None,
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
             local_model_runner_path: None,
         };
         fs::write(
@@ -4195,6 +4414,137 @@ mod tests {
     }
 
     #[test]
+    fn codex_control_artifact_validation_accepts_matching_artifact() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let control_path = dir.path().join("codex-control.json");
+        let files = AgentSpawnFiles {
+            log_dir: dir.path().to_path_buf(),
+            prompt_path: dir.path().join("prompt.txt"),
+            stdout_path: dir.path().join("stdout.jsonl"),
+            stderr_path: dir.path().join("stderr.log"),
+            final_message_path: dir.path().join("final-message.txt"),
+            completion_status_path: dir.path().join("completion-status.json"),
+            task_started_path: dir.path().join("task-started.json"),
+            task_started_script_path: dir.path().join("write-task-started.ps1"),
+            debug_path: None,
+            mcp_config_path: None,
+            hook_settings_path: None,
+            notify_script_path: Some(dir.path().join("codex-notify.ps1")),
+            codex_app_server_runner_path: Some(dir.path().join("codex-app-server-runner.ps1")),
+            codex_app_server_control_path: Some(control_path.clone()),
+            codex_app_server_events_path: Some(dir.path().join("codex-app-server-events.jsonl")),
+            codex_app_server_stdout_path: Some(dir.path().join("codex-app-server.stdout.log")),
+            codex_app_server_stderr_path: Some(dir.path().join("codex-app-server.stderr.log")),
+            local_model_runner_path: None,
+        };
+        fs::write(
+            &control_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "protocol": "codex_app_server_ws",
+                "endpoint": "ws://127.0.0.1:38658",
+                "control_path": control_path.display().to_string(),
+                "events_path": files
+                    .codex_app_server_events_path
+                    .as_ref()
+                    .expect("events path")
+                    .display()
+                    .to_string(),
+                "app_server_process_id": 1234,
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "turn_status": "inProgress",
+                "last_error": null,
+                "updated_at_unix_ms": 123456
+            }))
+            .expect("encode control"),
+        )
+        .expect("write control");
+
+        let control = read_spawned_agent_control_artifact(&files, ActSpawnAgentCli::Codex)
+            .expect("control read")
+            .expect("codex control present");
+        assert_eq!(control.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(control.turn_id.as_deref(), Some("turn-1"));
+
+        fs::write(
+            &control_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "protocol": "codex_app_server_ws",
+                "endpoint": "ws://127.0.0.1:38658",
+                "control_path": control_path.display().to_string(),
+                "events_path": "events.jsonl",
+                "app_server_process_id": 1234,
+                "thread_id": null,
+                "turn_id": "turn-1",
+                "turn_status": "inProgress",
+                "last_error": null,
+                "updated_at_unix_ms": 123456
+            }))
+            .expect("encode invalid control"),
+        )
+        .expect("write invalid control");
+        let error = read_spawned_agent_control_artifact(&files, ActSpawnAgentCli::Codex)
+            .expect_err("missing thread_id must fail");
+        assert_eq!(
+            error.get("reason").and_then(Value::as_str),
+            Some("codex_control_artifact_invalid")
+        );
+    }
+
+    #[test]
+    fn codex_app_server_runner_prefers_powershell_shim_and_tree_cleanup() {
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("Get-Command codex.ps1"),
+            "Windows npm installs expose codex.ps1; launching it through powershell preserves -c array arguments"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("Get-Command codex.cmd"),
+            "codex.cmd remains a fallback when the PowerShell shim is absent"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("Stop-OwnedProcessTree"),
+            "app-server cleanup must target the exact spawned root PID and descendants"
+        );
+        assert!(
+            !CODEX_APP_SERVER_RUNNER_SCRIPT.contains("Start-Process -FilePath 'codex'"),
+            "bare Start-Process codex resolves to a non-executable ps1 shim on this host"
+        );
+        assert!(
+            !CODEX_APP_SERVER_RUNNER_SCRIPT.contains("notify=["),
+            "app-server startup must not depend on the legacy Codex notify TOML array"
+        );
+        let existing_read = CODEX_APP_SERVER_RUNNER_SCRIPT
+            .find("foreach ($property in $existing.PSObject.Properties)")
+            .expect("runner reads existing control artifact");
+        let live_thread_write = CODEX_APP_SERVER_RUNNER_SCRIPT
+            .find("$current['thread_id'] = $script:ThreadId")
+            .expect("runner writes live thread_id into control artifact");
+        let live_turn_write = CODEX_APP_SERVER_RUNNER_SCRIPT
+            .find("$current['turn_id'] = $script:TurnId")
+            .expect("runner writes live turn_id into control artifact");
+        assert!(
+            existing_read < live_thread_write && existing_read < live_turn_write,
+            "live runner control state must overwrite stale values from the previous artifact"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("phase = 'send_start'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("phase = 'send_ok'"),
+            "runner must journal outbound JSON-RPC send boundaries for app-server stalls"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT
+                .contains("$prompt = [string](Get-Content -Raw -LiteralPath $PromptPath"),
+            "Windows PowerShell 5.1 must cast Get-Content -Raw prompt bytes before ConvertTo-Json"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("ConvertTo-Json -Compress -Depth 20"),
+            "JSON-RPC request encoding should use bounded schema depth, not an unbounded diagnostic depth"
+        );
+    }
+
+    #[test]
     fn spawn_wrapper_forces_utf8_and_records_wrapper_pid() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
         let files = AgentSpawnFiles {
@@ -4210,6 +4560,11 @@ mod tests {
             mcp_config_path: None,
             hook_settings_path: None,
             notify_script_path: Some(dir.path().join("codex-notify.ps1")),
+            codex_app_server_runner_path: Some(dir.path().join("codex-app-server-runner.ps1")),
+            codex_app_server_control_path: Some(dir.path().join("codex-control.json")),
+            codex_app_server_events_path: Some(dir.path().join("codex-app-server-events.jsonl")),
+            codex_app_server_stdout_path: Some(dir.path().join("codex-app-server.stdout.log")),
+            codex_app_server_stderr_path: Some(dir.path().join("codex-app-server.stderr.log")),
             local_model_runner_path: None,
         };
         let script = agent_spawn_powershell_script(&test_spawn_params(), &files, dir.path())
@@ -4223,9 +4578,12 @@ mod tests {
         assert!(script.contains("task_started_present"));
         assert!(script.contains("Get-Content -Raw -LiteralPath $spawnPromptPath -Encoding UTF8"));
         assert!(
-            script.contains("'-c','notify=["),
-            "codex args must inject the notify program: {script}"
+            script.contains("codex-app-server-runner.ps1"),
+            "codex spawn must run through the app-server runner: {script}"
         );
+        assert!(script.contains("-ControlPath"));
+        assert!(script.contains("codex-control.json"));
+        assert!(script.contains("-NotifyScriptPath"));
         assert!(script.contains("codex-notify.ps1"));
     }
 
@@ -4245,6 +4603,11 @@ mod tests {
             mcp_config_path: Some(dir.path().join("claude-mcp-config.json")),
             hook_settings_path: Some(dir.path().join("claude-hook-settings.json")),
             notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: None,
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
             local_model_runner_path: None,
         };
         let mut params = test_spawn_params();
@@ -4261,7 +4624,8 @@ mod tests {
     #[test]
     fn spawn_script_injects_model_arg_for_both_clis() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
-        // Codex: `-m <model>` injected right after `exec`.
+        // Codex: model is passed to the app-server runner, which starts the
+        // actual turn through `thread/start`/`turn/start`.
         let codex_files = AgentSpawnFiles {
             log_dir: dir.path().to_path_buf(),
             prompt_path: dir.path().join("prompt.txt"),
@@ -4275,6 +4639,11 @@ mod tests {
             mcp_config_path: None,
             hook_settings_path: None,
             notify_script_path: Some(dir.path().join("codex-notify.ps1")),
+            codex_app_server_runner_path: Some(dir.path().join("codex-app-server-runner.ps1")),
+            codex_app_server_control_path: Some(dir.path().join("codex-control.json")),
+            codex_app_server_events_path: Some(dir.path().join("codex-app-server-events.jsonl")),
+            codex_app_server_stdout_path: Some(dir.path().join("codex-app-server.stdout.log")),
+            codex_app_server_stderr_path: Some(dir.path().join("codex-app-server.stderr.log")),
             local_model_runner_path: None,
         };
         let mut codex_params = test_spawn_params();
@@ -4282,19 +4651,19 @@ mod tests {
         let codex_script = agent_spawn_powershell_script(&codex_params, &codex_files, dir.path())
             .expect("codex script");
         assert!(
-            codex_script.contains("@('exec','-m','gpt-5-codex','-C'"),
-            "codex args must inject -m <model> after exec: {codex_script}"
+            codex_script.contains("$codexRunnerArgs += @('-Model','gpt-5-codex')"),
+            "codex runner args must inject the pinned model: {codex_script}"
         );
 
-        // Codex without a model: no `-m` arg appears.
+        // Codex without a model: no runner model override appears.
         let codex_no_model =
             agent_spawn_powershell_script(&test_spawn_params(), &codex_files, dir.path())
                 .expect("codex script");
         assert!(
-            codex_no_model.contains("@('exec','-C'"),
-            "codex args must omit -m when no model is pinned: {codex_no_model}"
+            codex_no_model.contains("codex-app-server-runner.ps1"),
+            "codex still runs through app-server without a pinned model: {codex_no_model}"
         );
-        assert!(!codex_no_model.contains("'-m'"));
+        assert!(!codex_no_model.contains("'-Model'"));
 
         // Claude: `--model <model>` injected right after `-p`.
         let claude_files = AgentSpawnFiles {
@@ -4310,6 +4679,11 @@ mod tests {
             mcp_config_path: Some(dir.path().join("claude-mcp-config.json")),
             hook_settings_path: Some(dir.path().join("claude-hook-settings.json")),
             notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: None,
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
             local_model_runner_path: None,
         };
         let mut claude_params = test_spawn_params();
@@ -4360,6 +4734,11 @@ mod tests {
             mcp_config_path: None,
             hook_settings_path: None,
             notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: None,
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
             local_model_runner_path: Some(dir.path().join("local-model-runner.json")),
         };
         let mut params = test_spawn_params();

@@ -6,7 +6,7 @@ use std::{
 
 use rmcp::transport::streamable_http_server::session::SessionState;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_STALE_AFTER_MS: u64 = 5 * 60 * 1000;
 
@@ -81,6 +81,35 @@ pub(crate) struct SpawnedAgentRead {
     pub template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<SpawnedAgentControlRead>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpawnedAgentControlRead {
+    pub schema_version: u32,
+    pub protocol: String,
+    pub endpoint: String,
+    pub control_path: String,
+    pub events_path: String,
+    pub app_server_process_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub turn_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_control_parse_error: Option<String>,
+    pub updated_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_interrupt_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_interrupt_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_interrupt_at_unix_ms: Option<u64>,
 }
 
 impl Default for SessionRegistry {
@@ -360,6 +389,7 @@ mod tests {
                 log_dir: "C:\\temp\\spawn-1".to_owned(),
                 template_id: None,
                 template_version: None,
+                control: None,
             },
             1_050,
         );

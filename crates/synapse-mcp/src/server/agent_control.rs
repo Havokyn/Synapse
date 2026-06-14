@@ -10,16 +10,14 @@
 //!
 //! # Channel ranking (research-grounded, #904)
 //!
-//! The issue asks for a *channel-ranked* graceful interrupt. The honest reality
-//! of the current spawn architecture (agents are launched as plain CLI
-//! processes that connect back over MCP HTTP — there is no owned PTY and no
-//! held stdin pipe) is that only one graceful channel is actually wired today.
-//! Each channel reports its true status; **no channel ever silently "succeeds"**:
+//! The issue asks for a *channel-ranked* graceful interrupt. Each channel
+//! reports its true status; **no channel ever silently "succeeds"**:
 //!
 //! 1. `codex_app_server_turn_interrupt` — Codex `turn/interrupt` JSON-RPC
-//!    (`{threadId,turnId}` → `{}`, turn ends `interrupted`). Requires the daemon
-//!    to be the Codex **app-server** JSON-RPC client; Synapse spawns codex as a
-//!    plain CLI, so this channel is **not wired** (`channel_not_wired`).
+//!    (`{threadId,turnId}` → `{}`, turn ends `interrupted`). Wired for Codex
+//!    agents spawned through the app-server runner, using the per-spawn
+//!    `codex-control.json` artifact as the physical SoT for endpoint/thread/turn
+//!    ids. Older plain-CLI Codex rows report `channel_not_wired`.
 //! 2. `claude_stream_json_control` — there is **no supported stdin cancel frame**
 //!    for `claude -p` today (anthropics/claude-code#51078 is an open feature
 //!    request); the Agent SDK's `interruptTurn` only works when the SDK owns the
@@ -38,7 +36,12 @@
 //! leases/claims/desktops, so a single teardown of that session does job-close →
 //! force-kill of the process tree and releases all of the agent's resources.
 
-use std::time::Duration;
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,7 +53,7 @@ use rmcp::{RoleServer, service::RequestContext};
 use super::agent_events::{record_agent_event_durable, unix_time_ns_now};
 use super::command_audit::CommandAuditInput;
 use super::session_lifecycle::SessionTeardownReport;
-use super::session_registry::unix_time_ms_now;
+use super::session_registry::{SpawnedAgentControlRead, unix_time_ms_now};
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
 
 // ----------------------------------------------------------------------------
@@ -73,6 +76,8 @@ const INTERRUPT_MAILBOX_KIND: &str = "interrupt";
 const TOOL_AGENT_INTERRUPT: &str = "agent_interrupt";
 const TOOL_AGENT_KILL: &str = "agent_kill";
 const TOOL_FLEET_STOP: &str = "fleet_stop";
+const CODEX_APP_SERVER_INTERRUPT_SCRIPT: &str = include_str!("codex_app_server_interrupt.ps1");
+const CODEX_INTERRUPT_HELPER_TIMEOUT_MS: u64 = 8_000;
 
 /// Destructive-action confirmation token for `fleet_stop`, matching the
 /// action-diagnostic confirm pattern. A typo or empty value is refused.
@@ -279,6 +284,8 @@ struct ResolvedAgent {
     agent_kind: String,
     lifecycle: String,
     launcher_process_id: u32,
+    log_dir: String,
+    control: Option<SpawnedAgentControlRead>,
 }
 
 // ----------------------------------------------------------------------------
@@ -288,7 +295,7 @@ struct ResolvedAgent {
 #[tool_router(router = agent_control_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Gracefully interrupt one running spawned agent (#904) by its MCP session id or agent-spawn-* id, via ranked clean channels. Currently only the cooperative mailbox channel is wired (codex turn/interrupt, claude stream-json cancel, and PTY ESC are reported unavailable with the issue that would wire them, never faked). Reports each channel's real outcome plus a process-table readback; errors if no channel can deliver. Use agent_kill to force-terminate."
+        description = "Gracefully interrupt one running spawned agent (#904/#958) by its MCP session id or agent-spawn-* id, via ranked clean channels. Codex app-server spawns use real turn/interrupt from codex-control.json; cooperative mailbox remains available; claude stream-json cancel and PTY ESC are reported unavailable unless their real channel exists. Reports each channel's real outcome plus a process-table readback; errors if no channel can deliver. Use agent_kill to force-terminate."
     )]
     pub async fn agent_interrupt(
         &self,
@@ -462,9 +469,8 @@ impl SynapseService {
     }
 
     /// Attempts each ranked channel and returns `(attempts, delivered_via,
-    /// send_row)`. Only the cooperative mailbox channel is wired today; the
-    /// rest report their true unavailability with the issue that would wire
-    /// them.
+    /// send_row)`. Channels report true outcomes; unsupported legacy rows stay
+    /// unavailable instead of being treated as delivered.
     fn attempt_interrupt_channels(
         &self,
         target: &ResolvedAgent,
@@ -474,16 +480,11 @@ impl SynapseService {
         let mut delivered_via = None;
         let mut send_row = None;
 
-        attempts.push(ChannelAttempt {
-            channel: "codex_app_server_turn_interrupt".to_owned(),
-            rank: 1,
-            status: "unavailable".to_owned(),
-            reason: "channel_not_wired: codex turn/interrupt needs an app-server JSON-RPC \
-                     connection; Synapse spawns codex as a plain CLI process"
-                .to_owned(),
-            message_id: None,
-            row_key: None,
-        });
+        let codex = self.deliver_codex_app_server_interrupt(target);
+        if delivered_via.is_none() && codex.status == "delivered" {
+            delivered_via = Some(codex.channel.clone());
+        }
+        attempts.push(codex);
         attempts.push(ChannelAttempt {
             channel: "claude_stream_json_control".to_owned(),
             rank: 2,
@@ -515,6 +516,159 @@ impl SynapseService {
         });
 
         (attempts, delivered_via, send_row)
+    }
+
+    fn deliver_codex_app_server_interrupt(&self, target: &ResolvedAgent) -> ChannelAttempt {
+        if target.agent_kind != "codex" {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "channel_not_applicable: target agent_kind={} is not codex",
+                    target.agent_kind
+                ),
+                message_id: None,
+                row_key: None,
+            };
+        }
+        let Some(control) = target.control.as_ref() else {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_wired: this codex session has no codex-control.json metadata; it was likely spawned by the legacy plain-CLI path before #958".to_owned(),
+                message_id: None,
+                row_key: None,
+            };
+        };
+        if control.protocol != "codex_app_server_ws" {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "channel_not_wired: unsupported control protocol {}",
+                    control.protocol
+                ),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+        let Some(thread_id) = control
+            .thread_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_ready: codex-control.json has no thread_id".to_owned(),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        };
+        let Some(turn_id) = control.turn_id.as_deref().filter(|value| !value.is_empty()) else {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_ready: codex-control.json has no turn_id".to_owned(),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        };
+        if matches!(
+            control.turn_status.as_str(),
+            "completed" | "interrupted" | "failed"
+        ) {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "turn_not_interruptible: codex-control.json reports turn_status={}",
+                    control.turn_status
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+        if crate::m4::owned_live_process_ids(&[control.app_server_process_id]).is_empty() {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "app_server_not_live: codex app-server pid {} is not live",
+                    control.app_server_process_id
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+
+        let script_path = PathBuf::from(&target.log_dir).join("codex-app-server-interrupt.ps1");
+        if let Err(error) = fs::write(&script_path, CODEX_APP_SERVER_INTERRUPT_SCRIPT) {
+            return ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "failed".to_owned(),
+                reason: format!(
+                    "interrupt_helper_write_failed: {} ({error})",
+                    script_path.display()
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+
+        match run_codex_interrupt_helper(&script_path, control, thread_id, turn_id) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                ChannelAttempt {
+                    channel: "codex_app_server_turn_interrupt".to_owned(),
+                    rank: 1,
+                    status: "delivered".to_owned(),
+                    reason: format!(
+                        "turn_interrupt_delivered: endpoint={} thread_id={} turn_id={} control_path={} stdout={}",
+                        control.endpoint,
+                        thread_id,
+                        turn_id,
+                        control.control_path,
+                        compact_for_channel_reason(stdout.trim())
+                    ),
+                    message_id: Some(turn_id.to_owned()),
+                    row_key: Some(control.control_path.clone()),
+                }
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                ChannelAttempt {
+                    channel: "codex_app_server_turn_interrupt".to_owned(),
+                    rank: 1,
+                    status: "failed".to_owned(),
+                    reason: format!(
+                        "turn_interrupt_failed: exit={:?} stdout={} stderr={}",
+                        output.status.code(),
+                        compact_for_channel_reason(stdout.trim()),
+                        compact_for_channel_reason(stderr.trim())
+                    ),
+                    message_id: Some(turn_id.to_owned()),
+                    row_key: Some(control.control_path.clone()),
+                }
+            }
+            Err(error) => ChannelAttempt {
+                channel: "codex_app_server_turn_interrupt".to_owned(),
+                rank: 1,
+                status: "failed".to_owned(),
+                reason: error,
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            },
+        }
     }
 
     /// Delivers a durable `interrupt` mailbox row to the target's steering
@@ -638,8 +792,7 @@ impl SynapseService {
         };
 
         // Was a force-kill actually required? (the tree is still alive)
-        let live_after_grace =
-            crate::m4::owned_live_process_ids(&process_before.process_tree_ids);
+        let live_after_grace = crate::m4::owned_live_process_ids(&process_before.process_tree_ids);
         let force_needed = !live_after_grace.is_empty();
 
         // Journal the durable `killed` event BEFORE teardown when a force-kill
@@ -667,11 +820,13 @@ impl SynapseService {
         // of the process tree, plus lease/claim/desktop release and registry
         // close. Keyed by the agent's OWN session id, which owns all of it.
         let lifecycle = self.session_lifecycle_state()?;
-        let (teardown, teardown_error) =
-            match lifecycle.teardown_session(&target.session_id, "agent_kill").await {
-                Ok(report) => (Some(report), None),
-                Err(error) => (None, Some(error.message.to_string())),
-            };
+        let (teardown, teardown_error) = match lifecycle
+            .teardown_session(&target.session_id, "agent_kill")
+            .await
+        {
+            Ok(report) => (Some(report), None),
+            Err(error) => (None, Some(error.message.to_string())),
+        };
 
         // Source of truth for "is it dead": re-read the OS process table.
         let process_after = process_readback(target.launcher_process_id);
@@ -750,7 +905,10 @@ impl SynapseService {
         if mode != "kill" && mode != "interrupt" {
             return Err(mcp_error(
                 error_codes::TOOL_PARAMS_INVALID,
-                format!("FLEET_STOP_MODE_INVALID: mode must be \"kill\" or \"interrupt\", got {:?}", params.mode),
+                format!(
+                    "FLEET_STOP_MODE_INVALID: mode must be \"kill\" or \"interrupt\", got {:?}",
+                    params.mode
+                ),
             ));
         }
         if params.confirm != FLEET_STOP_CONFIRM {
@@ -764,7 +922,10 @@ impl SynapseService {
         if params.grace_ms > MAX_KILL_GRACE_MS {
             return Err(mcp_error(
                 error_codes::TOOL_PARAMS_INVALID,
-                format!("FLEET_STOP_GRACE_INVALID: grace_ms must be 0..={MAX_KILL_GRACE_MS}, got {}", params.grace_ms),
+                format!(
+                    "FLEET_STOP_GRACE_INVALID: grace_ms must be 0..={MAX_KILL_GRACE_MS}, got {}",
+                    params.grace_ms
+                ),
             ));
         }
 
@@ -778,8 +939,13 @@ impl SynapseService {
             "grace_ms": params.grace_ms,
             "from": caller_session,
         });
-        let before = json!({ "matched_sessions": matched_sessions, "matched": matched_sessions.len() });
-        let verb = if mode == "kill" { "fleet_kill" } else { "fleet_interrupt" };
+        let before =
+            json!({ "matched_sessions": matched_sessions, "matched": matched_sessions.len() });
+        let verb = if mode == "kill" {
+            "fleet_kill"
+        } else {
+            "fleet_interrupt"
+        };
         self.command_audit_intent(CommandAuditInput::mcp(
             TOOL_FLEET_STOP,
             verb,
@@ -793,7 +959,10 @@ impl SynapseService {
 
         let mut agents: Vec<FleetStopAgentOutcome> = Vec::with_capacity(matched_sessions.len());
         for session_id in &matched_sessions {
-            agents.push(self.fleet_stop_one(&mode, session_id, params.grace_ms, caller_session).await);
+            agents.push(
+                self.fleet_stop_one(&mode, session_id, params.grace_ms, caller_session)
+                    .await,
+            );
         }
 
         let succeeded = agents.iter().filter(|outcome| outcome.ok).count();
@@ -935,11 +1104,7 @@ impl SynapseService {
     /// Locates a spawned agent in the live session registry by its own session
     /// id or its `agent-spawn-*` id. Errors structurally for unknown ids and
     /// for known sessions that are not Synapse-spawned (no owned process tree).
-    fn resolve_spawned_agent(
-        &self,
-        lookup: &str,
-        tool: &str,
-    ) -> Result<ResolvedAgent, ErrorData> {
+    fn resolve_spawned_agent(&self, lookup: &str, tool: &str) -> Result<ResolvedAgent, ErrorData> {
         let now = unix_time_ms_now();
         let registry = self.session_registry.lock().map_err(|_error| {
             mcp_error(
@@ -963,6 +1128,8 @@ impl SynapseService {
                     agent_kind: read.agent_kind.clone(),
                     lifecycle: read.lifecycle.clone(),
                     launcher_process_id: spawned.launcher_process_id,
+                    log_dir: spawned.log_dir.clone(),
+                    control: spawned.control.clone(),
                 });
                 break;
             }
@@ -1045,6 +1212,83 @@ fn process_readback(launcher_pid: u32) -> ProcessReadback {
     }
 }
 
+fn run_codex_interrupt_helper(
+    script_path: &PathBuf,
+    control: &SpawnedAgentControlRead,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<Output, String> {
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(script_path)
+        .args([
+            "-Endpoint",
+            control.endpoint.as_str(),
+            "-ThreadId",
+            thread_id,
+            "-TurnId",
+            turn_id,
+            "-ControlPath",
+            control.control_path.as_str(),
+            "-EventsPath",
+            control.events_path.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("interrupt_helper_spawn_failed: {error}"))?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("interrupt_helper_output_failed: {error}"));
+            }
+            Ok(None)
+                if started.elapsed() < Duration::from_millis(CODEX_INTERRUPT_HELPER_TIMEOUT_MS) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "interrupt_helper_timeout: helper pid {pid} exceeded {CODEX_INTERRUPT_HELPER_TIMEOUT_MS}ms"
+                ));
+            }
+            Err(error) => {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "interrupt_helper_wait_failed: helper pid {pid}: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn compact_for_channel_reason(value: &str) -> String {
+    const LIMIT: usize = 512;
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.len() <= LIMIT {
+        compact
+    } else {
+        format!("{}...", &compact[..LIMIT])
+    }
+}
+
 /// Polls the owned process tree for exit up to `grace_ms`, yielding to the async
 /// runtime between polls so the daemon stays responsive during the grace window.
 async fn wait_for_tree_exit_async(process_ids: &[u32], grace_ms: u64) -> (Vec<u32>, u64) {
@@ -1053,10 +1297,16 @@ async fn wait_for_tree_exit_async(process_ids: &[u32], grace_ms: u64) -> (Vec<u3
     loop {
         let remaining = crate::m4::owned_live_process_ids(process_ids);
         if remaining.is_empty() {
-            return (remaining, u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            return (
+                remaining,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
         }
         if started.elapsed() >= deadline {
-            return (remaining, u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            return (
+                remaining,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
         }
         tokio::time::sleep(Duration::from_millis(GRACE_POLL_INTERVAL_MS)).await;
     }

@@ -1084,6 +1084,21 @@ pub struct ActSpawnAgentLogPaths {
     /// turn-complete events to the same ingress (#899).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_script_path: Option<String>,
+    /// Codex only: generated app-server runner script used when spawning Codex
+    /// through the interruptible `turn/start` protocol (#958).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_app_server_runner_path: Option<String>,
+    /// Codex only: control artifact containing endpoint/thread/turn ids for
+    /// `agent_interrupt` to call real `turn/interrupt` (#958).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_app_server_control_path: Option<String>,
+    /// Codex only: JSON-RPC event stream from the app-server connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_app_server_events_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_app_server_stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_app_server_stderr_path: Option<String>,
     /// Local-model only: marker/config file written by the #931 runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_model_runner_path: Option<String>,

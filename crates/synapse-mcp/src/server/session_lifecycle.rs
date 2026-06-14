@@ -1698,6 +1698,7 @@ mod tests {
                 log_dir: r"C:\temp\spawn-test".to_owned(),
                 template_id: None,
                 template_version: None,
+                control: None,
             }),
         }
     }
