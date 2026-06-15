@@ -1,12 +1,13 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-15-1011-reload-self-v1";
-const BRIDGE_BUILD_SHA256 = "462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-15-1011-reload-self-997-type-active-v1";
+const BRIDGE_BUILD_SHA256 = "d3b6eba7db70928066b39e687884fd34d06da19db115026ca5e3f94b8fc62e46";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
   "targetInfo",
   "navigateTab",
-  "reloadSelf"
+  "reloadSelf",
+  "typeActiveElement"
 ]);
 const EXPECTED_EXTENSION_ID = "leoocgnkjnplbfdbklajepahofecgfbk";
 const DAEMON_BASE_URL = "http://127.0.0.1:7700";
@@ -346,6 +347,8 @@ async function handleCommand(command) {
       result = await handleCloseTab(params);
     } else if (kind === "targetInfo") {
       result = await handleTargetInfo(params);
+    } else if (kind === "typeActiveElement") {
+      result = await handleTypeActiveElement(params);
     } else if (kind === "navigateTab") {
       result = await handleNavigateTab(params);
     } else if (kind === "reloadSelf") {
@@ -463,6 +466,54 @@ async function handleTargetInfo(params) {
     active_element: activeElement,
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleTypeActiveElement(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const text = String(params.text ?? "");
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: typeActiveElementInPage,
+      args: [text]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.scripting.executeScript typeActiveElement(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const first = Array.isArray(results) ? results[0] : null;
+  const result = first?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript typeActiveElement returned no structured result"
+    );
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `typeActiveElement failed: code=${String(result.error_code || "UNKNOWN")} detail=${String(result.error_detail || "")}`
+    );
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: selected.target.id,
+    tab_id: selected.tabId,
+    chars_typed: [...text].length,
+    readback_backend: "chrome.scripting.executeScript",
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    ...result
   };
 }
 
@@ -879,6 +930,120 @@ function readActiveElementInPage() {
     value,
     selected_text: selectedText
   };
+}
+
+function typeActiveElementInPage(text) {
+  const element = document.activeElement;
+  const before = readActiveElementInPage();
+  if (!element || !before.has_active_element) {
+    return {
+      ok: false,
+      error_code: "CHROME_ACTIVE_ELEMENT_MISSING",
+      error_detail: "document.activeElement is absent",
+      before_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...before }
+    };
+  }
+  if (!before.is_editable) {
+    return {
+      ok: false,
+      error_code: "CHROME_ACTIVE_ELEMENT_NOT_EDITABLE",
+      error_detail: `active element ${String(before.tag_name || "")} is not editable`,
+      before_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...before }
+    };
+  }
+
+  const inputText = String(text ?? "");
+  const eventsDispatched = [];
+  const beforeInput = dispatchSyntheticInputEvent(element, "beforeinput", inputText, true);
+  eventsDispatched.push("beforeinput");
+  if (!beforeInput) {
+    return {
+      ok: false,
+      error_code: "CHROME_BEFOREINPUT_CANCELLED",
+      error_detail: "active element beforeinput listener cancelled background typing",
+      before_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...before },
+      events_dispatched: eventsDispatched
+    };
+  }
+
+  const expectedValue = applyTextToEditable(element, inputText);
+  dispatchSyntheticInputEvent(element, "input", inputText, false);
+  eventsDispatched.push("input");
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  eventsDispatched.push("change");
+
+  const after = readActiveElementInPage();
+  const afterValue = after.value === null || after.value === undefined ? "" : String(after.value);
+  if (afterValue !== expectedValue) {
+    return {
+      ok: false,
+      error_code: "CHROME_ACTIVE_ELEMENT_VALUE_MISMATCH",
+      error_detail: `after value did not match expected value; expected_len=${expectedValue.length} after_len=${afterValue.length}`,
+      before_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...before },
+      after_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...after },
+      expected_value: expectedValue,
+      events_dispatched: eventsDispatched
+    };
+  }
+
+  return {
+    ok: true,
+    before_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...before },
+    after_active_element: { available: true, readback_source: "chrome.scripting.executeScript", ...after },
+    expected_value: expectedValue,
+    events_dispatched: eventsDispatched
+  };
+}
+
+function applyTextToEditable(element, text) {
+  const tagName = String(element.tagName || "").toLowerCase();
+  const contentEditable =
+    element.isContentEditable ||
+    String(element.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+  if ((tagName === "input" || tagName === "textarea") && "value" in element) {
+    const beforeValue = String(element.value ?? "");
+    const start = typeof element.selectionStart === "number" ? element.selectionStart : beforeValue.length;
+    const end = typeof element.selectionEnd === "number" ? element.selectionEnd : start;
+    const expected = beforeValue.slice(0, start) + text + beforeValue.slice(end);
+    element.value = expected;
+    if (typeof element.setSelectionRange === "function") {
+      const caret = start + text.length;
+      element.setSelectionRange(caret, caret);
+    }
+    return expected;
+  }
+  if (contentEditable) {
+    const selection = document.getSelection?.();
+    if (selection && selection.rangeCount > 0 && element.contains(selection.anchorNode)) {
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      const textNode = document.createTextNode(text);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.setEndAfter(textNode);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else {
+      element.appendChild(document.createTextNode(text));
+    }
+    return String(element.innerText || element.textContent || "");
+  }
+  throw new Error(`active element ${tagName || "unknown"} is not text editable`);
+}
+
+function dispatchSyntheticInputEvent(element, type, text, cancelable) {
+  let event;
+  try {
+    event = new InputEvent(type, {
+      bubbles: true,
+      cancelable,
+      data: text,
+      inputType: "insertText"
+    });
+  } catch (_) {
+    event = new Event(type, { bubbles: true, cancelable });
+  }
+  return element.dispatchEvent(event);
 }
 
 function tabsNavigationMethod(action) {

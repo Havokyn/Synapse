@@ -16,12 +16,12 @@ use crate::m1::mcp_error;
 use crate::m2::postcondition::{
     ActPostcondition, hash_json as verify_hash_json,
     no_observed_delta_error as source_no_observed_delta_error, postcondition_failed_error,
-    postcondition_observed_delta,
+    postcondition_not_requested, postcondition_observed_delta,
 };
 use crate::m2::{
     ActClickPostcondition, ActClickTierAttempt, ActStrokePlan, CLICK_REASON_NO_OBSERVED_DELTA,
     CLICK_TIER_FOREGROUND, CLICK_TIER_POSTMESSAGE, ForegroundClickPolicy, HwndKeyboardTargetState,
-    PressBackend, ResolvedKeymapPress, act_click_postmessage_with_params,
+    PressBackend, ResolvedKeymapPress, TypeBackend, act_click_postmessage_with_params,
     act_keymap_response_from_press, act_press_cdp_target, act_press_normalized_labels,
     act_press_postmessage_target, act_stroke_cdp_target, act_stroke_error_details,
     act_stroke_request_details, action_from_press_params, action_from_type_params,
@@ -67,6 +67,11 @@ const ACT_TYPE_TEXT_SOURCE_UIA_VALUE: &str = "uia_focused_value";
 const ACT_TYPE_TEXT_SOURCE_UIA_EMPTY: &str = "uia_focused_empty_value_or_text";
 const ACT_TYPE_TEXT_SOURCE_CDP_ACTIVE: &str = "cdp_active_element_value";
 const ACT_TYPE_TEXT_SOURCE_OCR_FOCUSED_RECT: &str = "ocr_focused_rect_text";
+const ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH: &str =
+    "chrome_bridge_active_element.value";
+const ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_TEXT_INTEGRITY: &str =
+    "chrome_bridge_active_element_value_readback";
+const ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_TIER: &str = "chrome_bridge_active_element";
 const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_HOLD_MS: u32 = 120;
 const ACT_TYPE_FOREGROUND_FALLBACK_CLICK_DURATION_MS: u32 = 50;
 const ACT_TYPE_VERIFY_POLL_INTERVAL_MS: u64 = 50;
@@ -271,6 +276,26 @@ impl SynapseService {
             }
         };
         let session_id = super::context::mcp_session_id_from_request_context(&request_context)?;
+        let verify_timeout_ms = params.verify_timeout_ms;
+        let emitted = emitted_text(&params);
+        if let Some(session_id_for_target) = session_id.as_deref() {
+            match self
+                .act_type_chrome_bridge_session_target(session_id_for_target, &params, &emitted)
+                .await
+            {
+                Ok(Some(response)) => {
+                    let result: Result<ActTypeResponse, ErrorData> = Ok(response);
+                    self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                    return result.map(Json);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                    self.audit_action_result_for_request("act_type", &result, &request_context)?;
+                    return result.map(Json);
+                }
+            }
+        }
         let foreground_fallback =
             match act_type_chromium_foreground_fallback_target(params.into_element.as_ref()) {
                 Ok(target) => target,
@@ -303,8 +328,6 @@ impl SynapseService {
         } else {
             None
         };
-        let verify_timeout_ms = params.verify_timeout_ms;
-        let emitted = emitted_text(&params);
         let before_text_signature = if let Some(target) = foreground_fallback.as_ref() {
             let mut foreground_params = params.clone();
             foreground_params.into_element = None;
@@ -2852,6 +2875,92 @@ impl SynapseService {
         }))
     }
 
+    async fn act_type_chrome_bridge_session_target(
+        &self,
+        session_id: &str,
+        params: &ActTypeParams,
+        emitted: &str,
+    ) -> Result<Option<ActTypeResponse>, ErrorData> {
+        if params.into_element.is_some() {
+            return Ok(None);
+        }
+        let Some((window_hwnd, cdp_target_id)) =
+            self.chrome_bridge_active_session_target(session_id)?
+        else {
+            return Ok(None);
+        };
+        if params.expected_browser_url_regex.is_some() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "act_type expected_browser_url_regex is a navigation postcondition; use cdp_navigate_tab for session-owned Chrome bridge tabs instead of keyboard typing",
+            ));
+        }
+        if params.backend == TypeBackend::Hardware {
+            return Err(mcp_error(
+                error_codes::ACTION_BACKEND_UNAVAILABLE,
+                "act_type backend=hardware cannot target an inactive Chrome bridge tab; use backend=auto/software for background DOM typing",
+            ));
+        }
+        action_from_type_params(params)?;
+        let chars_typed = u32::try_from(emitted.chars().count()).map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "act_type text has more than u32::MAX chars",
+            )
+        })?;
+        let started = Instant::now();
+        let readback =
+            crate::chrome_debugger_bridge::type_active_element(window_hwnd, &cdp_target_id, emitted)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "act_type Chrome bridge active-element typing failed for session target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+        let postcondition =
+            act_type_chrome_bridge_type_postcondition(params, emitted, chars_typed, &readback)?;
+        tracing::info!(
+            code = "M2_ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id = %readback.target_id,
+            tab_id = readback.tab_id,
+            chars_typed = readback.chars_typed,
+            readback_backend = %readback.readback_backend,
+            target_candidate_count = readback.target_candidate_count,
+            target_selection_reason = %readback.target_selection_reason,
+            "readback=chrome_bridge_active_element tool=act_type method=chrome.scripting.executeScript"
+        );
+        Ok(Some(ActTypeResponse {
+            ok: true,
+            chars_typed,
+            elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            backend_tier_used: ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_TIER.to_owned(),
+            required_foreground: false,
+            target_text_integrity: ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_TEXT_INTEGRITY.to_owned(),
+            target_readback_required: !params.verify_delta,
+            minimum_linear_ms_per_char: 20,
+            postcondition,
+        }))
+    }
+
+    fn chrome_bridge_active_session_target(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(i64, String)>, ErrorData> {
+        let target = self.session_target(Some(session_id))?;
+        let Some((window_hwnd, cdp_target_id)) =
+            chrome_bridge_session_target_parts(target.as_ref())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((window_hwnd, cdp_target_id.to_owned())))
+    }
+
     async fn cdp_selected_target_url(
         input: &ObservationInput,
         require_browser_url: bool,
@@ -4338,6 +4447,115 @@ fn choose_act_type_text_readback(
 
 fn is_chrome_bridge_target_id(target_id: &str) -> bool {
     target_id.starts_with("chrome-tab:")
+}
+
+fn chrome_bridge_session_target_parts(target: Option<&SessionTarget>) -> Option<(i64, &str)> {
+    let Some(SessionTarget::Cdp {
+        window_hwnd,
+        cdp_target_id,
+    }) = target
+    else {
+        return None;
+    };
+    is_chrome_bridge_target_id(cdp_target_id).then_some((*window_hwnd, cdp_target_id.as_str()))
+}
+
+fn act_type_chrome_bridge_type_postcondition(
+    params: &ActTypeParams,
+    emitted: &str,
+    chars_typed: u32,
+    readback: &crate::chrome_debugger_bridge::ChromeDebuggerTypeActiveElementResult,
+) -> Result<ActPostcondition, ErrorData> {
+    if readback.chars_typed != chars_typed {
+        return Err(postcondition_failed_error(
+            "act_type",
+            ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH,
+            format!(
+                "Chrome bridge reported chars_typed={} but emitted chars_typed={chars_typed}",
+                readback.chars_typed
+            ),
+            active_element_value_signature(&readback.before_active_element),
+            active_element_value_signature(&readback.after_active_element),
+            json!({
+                "target_id": &readback.target_id,
+                "tab_id": readback.tab_id,
+                "reported_chars_typed": readback.chars_typed,
+                "emitted_chars_typed": chars_typed,
+            }),
+        ));
+    }
+    let before_value = readback
+        .before_active_element
+        .value
+        .as_deref()
+        .unwrap_or_default();
+    let after_value = readback
+        .after_active_element
+        .value
+        .as_deref()
+        .unwrap_or_default();
+    let expected_value = readback.expected_value.as_deref().unwrap_or(after_value);
+    let before_hash = active_element_value_signature(&readback.before_active_element);
+    let after_hash = active_element_value_signature(&readback.after_active_element);
+    if after_value != expected_value {
+        return Err(postcondition_failed_error(
+            "act_type",
+            ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH,
+            "Chrome bridge after-read active-element value did not match expected DOM value",
+            before_hash,
+            after_hash,
+            json!({
+                "target_id": &readback.target_id,
+                "tab_id": readback.tab_id,
+                "expected_value_len": expected_value.chars().count(),
+                "expected_value_sha256": non_empty_sha256(expected_value),
+                "after_value_len": after_value.chars().count(),
+                "after_value_sha256": non_empty_sha256(after_value),
+                "events_dispatched": &readback.events_dispatched,
+                "readback_backend": &readback.readback_backend,
+            }),
+        ));
+    }
+    if !params.verify_delta {
+        return Ok(postcondition_not_requested(
+            "act_type",
+            ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH,
+        ));
+    }
+    if before_value == after_value {
+        return Err(source_no_observed_delta_error(
+            "act_type",
+            ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH,
+            params.verify_timeout_ms,
+            before_hash,
+            after_hash,
+            json!({
+                "target_id": &readback.target_id,
+                "tab_id": readback.tab_id,
+                "text_len": emitted.chars().count(),
+                "expected_value_len": expected_value.chars().count(),
+                "events_dispatched": &readback.events_dispatched,
+                "readback_backend": &readback.readback_backend,
+            }),
+        ));
+    }
+    Ok(postcondition_observed_delta(
+        "act_type",
+        ACT_TYPE_CHROME_BRIDGE_ACTIVE_ELEMENT_SOURCE_OF_TRUTH,
+        before_hash,
+        after_hash,
+        format!(
+            "observed inactive Chrome bridge active-element value change after background DOM typing; chars_typed={} events={:?}",
+            readback.chars_typed, readback.events_dispatched
+        ),
+    ))
+}
+
+fn active_element_value_signature(
+    active: &crate::chrome_debugger_bridge::ChromeDebuggerActiveElement,
+) -> String {
+    let value = active.value.as_deref().unwrap_or_default();
+    text_sha256(value)
 }
 
 fn chrome_bridge_active_text_readback(
@@ -6666,6 +6884,27 @@ mod tests {
             !act_type_should_capture_text_signature(&params),
             "into_element routes own background readback and must not use foreground text signatures"
         );
+    }
+
+    #[test]
+    fn act_type_background_route_recognizes_chrome_bridge_session_target() {
+        let bridge = SessionTarget::Cdp {
+            window_hwnd: 0x1109ee,
+            cdp_target_id: "chrome-tab:600749997".to_owned(),
+        };
+        let raw = SessionTarget::Cdp {
+            window_hwnd: 0x1109ee,
+            cdp_target_id: "F295449AD3B4C764645A641045F6C68B".to_owned(),
+        };
+        let window = SessionTarget::Window { hwnd: 0x1109ee };
+
+        assert_eq!(
+            chrome_bridge_session_target_parts(Some(&bridge)),
+            Some((0x1109ee, "chrome-tab:600749997"))
+        );
+        assert_eq!(chrome_bridge_session_target_parts(Some(&raw)), None);
+        assert_eq!(chrome_bridge_session_target_parts(Some(&window)), None);
+        assert_eq!(chrome_bridge_session_target_parts(None), None);
     }
 
     #[test]

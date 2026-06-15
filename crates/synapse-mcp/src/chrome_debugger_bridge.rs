@@ -38,15 +38,17 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-15-1011-reload-self-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str =
+    "synapse-chrome-bridge-2026-06-15-1011-reload-self-997-type-active-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7";
+    "d3b6eba7db70928066b39e687884fd34d06da19db115026ca5e3f94b8fc62e46";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "closeTab",
     "navigateTab",
     "openTab",
     "reloadSelf",
     "targetInfo",
+    "typeActiveElement",
 ];
 const LEGACY_DIRECT_HTTP_CAPABILITIES: &[&str] =
     &["closeTab", "navigateTab", "openTab", "targetInfo"];
@@ -516,6 +518,22 @@ pub(crate) struct ChromeDebuggerTypeResult {
     pub x: f64,
     pub y: f64,
     pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerTypeActiveElementResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    pub chars_typed: u32,
+    pub readback_backend: String,
+    pub before_active_element: ChromeDebuggerActiveElement,
+    pub after_active_element: ChromeDebuggerActiveElement,
+    pub expected_value: Option<String>,
+    #[serde(default)]
+    pub events_dispatched: Vec<String>,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    pub extension_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2088,6 +2106,29 @@ pub(crate) async fn target_info(
     })
 }
 
+pub(crate) async fn type_active_element(
+    hwnd: i64,
+    target_id: &str,
+    text: &str,
+) -> Result<ChromeDebuggerTypeActiveElementResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_popup_safe(hwnd, "typeActiveElement")?;
+    let result = bridge()
+        .send_command(
+            "typeActiveElement",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "text": text,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerTypeActiveElementResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger typeActiveElement response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn navigate_tab(
     hwnd: i64,
     target_id: &str,
@@ -2807,6 +2848,15 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "target_type": result.get("target_type"),
             "url": result.get("url"),
             "title": result.get("title"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "typeActiveElement" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chars_typed": result.get("chars_typed"),
+            "readback_backend": result.get("readback_backend"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),

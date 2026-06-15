@@ -892,9 +892,9 @@ if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-15-1011-reload-self-v1'
-    bridge_build_sha256_expected = '462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7'
-    bridge_required_capabilities = @('closeTab', 'navigateTab', 'openTab', 'reloadSelf', 'targetInfo')
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-15-1011-reload-self-997-type-active-v1'
+    bridge_build_sha256_expected = 'd3b6eba7db70928066b39e687884fd34d06da19db115026ca5e3f94b8fc62e46'
+    bridge_required_capabilities = @('closeTab', 'navigateTab', 'openTab', 'reloadSelf', 'targetInfo', 'typeActiveElement')
     background_navigation_backend = 'chrome.tabs_no_debugger_permission_no_native_messaging'
     reconnect_driver = 'bounded_websocket_reconnect_with_disconnected_extension_keepalive_no_alarms'
     attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_daemon_side_attach_disabled'

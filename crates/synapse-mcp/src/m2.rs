@@ -88,7 +88,7 @@ pub use stroke::{
 pub(crate) use stroke::{ActStrokePlan, act_stroke_cdp_target};
 pub use type_text::action_from_type_params;
 pub(crate) use type_text::emitted_text;
-pub use type_text::{ActTypeParams, ActTypeResponse, act_type_with_handle};
+pub use type_text::{ActTypeParams, ActTypeResponse, TypeBackend, act_type_with_handle};
 
 use config::RECORDING_BACKEND_ENV;
 

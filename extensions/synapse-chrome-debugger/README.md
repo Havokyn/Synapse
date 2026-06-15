@@ -72,10 +72,12 @@ error as an unsafe-profile condition, logs it with
 backoff. This keeps the failure visible while preventing any browser command
 from queueing on an unsafe end-user Chrome profile.
 
-Background tab commands (`openTab`, `closeTab`, and `navigateTab`) use
+Background tab commands (`openTab`, `closeTab`, `navigateTab`, and
+`typeActiveElement`) use
 `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
-`chrome.tabs.reload`, `chrome.tabs.goBack`, and `chrome.tabs.goForward`. They do
-not call `chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs
+`chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`, and
+`chrome.scripting.executeScript` against the selected tab's active element. They
+do not call `chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs
 returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
 `chrome.tabs` readback. The daemon refuses these normal-profile commands before
 queueing them whenever the live Chrome profile/process Source of Truth still
