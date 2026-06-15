@@ -117,6 +117,80 @@ pub struct NotifyHumanResponse {
     pub history_count: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToastRemovalOutcome {
+    pub aumid: String,
+    pub tag: String,
+    pub group: String,
+    pub status: String,
+    pub removed: bool,
+    pub already_absent: bool,
+    pub before_count: Option<u32>,
+    pub after_count: Option<u32>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToastCleanupReport {
+    pub aumid: String,
+    pub group: String,
+    pub status: String,
+    pub scanned: u32,
+    pub candidates: u32,
+    pub preserved_open: u32,
+    pub removed: u32,
+    pub already_absent: u32,
+    pub failed: u32,
+    pub outcomes: Vec<ToastRemovalOutcome>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[cfg(not(windows))]
+impl ToastRemovalOutcome {
+    fn unsupported(tag: String) -> Self {
+        Self {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            tag,
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: "unsupported_platform".to_owned(),
+            removed: false,
+            already_absent: false,
+            before_count: None,
+            after_count: None,
+            error_code: Some(error_codes::NOTIFY_UNSUPPORTED_PLATFORM.to_owned()),
+            error_message: Some(
+                "toast history removal requires Windows notification support".to_owned(),
+            ),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl ToastCleanupReport {
+    fn unsupported() -> Self {
+        Self {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: "unsupported_platform".to_owned(),
+            scanned: 0,
+            candidates: 0,
+            preserved_open: 0,
+            removed: 0,
+            already_absent: 0,
+            failed: 0,
+            outcomes: Vec::new(),
+            error_code: Some(error_codes::NOTIFY_UNSUPPORTED_PLATFORM.to_owned()),
+            error_message: Some(
+                "toast history cleanup requires Windows notification support".to_owned(),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ToastAction {
     pub content: String,
@@ -317,9 +391,11 @@ mod windows_toast {
     use super::{
         HISTORY_VERIFY_POLL_MS, HISTORY_VERIFY_TIMEOUT_MS, NotifyFailure, NotifyHumanParams,
         SYNAPSE_AUMID, SYNAPSE_NOTIFY_DISPLAY_NAME, SYNAPSE_TOAST_GROUP, ToastAction,
-        ToastActivationCallback, ToastOutcome, error_codes, toast_xml_with_actions,
+        ToastActivationCallback, ToastCleanupReport, ToastOutcome, ToastRemovalOutcome,
+        error_codes, toast_xml_with_actions,
     };
     use std::{
+        collections::BTreeSet,
         sync::{Mutex, OnceLock, mpsc},
         time::{Duration, Instant},
     };
@@ -357,12 +433,28 @@ mod windows_toast {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    enum NotifyCommand {
+        Show(NotifyJob),
+        Remove(RemoveJob),
+        CleanupEscalationOrphans(CleanupJob),
+    }
+
     struct NotifyJob {
         params: NotifyHumanParams,
         tag: String,
         actions: Vec<ToastAction>,
         activation_callback: Option<ToastActivationCallback>,
         reply: tokio::sync::oneshot::Sender<Result<ToastOutcome, NotifyFailure>>,
+    }
+
+    struct RemoveJob {
+        tag: String,
+        reply: tokio::sync::oneshot::Sender<ToastRemovalOutcome>,
+    }
+
+    struct CleanupJob {
+        preserve_tags: Vec<String>,
+        reply: tokio::sync::oneshot::Sender<ToastCleanupReport>,
     }
 
     struct LiveActivationSubscription {
@@ -378,12 +470,12 @@ mod windows_toast {
     /// cached activation factories, and the next toast call then dies with an
     /// access violation that kills the daemon (observed in FSV; same reason
     /// synapse-a11y routes UIA through a dedicated COM worker thread).
-    static NOTIFY_WORKER: OnceLock<Result<mpsc::Sender<NotifyJob>, String>> = OnceLock::new();
+    static NOTIFY_WORKER: OnceLock<Result<mpsc::Sender<NotifyCommand>, String>> = OnceLock::new();
     static LIVE_ACTIVATION_SUBSCRIPTIONS: OnceLock<Mutex<Vec<LiveActivationSubscription>>> =
         OnceLock::new();
 
-    fn spawn_notify_worker() -> Result<mpsc::Sender<NotifyJob>, String> {
-        let (tx, rx) = mpsc::channel::<NotifyJob>();
+    fn spawn_notify_worker() -> Result<mpsc::Sender<NotifyCommand>, String> {
+        let (tx, rx) = mpsc::channel::<NotifyCommand>();
         std::thread::Builder::new()
             .name("synapse-notify".to_owned())
             .spawn(move || {
@@ -393,20 +485,45 @@ mod windows_toast {
                     .then(|| format!("CoInitializeEx(COINIT_MULTITHREADED) failed: {com:?}"));
                 // COM stays initialized until the daemon exits; never
                 // CoUninitialize, or cached WinRT factories dangle.
-                for job in rx {
-                    let result = match com_error.as_deref() {
-                        Some(message) => Err(NotifyFailure::new(
-                            error_codes::NOTIFY_WORKER_FAILED,
-                            format!("notify worker thread has no COM apartment: {message}"),
-                        )),
-                        None => send_toast_blocking(
-                            &job.params,
-                            &job.tag,
-                            &job.actions,
-                            job.activation_callback,
-                        ),
-                    };
-                    let _ = job.reply.send(result);
+                for command in rx {
+                    match command {
+                        NotifyCommand::Show(job) => {
+                            let result = match com_error.as_deref() {
+                                Some(message) => Err(NotifyFailure::new(
+                                    error_codes::NOTIFY_WORKER_FAILED,
+                                    format!("notify worker thread has no COM apartment: {message}"),
+                                )),
+                                None => send_toast_blocking(
+                                    &job.params,
+                                    &job.tag,
+                                    &job.actions,
+                                    job.activation_callback,
+                                ),
+                            };
+                            let _ = job.reply.send(result);
+                        }
+                        NotifyCommand::Remove(job) => {
+                            let result = match com_error.as_deref() {
+                                Some(message) => removal_failure(
+                                    &job.tag,
+                                    error_codes::NOTIFY_WORKER_FAILED,
+                                    format!("notify worker thread has no COM apartment: {message}"),
+                                ),
+                                None => remove_toast_blocking(&job.tag),
+                            };
+                            let _ = job.reply.send(result);
+                        }
+                        NotifyCommand::CleanupEscalationOrphans(job) => {
+                            let result = match com_error.as_deref() {
+                                Some(message) => cleanup_failure(
+                                    error_codes::NOTIFY_WORKER_FAILED,
+                                    format!("notify worker thread has no COM apartment: {message}"),
+                                ),
+                                None => cleanup_escalation_orphans_blocking(&job.preserve_tags),
+                            };
+                            let _ = job.reply.send(result);
+                        }
+                    }
                 }
             })
             .map(|_handle| tx)
@@ -427,13 +544,13 @@ mod windows_toast {
             })?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         sender
-            .send(NotifyJob {
+            .send(NotifyCommand::Show(NotifyJob {
                 params,
                 tag,
                 actions,
                 activation_callback,
                 reply: reply_tx,
-            })
+            }))
             .map_err(|_send_error| {
                 NotifyFailure::new(
                     error_codes::NOTIFY_WORKER_FAILED,
@@ -446,6 +563,66 @@ mod windows_toast {
                 "synapse-notify worker dropped the toast job without replying (worker panic?)",
             )
         })?
+    }
+
+    pub(super) async fn remove_toast(tag: String) -> ToastRemovalOutcome {
+        let sender = match NOTIFY_WORKER.get_or_init(spawn_notify_worker).as_ref() {
+            Ok(sender) => sender,
+            Err(message) => {
+                return removal_failure(&tag, error_codes::NOTIFY_WORKER_FAILED, message.clone());
+            }
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(NotifyCommand::Remove(RemoveJob {
+                tag: tag.clone(),
+                reply: reply_tx,
+            }))
+            .is_err()
+        {
+            return removal_failure(
+                &tag,
+                error_codes::NOTIFY_WORKER_FAILED,
+                "synapse-notify worker thread terminated; toast removal job not accepted",
+            );
+        }
+        reply_rx.await.unwrap_or_else(|_recv_error| {
+            removal_failure(
+                &tag,
+                error_codes::NOTIFY_WORKER_FAILED,
+                "synapse-notify worker dropped the toast removal job without replying",
+            )
+        })
+    }
+
+    pub(super) async fn cleanup_escalation_orphans(
+        preserve_tags: Vec<String>,
+    ) -> ToastCleanupReport {
+        let sender = match NOTIFY_WORKER.get_or_init(spawn_notify_worker).as_ref() {
+            Ok(sender) => sender,
+            Err(message) => {
+                return cleanup_failure(error_codes::NOTIFY_WORKER_FAILED, message.clone());
+            }
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(NotifyCommand::CleanupEscalationOrphans(CleanupJob {
+                preserve_tags,
+                reply: reply_tx,
+            }))
+            .is_err()
+        {
+            return cleanup_failure(
+                error_codes::NOTIFY_WORKER_FAILED,
+                "synapse-notify worker thread terminated; toast cleanup job not accepted",
+            );
+        }
+        reply_rx.await.unwrap_or_else(|_recv_error| {
+            cleanup_failure(
+                error_codes::NOTIFY_WORKER_FAILED,
+                "synapse-notify worker dropped the toast cleanup job without replying",
+            )
+        })
     }
 
     /// Idempotently registers the Synapse AUMID for toast display and proves
@@ -649,6 +826,234 @@ mod windows_toast {
             }
         }
         Ok(count)
+    }
+
+    fn removal_failure(
+        tag: &str,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> ToastRemovalOutcome {
+        ToastRemovalOutcome {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            tag: tag.to_owned(),
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: "error".to_owned(),
+            removed: false,
+            already_absent: false,
+            before_count: None,
+            after_count: None,
+            error_code: Some(code.to_owned()),
+            error_message: Some(message.into()),
+        }
+    }
+
+    fn cleanup_failure(code: &'static str, message: impl Into<String>) -> ToastCleanupReport {
+        ToastCleanupReport {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: "error".to_owned(),
+            scanned: 0,
+            candidates: 0,
+            preserved_open: 0,
+            removed: 0,
+            already_absent: 0,
+            failed: 0,
+            outcomes: Vec::new(),
+            error_code: Some(code.to_owned()),
+            error_message: Some(message.into()),
+        }
+    }
+
+    fn cleanup_escalation_orphans_blocking(preserve_tags: &[String]) -> ToastCleanupReport {
+        if let Err(error) = ensure_aumid_registered() {
+            return cleanup_failure(error.code, error.message);
+        }
+        let history = match ToastNotificationManager::History().map_err(|error| {
+            NotifyFailure::new(
+                error_codes::NOTIFY_SHOW_FAILED,
+                format!("ToastNotificationManager.History() failed: {error}"),
+            )
+        }) {
+            Ok(history) => history,
+            Err(error) => return cleanup_failure(error.code, error.message),
+        };
+        let toasts = match history.GetHistoryWithId(&HSTRING::from(SYNAPSE_AUMID)) {
+            Ok(toasts) => toasts,
+            Err(error) => {
+                return cleanup_failure(
+                    error_codes::NOTIFY_SHOW_FAILED,
+                    format!(
+                        "ToastNotificationHistory.GetHistoryWithId({SYNAPSE_AUMID}) failed: {error}"
+                    ),
+                );
+            }
+        };
+        let size = match toasts.Size() {
+            Ok(size) => size,
+            Err(error) => {
+                return cleanup_failure(
+                    error_codes::NOTIFY_SHOW_FAILED,
+                    format!("Action Center history Size() failed: {error}"),
+                );
+            }
+        };
+
+        let preserve = preserve_tags.iter().cloned().collect::<BTreeSet<_>>();
+        let mut report = ToastCleanupReport {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: "ok".to_owned(),
+            scanned: size,
+            candidates: 0,
+            preserved_open: 0,
+            removed: 0,
+            already_absent: 0,
+            failed: 0,
+            outcomes: Vec::new(),
+            error_code: None,
+            error_message: None,
+        };
+        let mut remove_tags = BTreeSet::new();
+        for index in 0..size {
+            let toast = match toasts.GetAt(index) {
+                Ok(toast) => toast,
+                Err(error) => {
+                    report.status = "error".to_owned();
+                    report.failed = report.failed.saturating_add(1);
+                    report.error_code = Some(error_codes::NOTIFY_SHOW_FAILED.to_owned());
+                    report.error_message = Some(format!(
+                        "Action Center history GetAt({index}) failed: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let toast_group = toast
+                .Group()
+                .map(|group| group.to_string_lossy())
+                .unwrap_or_default();
+            if toast_group != SYNAPSE_TOAST_GROUP {
+                continue;
+            }
+            let payload = toast
+                .Content()
+                .and_then(|document| document.GetXml())
+                .map(|xml| xml.to_string_lossy())
+                .unwrap_or_default();
+            if !is_escalation_toast_payload(&payload) {
+                continue;
+            }
+            report.candidates = report.candidates.saturating_add(1);
+            let tag = toast
+                .Tag()
+                .map(|tag| tag.to_string_lossy())
+                .unwrap_or_default();
+            if tag.is_empty() {
+                report.status = "error".to_owned();
+                report.failed = report.failed.saturating_add(1);
+                report.error_code = Some(error_codes::NOTIFY_DELIVERY_UNVERIFIED.to_owned());
+                report.error_message =
+                    Some("escalation-looking toast in Synapse group had an empty tag".to_owned());
+                continue;
+            }
+            if preserve.contains(&tag) {
+                report.preserved_open = report.preserved_open.saturating_add(1);
+                continue;
+            }
+            remove_tags.insert(tag);
+        }
+
+        for tag in remove_tags {
+            let outcome = remove_toast_blocking(&tag);
+            if outcome.removed {
+                report.removed = report.removed.saturating_add(1);
+            } else if outcome.already_absent {
+                report.already_absent = report.already_absent.saturating_add(1);
+            } else {
+                report.failed = report.failed.saturating_add(1);
+            }
+            report.outcomes.push(outcome);
+        }
+        if report.failed > 0 {
+            report.status = "partial_error".to_owned();
+        }
+        report
+    }
+
+    fn is_escalation_toast_payload(payload: &str) -> bool {
+        payload.contains("<text>Synapse: Agent appears stuck and needs attention [")
+            || payload.contains("<text>Synapse: Agent needs your input to continue [")
+            || payload.contains("<text>Synapse: Agent is waiting for your approval [")
+            || payload.contains("<text>Synapse: Agent finished and is ready for review [")
+    }
+
+    fn remove_toast_blocking(tag: &str) -> ToastRemovalOutcome {
+        if let Err(error) = ensure_aumid_registered() {
+            return removal_failure(tag, error.code, error.message);
+        }
+        let before_count = match history_count_for_tag(tag) {
+            Ok(count) => count,
+            Err(error) => return removal_failure(tag, error.code, error.message),
+        };
+        if before_count == 0 {
+            return ToastRemovalOutcome {
+                aumid: SYNAPSE_AUMID.to_owned(),
+                tag: tag.to_owned(),
+                group: SYNAPSE_TOAST_GROUP.to_owned(),
+                status: "not_present".to_owned(),
+                removed: false,
+                already_absent: true,
+                before_count: Some(0),
+                after_count: Some(0),
+                error_code: None,
+                error_message: None,
+            };
+        }
+
+        let remove_result = ToastNotificationManager::History()
+            .and_then(|history| {
+                history.RemoveGroupedTagWithId(
+                    &HSTRING::from(tag),
+                    &HSTRING::from(SYNAPSE_TOAST_GROUP),
+                    &HSTRING::from(SYNAPSE_AUMID),
+                )
+            })
+            .map_err(|error| {
+                NotifyFailure::new(
+                    error_codes::NOTIFY_SHOW_FAILED,
+                    format!(
+                        "ToastNotificationHistory.RemoveGroupedTagWithId(tag={tag}, group={SYNAPSE_TOAST_GROUP}, app_id={SYNAPSE_AUMID}) failed: {error}"
+                    ),
+                )
+            });
+        if let Err(error) = remove_result {
+            return removal_failure(tag, error.code, error.message);
+        }
+
+        let after_count = match history_count_for_tag(tag) {
+            Ok(count) => count,
+            Err(error) => return removal_failure(tag, error.code, error.message),
+        };
+        ToastRemovalOutcome {
+            aumid: SYNAPSE_AUMID.to_owned(),
+            tag: tag.to_owned(),
+            group: SYNAPSE_TOAST_GROUP.to_owned(),
+            status: if after_count == 0 {
+                "removed".to_owned()
+            } else {
+                "still_present".to_owned()
+            },
+            removed: after_count == 0,
+            already_absent: false,
+            before_count: Some(before_count),
+            after_count: Some(after_count),
+            error_code: (after_count != 0)
+                .then_some(error_codes::NOTIFY_DELIVERY_UNVERIFIED.to_owned()),
+            error_message: (after_count != 0).then(|| {
+                format!(
+                    "toast tag {tag} group {SYNAPSE_TOAST_GROUP} remained in Action Center after removal"
+                )
+            }),
+        }
     }
 
     fn create_notifier() -> Result<ToastNotifier, NotifyFailure> {
@@ -879,6 +1284,18 @@ async fn send_toast_for_platform(
     ))
 }
 
+#[cfg(not(windows))]
+async fn remove_toast_for_platform(tag: String) -> ToastRemovalOutcome {
+    ToastRemovalOutcome::unsupported(tag)
+}
+
+#[cfg(not(windows))]
+async fn cleanup_escalation_orphans_for_platform(
+    _preserve_tags: Vec<String>,
+) -> ToastCleanupReport {
+    ToastCleanupReport::unsupported()
+}
+
 #[cfg(windows)]
 async fn send_toast_for_platform(
     params: NotifyHumanParams,
@@ -889,9 +1306,54 @@ async fn send_toast_for_platform(
     windows_toast::send_toast(params, tag, actions, activation_callback).await
 }
 
+#[cfg(windows)]
+async fn remove_toast_for_platform(tag: String) -> ToastRemovalOutcome {
+    windows_toast::remove_toast(tag).await
+}
+
+#[cfg(windows)]
+async fn cleanup_escalation_orphans_for_platform(preserve_tags: Vec<String>) -> ToastCleanupReport {
+    windows_toast::cleanup_escalation_orphans(preserve_tags).await
+}
+
 async fn run_notify_human(params: NotifyHumanParams) -> Result<NotifyHumanResponse, ErrorData> {
     let tag = toast_tag_for(params.dedupe_key.as_deref());
     run_internal_toast(params, tag, Vec::new()).await
+}
+
+pub(crate) async fn remove_internal_toast(tag: String) -> ToastRemovalOutcome {
+    let outcome = remove_toast_for_platform(tag.clone()).await;
+    tracing::info!(
+        code = "NOTIFY_TOAST_REMOVAL_RESULT",
+        tag = %tag,
+        status = %outcome.status,
+        removed = outcome.removed,
+        already_absent = outcome.already_absent,
+        before_count = outcome.before_count,
+        after_count = outcome.after_count,
+        error_code = outcome.error_code.as_deref().unwrap_or(""),
+        "toast history removal completed"
+    );
+    outcome
+}
+
+pub(crate) async fn remove_orphaned_escalation_toasts(
+    preserve_tags: Vec<String>,
+) -> ToastCleanupReport {
+    let report = cleanup_escalation_orphans_for_platform(preserve_tags).await;
+    tracing::info!(
+        code = "NOTIFY_ORPHAN_ESCALATION_TOAST_CLEANUP",
+        status = %report.status,
+        scanned = report.scanned,
+        candidates = report.candidates,
+        preserved_open = report.preserved_open,
+        removed = report.removed,
+        already_absent = report.already_absent,
+        failed = report.failed,
+        error_code = report.error_code.as_deref().unwrap_or(""),
+        "orphan escalation toast cleanup completed"
+    );
+    report
 }
 
 pub(crate) async fn run_internal_toast(

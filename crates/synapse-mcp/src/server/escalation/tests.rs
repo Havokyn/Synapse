@@ -18,6 +18,7 @@ use synapse_storage::{Db, cf, decode_json};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::super::notify_tools::{SYNAPSE_AUMID, SYNAPSE_TOAST_GROUP};
 use super::*;
 
 fn db() -> Arc<Db> {
@@ -41,12 +42,27 @@ fn transition(anchor: &str, to: AgentLifecycleState) -> StateTransition {
 }
 
 /// Marks an open escalation as having delivered its Tier 0 toast, so a
-/// following `process_pending` exercises only the off-machine path.
+/// following `process_pending` exercises only the off-machine path. The toast
+/// is also marked already-absent because these tests must not touch Windows
+/// Action Center; live Tier 0 delivery/removal is verified manually against the
+/// real daemon.
 fn mark_tier0_fired(db: &Db, escalation_id: &str, now: u64) {
     let mut item = read_item(db, escalation_id)
         .expect("read item")
         .expect("item present");
     item.tier0_fired = true;
+    item.tier0_toast_removed = Some(ToastRemovalOutcome {
+        aumid: SYNAPSE_AUMID.to_owned(),
+        tag: escalation_toast_tag(escalation_id),
+        group: SYNAPSE_TOAST_GROUP.to_owned(),
+        status: "not_present".to_owned(),
+        removed: false,
+        already_absent: true,
+        before_count: Some(0),
+        after_count: Some(0),
+        error_code: None,
+        error_message: None,
+    });
     item.updated_at_unix_ms = now;
     write_item_and_audit(db, &item, "tier0_toast_fired", json!({ "via": "test" }))
         .expect("mark tier0 fired");
@@ -216,6 +232,7 @@ fn opens_pending_escalation_on_attention_transition() {
     assert_eq!(item.context.waiting_for.as_deref(), Some("notify:approval"));
     assert_eq!(item.context.alternatives, vec!["retry", "skip"]);
     assert_eq!(item.context.agent_detail_deep_link, "/agents/agent-a");
+    assert_eq!(item.tier0_toast_removed, None);
     // No egress configured ⇒ Tier 0 only, no ladder scheduled.
     assert!(!item.tier1_eligible, "no webhook ⇒ not tier1 eligible");
     assert_eq!(item.next_escalate_at_unix_ms, None);
@@ -256,6 +273,17 @@ fn opens_pending_escalation_on_attention_transition() {
                 == Some("opened".to_owned())
         }),
         "an 'opened' audit row must exist"
+    );
+}
+
+#[test]
+fn escalation_toast_tag_matches_delivery_dedupe_key() {
+    let escalation_id = "esc1-test-tag";
+    let dedupe_key = escalation_toast_dedupe_key(escalation_id);
+    assert_eq!(dedupe_key, "escalation:esc1-test-tag");
+    assert_eq!(
+        escalation_toast_tag(escalation_id),
+        toast_tag_for(Some(&dedupe_key))
     );
 }
 

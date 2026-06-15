@@ -47,7 +47,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::agent_state::{AgentLifecycleState, AgentStateRead, StateTransition};
-use super::notify_tools::{NotifyHumanParams, NotifyKind, run_internal_toast, toast_tag_for};
+use super::notify_tools::{
+    NotifyHumanParams, NotifyKind, ToastCleanupReport, ToastRemovalOutcome, remove_internal_toast,
+    remove_orphaned_escalation_toasts, run_internal_toast, toast_tag_for,
+};
 use super::session_registry::unix_time_ms_now;
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
 use crate::m3::approvals::{
@@ -64,6 +67,7 @@ type CfKvRows = Vec<CfKvRow>;
 const CONFIG_KEY: &str = "escalation/v1/config";
 const ITEM_PREFIX: &str = "escalation/v1/item/";
 const AUDIT_PREFIX: &str = "escalation/v1/audit/";
+const ORPHAN_TOAST_AUDIT_PREFIX: &str = "escalation/v1/toast_orphan_cleanup/";
 const ESCALATION_ID_PREFIX: &str = "esc1-";
 const APPROVAL_ITEM_PREFIX: &str = "approval/v1/item/";
 const APPROVAL_AUDIT_PREFIX: &str = "approval/v1/audit/";
@@ -339,6 +343,10 @@ pub(crate) struct EscalationItem {
     pub expires_at_unix_ms: u64,
     /// True once the on-PC toast was delivered AND verified in Action Center.
     pub tier0_fired: bool,
+    /// Last removal readback for the Tier 0 Action Center toast once this
+    /// escalation no longer needs to interrupt the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier0_toast_removed: Option<ToastRemovalOutcome>,
     /// True when quiet hours made the on-PC toast digest-only
     /// (`suppress_popup=true`). Critical escalations never set this.
     pub tier0_quiet_digest: bool,
@@ -374,6 +382,10 @@ fn item_key(escalation_id: &str) -> Vec<u8> {
 
 fn audit_key(escalation_id: &str, at_unix_ms: u64, event_id: &str) -> Vec<u8> {
     format!("{AUDIT_PREFIX}{escalation_id}/{at_unix_ms:020}-{event_id}").into_bytes()
+}
+
+fn orphan_toast_audit_key(at_unix_ms: u64, event_id: &str) -> Vec<u8> {
+    format!("{ORPHAN_TOAST_AUDIT_PREFIX}{at_unix_ms:020}-{event_id}").into_bytes()
 }
 
 fn storage_error(error: synapse_storage::StorageError) -> ErrorData {
@@ -538,6 +550,53 @@ fn open_items_for_anchor(db: &Db, anchor: &str) -> Result<Vec<EscalationItem>, E
         .into_iter()
         .filter(|item| item.anchor == anchor && item.status.is_open())
         .collect())
+}
+
+fn open_tier0_toast_tags(db: &Db) -> Result<Vec<String>, ErrorData> {
+    Ok(scan_items(db)?
+        .into_iter()
+        .filter(|item| {
+            item.status.is_open() && item.tier0_fired && item.tier0_toast_removed.is_none()
+        })
+        .map(|item| escalation_toast_tag(&item.escalation_id))
+        .collect())
+}
+
+fn write_orphan_toast_cleanup_audit(
+    db: &Db,
+    report: &ToastCleanupReport,
+    now_unix_ms: u64,
+) -> Result<Option<String>, ErrorData> {
+    if report.candidates == 0 && report.failed == 0 && report.error_code.is_none() {
+        return Ok(None);
+    }
+    let event_id = Uuid::now_v7().simple().to_string();
+    let row_key = orphan_toast_audit_key(now_unix_ms, &event_id);
+    let row = json!({
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "event": "orphan_tier0_toast_cleanup",
+        "at_unix_ms": now_unix_ms,
+        "report": report,
+    });
+    let value = encode_json(&row).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("orphan toast cleanup audit encode failed: {error}"),
+        )
+    })?;
+    db.put_batch_pressure_bypass(cf::CF_KV, [(row_key.clone(), value)])
+        .map_err(storage_error)?;
+    read_exact_row(db, &row_key)?.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!(
+                "orphan toast cleanup audit row absent immediately after write for key {}",
+                String::from_utf8_lossy(&row_key)
+            ),
+        )
+    })?;
+    Ok(Some(hex_encode_bytes(&row_key)))
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +958,7 @@ fn open_escalation(
         updated_at_unix_ms: now_unix_ms,
         expires_at_unix_ms: now_unix_ms.saturating_add(ttl),
         tier0_fired: false,
+        tier0_toast_removed: None,
         tier0_quiet_digest: quiet_suppressed,
         tier1_quiet_suppressed: quiet_suppressed,
         tier1_eligible,
@@ -1082,6 +1142,8 @@ pub(crate) fn ack_from_approval_item_decision(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProcessReport {
     pub tier0_fired: usize,
+    pub tier0_removed: usize,
+    pub tier0_remove_failed: usize,
     pub tier1_fired: usize,
     pub tier1_failed: usize,
     pub expired: usize,
@@ -1107,6 +1169,11 @@ pub(crate) async fn process_pending(
     report.scanned = items.len();
     for mut item in items {
         if !item.status.is_open() {
+            if remove_tier0_if_terminal(db, &mut item).await? {
+                report.tier0_removed += 1;
+            } else if tier0_removal_failed(&item) {
+                report.tier0_remove_failed += 1;
+            }
             if matches!(
                 item.status,
                 EscalationStatus::Resolved | EscalationStatus::Expired
@@ -1136,6 +1203,14 @@ pub(crate) async fn process_pending(
                     )?;
                     report.linked_approvals_closed += 1;
                 }
+            }
+            continue;
+        }
+        if item.status == EscalationStatus::Acked {
+            if remove_tier0_if_terminal(db, &mut item).await? {
+                report.tier0_removed += 1;
+            } else if tier0_removal_failed(&item) {
+                report.tier0_remove_failed += 1;
             }
             continue;
         }
@@ -1175,6 +1250,11 @@ pub(crate) async fn process_pending(
                 reason,
                 "readback=CF_KV escalation resolved because anchor is terminal"
             );
+            if remove_tier0_if_terminal(db, &mut item).await? {
+                report.tier0_removed += 1;
+            } else if tier0_removal_failed(&item) {
+                report.tier0_remove_failed += 1;
+            }
             continue;
         }
         // TTL expiry takes precedence over further delivery.
@@ -1205,6 +1285,11 @@ pub(crate) async fn process_pending(
                 escalation_id = %item.escalation_id,
                 "readback=CF_KV escalation expired with no acknowledgment"
             );
+            if remove_tier0_if_terminal(db, &mut item).await? {
+                report.tier0_removed += 1;
+            } else if tier0_removal_failed(&item) {
+                report.tier0_remove_failed += 1;
+            }
             continue;
         }
 
@@ -1286,6 +1371,42 @@ pub(crate) async fn process_pending(
     Ok(report)
 }
 
+async fn remove_tier0_if_terminal(db: &Db, item: &mut EscalationItem) -> Result<bool, ErrorData> {
+    if !item.tier0_fired || item.tier0_toast_removed.is_some() {
+        return Ok(false);
+    }
+    let tag = escalation_toast_tag(&item.escalation_id);
+    let outcome = remove_internal_toast(tag).await;
+    let removed =
+        outcome.removed || outcome.already_absent || outcome.status == "unsupported_platform";
+    item.tier0_toast_removed = Some(outcome.clone());
+    write_item_and_audit(
+        db,
+        item,
+        "tier0_toast_removed",
+        json!({
+            "toast_removal": outcome,
+        }),
+    )?;
+    tracing::info!(
+        code = "ESCALATION_TIER0_TOAST_REMOVED",
+        escalation_id = %item.escalation_id,
+        status = %outcome.status,
+        removed = outcome.removed,
+        already_absent = outcome.already_absent,
+        before_count = outcome.before_count,
+        after_count = outcome.after_count,
+        "readback=Action Center toast removal outcome stored"
+    );
+    Ok(removed)
+}
+
+fn tier0_removal_failed(item: &EscalationItem) -> bool {
+    item.tier0_toast_removed.as_ref().is_some_and(|outcome| {
+        !outcome.removed && !outcome.already_absent && outcome.status != "unsupported_platform"
+    })
+}
+
 fn terminal_agent_read_for_item(
     terminal_agent_reads: &[AgentStateRead],
     item: &EscalationItem,
@@ -1334,13 +1455,21 @@ async fn fire_tier0(item: &EscalationItem) -> Result<(), ErrorData> {
         kind: item.severity.notify_kind(),
         // Dedupe on the escalation id so repeated sweeps before dismissal do not
         // stack duplicate toasts.
-        dedupe_key: Some(format!("escalation:{}", item.escalation_id)),
+        dedupe_key: Some(escalation_toast_dedupe_key(&item.escalation_id)),
         suppress_popup: item.tier0_quiet_digest,
     };
     let tag = toast_tag_for(params.dedupe_key.as_deref());
     run_internal_toast(params, tag, Vec::new())
         .await
         .map(|_response| ())
+}
+
+fn escalation_toast_dedupe_key(escalation_id: &str) -> String {
+    format!("escalation:{escalation_id}")
+}
+
+fn escalation_toast_tag(escalation_id: &str) -> String {
+    toast_tag_for(Some(&escalation_toast_dedupe_key(escalation_id)))
 }
 
 async fn deliver_webhook(
@@ -1453,6 +1582,15 @@ fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
     hex
 }
 
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 // ---------------------------------------------------------------------------
 // Worker spawn (wired in http/transport.rs)
 // ---------------------------------------------------------------------------
@@ -1466,6 +1604,7 @@ pub(crate) fn spawn_worker(db: Arc<Db>, shutdown: CancellationToken) -> JoinHand
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(WORKER_TICK_MS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_orphan_cleanup_unix_ms = 0_u64;
         tracing::info!(
             code = "ESCALATION_WORKER_STARTED",
             tick_ms = WORKER_TICK_MS,
@@ -1480,9 +1619,12 @@ pub(crate) fn spawn_worker(db: Arc<Db>, shutdown: CancellationToken) -> JoinHand
                 _ = signal.notified() => {}
                 _ = interval.tick() => {}
             }
-            match process_pending(&db, unix_time_ms_now()).await {
+            let now_unix_ms = unix_time_ms_now();
+            match process_pending(&db, now_unix_ms).await {
                 Ok(report)
                     if report.tier0_fired
+                        + report.tier0_removed
+                        + report.tier0_remove_failed
                         + report.tier1_fired
                         + report.tier1_failed
                         + report.expired
@@ -1492,6 +1634,8 @@ pub(crate) fn spawn_worker(db: Arc<Db>, shutdown: CancellationToken) -> JoinHand
                     tracing::info!(
                         code = "ESCALATION_SWEEP",
                         tier0_fired = report.tier0_fired,
+                        tier0_removed = report.tier0_removed,
+                        tier0_remove_failed = report.tier0_remove_failed,
                         tier1_fired = report.tier1_fired,
                         tier1_failed = report.tier1_failed,
                         expired = report.expired,
@@ -1507,6 +1651,44 @@ pub(crate) fn spawn_worker(db: Arc<Db>, shutdown: CancellationToken) -> JoinHand
                         detail = %error.message,
                         "escalation sweep failed; will retry next tick"
                     );
+                }
+            }
+            if now_unix_ms.saturating_sub(last_orphan_cleanup_unix_ms) >= 60_000 {
+                last_orphan_cleanup_unix_ms = now_unix_ms;
+                let preserve_tags = match open_tier0_toast_tags(&db) {
+                    Ok(tags) => tags,
+                    Err(error) => {
+                        tracing::error!(
+                            code = "ESCALATION_ORPHAN_TOAST_PRESERVE_READ_FAILED",
+                            detail = %error.message,
+                            "could not read open escalation tags before orphan toast cleanup"
+                        );
+                        continue;
+                    }
+                };
+                let report = remove_orphaned_escalation_toasts(preserve_tags).await;
+                match write_orphan_toast_cleanup_audit(&db, &report, now_unix_ms) {
+                    Ok(Some(row_key_hex)) => {
+                        tracing::info!(
+                            code = "ESCALATION_ORPHAN_TOAST_CLEANUP_AUDITED",
+                            row_key_hex = %row_key_hex,
+                            status = %report.status,
+                            candidates = report.candidates,
+                            removed = report.removed,
+                            already_absent = report.already_absent,
+                            preserved_open = report.preserved_open,
+                            failed = report.failed,
+                            "readback=CF_KV orphan escalation toast cleanup audit row"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            code = "ESCALATION_ORPHAN_TOAST_CLEANUP_AUDIT_FAILED",
+                            detail = %error.message,
+                            "orphan escalation toast cleanup ran but audit write/readback failed"
+                        );
+                    }
                 }
             }
         }
