@@ -31,7 +31,9 @@ fn local_ts_ns(days_ago: u64, hour: u32, minute: u32) -> anyhow::Result<u64> {
         .date_naive()
         .checked_sub_days(Days::new(days_ago))
         .context("date arithmetic")?;
-    let naive = date.and_hms_opt(hour, minute, 0).context("time must exist")?;
+    let naive = date
+        .and_hms_opt(hour, minute, 0)
+        .context("time must exist")?;
     let instant = chrono::TimeZone::from_local_datetime(&Local, &naive)
         .earliest()
         .context("local time unresolvable")?;
@@ -142,24 +144,69 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
         let days_ago = 8 - index;
         let base = local_ts_ns(days_ago, 9, 0)?;
         let tag = format!("d{days_ago}");
-        seed_focus(&mut client, &format!("{tag}-o"), base, "outlook.exe", "Inbox - Outlook").await?;
-        seed_focus(&mut client, &format!("{tag}-x"), base + 2 * MIN, "excel.exe", "report.xlsx - Excel").await?;
-        seed_focus(&mut client, &format!("{tag}-t"), base + 7 * MIN, "teams.exe", "Chat - Teams").await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-o"),
+            base,
+            "outlook.exe",
+            "Inbox - Outlook",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-x"),
+            base + 2 * MIN,
+            "excel.exe",
+            "report.xlsx - Excel",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-t"),
+            base + 7 * MIN,
+            "teams.exe",
+            "Chat - Teams",
+        )
+        .await?;
         seed_idle(&mut client, &format!("{tag}-i"), base + 9 * MIN).await?;
     }
 
     // The "now" day (yesterday): only the first two steps, closed by idle, plus
     // an unrelated notepad burst later in the day for the honest-empty case.
     let now_day_base = local_ts_ns(1, 9, 0)?;
-    seed_focus(&mut client, "now-o", now_day_base, "outlook.exe", "Inbox - Outlook").await?;
-    seed_focus(&mut client, "now-x", now_day_base + 2 * MIN, "excel.exe", "report.xlsx - Excel").await?;
+    seed_focus(
+        &mut client,
+        "now-o",
+        now_day_base,
+        "outlook.exe",
+        "Inbox - Outlook",
+    )
+    .await?;
+    seed_focus(
+        &mut client,
+        "now-x",
+        now_day_base + 2 * MIN,
+        "excel.exe",
+        "report.xlsx - Excel",
+    )
+    .await?;
     seed_idle(&mut client, "now-i", now_day_base + 4 * MIN).await?;
     let notepad_ts = local_ts_ns(1, 11, 0)?;
-    seed_focus(&mut client, "now-n", notepad_ts, "notepad.exe", "untitled - Notepad").await?;
+    seed_focus(
+        &mut client,
+        "now-n",
+        notepad_ts,
+        "notepad.exe",
+        "untitled - Notepad",
+    )
+    .await?;
     seed_idle(&mut client, "now-ni", notepad_ts + 3 * MIN).await?;
 
     let segmented = structured(&client.tools_call("episode_segment", json!({})).await?)?;
-    println!("readback=episode_segment written={}", segmented["episodes_written"]);
+    println!(
+        "readback=episode_segment written={}",
+        segmented["episodes_written"]
+    );
     // 7 mining days x 3 episodes + now-day (outlook, excel, notepad).
     assert_eq!(segmented["episodes_written"], 24);
 
@@ -178,9 +225,16 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
         mined["routines_written"], mined["routines"][0]["steps"]
     );
     assert_eq!(mined["routines_written"], 1);
-    let routine_id = mined["routines"][0]["routine_id"].as_str().context("routine_id")?.to_owned();
+    let routine_id = mined["routines"][0]["routine_id"]
+        .as_str()
+        .context("routine_id")?
+        .to_owned();
     let steps = mined["routines"][0]["steps"].as_array().context("steps")?;
-    assert_eq!(steps.len(), 3, "expected the 3-step morning routine: {steps:?}");
+    assert_eq!(
+        steps.len(),
+        3,
+        "expected the 3-step morning routine: {steps:?}"
+    );
     assert_eq!(steps[0]["app"], "outlook.exe");
     assert_eq!(steps[1]["app"], "excel.exe");
     assert_eq!(steps[2]["app"], "teams.exe");
@@ -207,7 +261,10 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
     )?;
     println!("readback=intent_current scenario=live {live}");
     assert_eq!(live["evaluated_routines"], 1);
-    assert_eq!(live["considered_episodes"], 2, "only the now-day morning prefix is recent");
+    assert_eq!(
+        live["considered_episodes"], 2,
+        "only the now-day morning prefix is recent"
+    );
     assert_eq!(live["now"]["weekday"], i64::from(now_weekday));
     assert_eq!(live["now"]["minute_of_day"], i64::from(now_minute));
     let candidates = live["candidates"].as_array().context("candidates")?;
@@ -227,13 +284,18 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
 
     // FSV: the matched-step episode ids are physical CF_EPISODES rows — resolve
     // the first one through episode_get and confirm app + identity.
-    let matched_episode_id = top["matched_steps"][0]["episode_id"].as_str().context("episode_id")?;
+    let matched_episode_id = top["matched_steps"][0]["episode_id"]
+        .as_str()
+        .context("episode_id")?;
     let got = structured(
         &client
             .tools_call("episode_get", json!({"episode_id": matched_episode_id}))
             .await?,
     )?;
-    println!("readback=episode_get matched_step_episode {}", got["episode"]);
+    println!(
+        "readback=episode_get matched_step_episode {}",
+        got["episode"]
+    );
     assert_eq!(got["episode"]["episode_id"], matched_episode_id);
     assert_eq!(got["episode"]["app"], "outlook.exe");
 
@@ -259,7 +321,11 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
             .await?,
     )?;
     println!("readback=intent_current scenario=stale {stale}");
-    assert_eq!(stale["candidates"].as_array().map_or(1, Vec::len), 0, "stale activity is not live");
+    assert_eq!(
+        stale["candidates"].as_array().map_or(1, Vec::len),
+        0,
+        "stale activity is not live"
+    );
 
     // === Disabled routines never match. ===
     structured(
@@ -276,7 +342,10 @@ async fn intent_current_matches_live_routine_prefix_and_is_honest() -> anyhow::R
             .await?,
     )?;
     println!("readback=intent_current scenario=disabled {after_disable}");
-    assert_eq!(after_disable["evaluated_routines"], 1, "the routine is still evaluated");
+    assert_eq!(
+        after_disable["evaluated_routines"], 1,
+        "the routine is still evaluated"
+    );
     assert_eq!(
         after_disable["candidates"].as_array().map_or(1, Vec::len),
         0,

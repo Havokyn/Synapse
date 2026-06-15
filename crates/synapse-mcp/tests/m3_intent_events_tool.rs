@@ -39,7 +39,9 @@ fn local_ts_ns(days_ago: u64, hour: u32, minute: u32) -> anyhow::Result<u64> {
         .date_naive()
         .checked_sub_days(Days::new(days_ago))
         .context("date arithmetic")?;
-    let naive = date.and_hms_opt(hour, minute, 0).context("time must exist")?;
+    let naive = date
+        .and_hms_opt(hour, minute, 0)
+        .context("time must exist")?;
     let instant = chrono::TimeZone::from_local_datetime(&Local, &naive)
         .earliest()
         .context("local time unresolvable")?;
@@ -212,15 +214,39 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
         let days_ago = 8 - index;
         let base = local_ts_ns(days_ago, 9, 0)?;
         let tag = format!("d{days_ago}");
-        seed_focus(&mut client, &format!("{tag}-o"), base, "outlook.exe", "Inbox - Outlook").await?;
-        seed_focus(&mut client, &format!("{tag}-x"), base + 2 * MIN, "excel.exe", "report.xlsx - Excel").await?;
-        seed_focus(&mut client, &format!("{tag}-t"), base + 7 * MIN, "teams.exe", "Chat - Teams").await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-o"),
+            base,
+            "outlook.exe",
+            "Inbox - Outlook",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-x"),
+            base + 2 * MIN,
+            "excel.exe",
+            "report.xlsx - Excel",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-t"),
+            base + 7 * MIN,
+            "teams.exe",
+            "Chat - Teams",
+        )
+        .await?;
         seed_idle(&mut client, &format!("{tag}-i"), base + 9 * MIN).await?;
     }
 
     let now_day_base = local_ts_ns(1, 9, 0)?;
     let segmented = structured(&client.tools_call("episode_segment", json!({})).await?)?;
-    println!("readback=episode_segment written={}", segmented["episodes_written"]);
+    println!(
+        "readback=episode_segment written={}",
+        segmented["episodes_written"]
+    );
     assert!(segmented["episodes_written"].as_u64().unwrap_or(0) >= 21);
 
     // Mine only the seven full days; end snapped UP to the now day's midnight.
@@ -230,12 +256,21 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
             .tools_call("routine_mine", json!({"end_ts_ns": mine_end}))
             .await?,
     )?;
-    println!("readback=routine_mine written={}", mined["routines_written"]);
+    println!(
+        "readback=routine_mine written={}",
+        mined["routines_written"]
+    );
     assert_eq!(mined["routines_written"], 1);
-    let routine_id = mined["routines"][0]["routine_id"].as_str().context("routine_id")?.to_owned();
+    let routine_id = mined["routines"][0]["routine_id"]
+        .as_str()
+        .context("routine_id")?
+        .to_owned();
     structured(
         &client
-            .tools_call("routine_update", json!({"routine_id": routine_id, "action": "confirm"}))
+            .tools_call(
+                "routine_update",
+                json!({"routine_id": routine_id, "action": "confirm"}),
+            )
             .await?,
     )?;
 
@@ -252,7 +287,10 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
             )
             .await?,
     )?;
-    let reflex_id = registered["reflex_id"].as_str().context("reflex_id")?.to_owned();
+    let reflex_id = registered["reflex_id"]
+        .as_str()
+        .context("reflex_id")?
+        .to_owned();
     println!("readback=reflex_register reflex_id={reflex_id}");
 
     // Edge: a no-activity instant on the now day (no now-day episodes seeded yet)
@@ -263,8 +301,22 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
     assert!(transition_kinds(&quiet).is_empty());
 
     // === DETECTED: replay the first two steps at the usual time. ===
-    seed_focus(&mut client, "now-o", now_day_base, "outlook.exe", "Inbox - Outlook").await?;
-    seed_focus(&mut client, "now-x", now_day_base + 2 * MIN, "excel.exe", "report.xlsx - Excel").await?;
+    seed_focus(
+        &mut client,
+        "now-o",
+        now_day_base,
+        "outlook.exe",
+        "Inbox - Outlook",
+    )
+    .await?;
+    seed_focus(
+        &mut client,
+        "now-x",
+        now_day_base + 2 * MIN,
+        "excel.exe",
+        "report.xlsx - Excel",
+    )
+    .await?;
     seed_idle(&mut client, "now-i", now_day_base + 4 * MIN).await?;
     structured(&client.tools_call("episode_segment", json!({})).await?)?;
 
@@ -272,7 +324,10 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
     println!("readback=intent_detect_tick scenario=detected {detected}");
     assert_eq!(detected["candidates"], 1);
     assert_eq!(transition_kinds(&detected), vec!["detected"]);
-    assert_eq!(detected["transitions"][0]["routine_id"], routine_id.as_str());
+    assert_eq!(
+        detected["transitions"][0]["routine_id"],
+        routine_id.as_str()
+    );
     assert_eq!(detected["transitions"][0]["matched_prefix_len"], 2);
     assert_eq!(detected["transitions"][0]["total_steps"], 3);
     assert_eq!(detected["transitions"][0]["reason"], "prefix_match");
@@ -293,16 +348,29 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
     // === ABANDONED: the same partial routine, long past the freshness window. ===
     let abandoned = tick(&mut client, now_day_base + 40 * MIN).await?;
     println!("readback=intent_detect_tick scenario=abandoned {abandoned}");
-    assert_eq!(abandoned["candidates"], 0, "stale activity is not a live intent");
+    assert_eq!(
+        abandoned["candidates"], 0,
+        "stale activity is not a live intent"
+    );
     assert_eq!(transition_kinds(&abandoned), vec!["abandoned"]);
-    assert_eq!(abandoned["transitions"][0]["routine_id"], routine_id.as_str());
+    assert_eq!(
+        abandoned["transitions"][0]["routine_id"],
+        routine_id.as_str()
+    );
     assert_eq!(abandoned["transitions"][0]["reason"], "diverged_or_stale");
     // The abandonment carries the last-known evidence, not zeroes.
     assert_eq!(abandoned["transitions"][0]["matched_prefix_len"], 2);
     assert_eq!(abandoned["tracked"], 0);
 
     // === DETECTED + CONFIRMED: observe the third step too, then a fresh tick. ===
-    seed_focus(&mut client, "now-t", now_day_base + 7 * MIN, "teams.exe", "Chat - Teams").await?;
+    seed_focus(
+        &mut client,
+        "now-t",
+        now_day_base + 7 * MIN,
+        "teams.exe",
+        "Chat - Teams",
+    )
+    .await?;
     seed_idle(&mut client, "now-ti", now_day_base + 9 * MIN).await?;
     structured(&client.tools_call("episode_segment", json!({})).await?)?;
 

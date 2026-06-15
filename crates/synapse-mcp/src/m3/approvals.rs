@@ -55,6 +55,11 @@ pub enum ApprovalKind {
     Suggestion,
     AgentEscalation,
     ArmedRunReview,
+    /// A spawned agent paused mid-task and asked the human to allow or deny a
+    /// specific tool call before it can continue (#927). Created by the
+    /// `approval_gate` permission-prompt tool; the deciding human's verdict is
+    /// returned to the still-blocked agent as the gate's `{behavior}` result.
+    AgentPermission,
 }
 
 #[derive(
@@ -821,6 +826,19 @@ pub fn decide_approval(
     })
 }
 
+/// Side-effect-free read of one approval item by id. Returns `None` when no
+/// row exists. Unlike [`list_approvals`]/[`decide_approval`] this does NOT
+/// materialize timeout transitions — the caller (e.g. the `approval_gate`
+/// blocking loop) reads the raw current status as the source of truth and
+/// enforces its own deadline.
+pub fn get_approval(
+    db: &Arc<Db>,
+    approval_id: &str,
+) -> Result<Option<ApprovalQueueItem>, ErrorData> {
+    let key = item_key(approval_id);
+    Ok(read_item_by_key(db, &key)?.map(|(item, item_row)| ApprovalQueueItem { item, item_row }))
+}
+
 pub fn approval_snapshot(
     db: &Arc<Db>,
     kind: Option<ApprovalKind>,
@@ -829,7 +847,9 @@ pub fn approval_snapshot(
         statuses: Some(vec![ApprovalStatus::Pending, ApprovalStatus::Snoozed]),
         kinds: kind.map(|value| vec![value]),
         include_terminal: false,
-        limit: Some(25),
+        // Sized for a fleet: the Approvals inbox must surface many concurrent
+        // agent_permission pauses, not just the most recent handful.
+        limit: Some(200),
         cursor: None,
     };
     list_approvals(db, &params).map(|response| response.items)

@@ -1176,6 +1176,7 @@ impl SynapseService {
                     mcp_url: request.mcp_url,
                     wait_timeout_ms: request.wait_timeout_ms,
                     hold_open_ms: request.hold_open_ms,
+                    require_approval_gate: request.require_approval_gate,
                     template_id: Some(rendered.provenance.template_id),
                     template_version: Some(rendered.provenance.version),
                     template_config_hash: Some(rendered.provenance.config_hash),
@@ -1199,6 +1200,7 @@ impl SynapseService {
                     mcp_url: request.mcp_url,
                     wait_timeout_ms: request.wait_timeout_ms,
                     hold_open_ms: request.hold_open_ms,
+                    require_approval_gate: request.require_approval_gate,
                     template_id: None,
                     template_version: None,
                     template_config_hash: None,
@@ -1678,6 +1680,7 @@ impl SynapseService {
             launched_at_unix_ms,
             registered_at_unix_ms: matched.registered_at_unix_ms,
             task_started_at_unix_ms: task_started.started_at_unix_ms,
+            task_readiness_source: task_started.readiness_source.to_owned(),
             target: params.target,
             template_id: params.template_id,
             template_version: params.template_version,
@@ -1722,6 +1725,10 @@ impl SynapseService {
             let mut sessions_json = Vec::new();
             let mut readiness_reason_counts: BTreeMap<String, u64> = BTreeMap::new();
             let mut candidate_readiness = Vec::new();
+            // Sessions that are a new + in-window + CLI match for this spawn but
+            // have not (yet) issued a daemon MCP tool call. They are identified
+            // as ours; we bind one only with independent proof of task progress.
+            let mut lenient_candidates: Vec<String> = Vec::new();
             for summary in &list.sessions {
                 let readiness = spawn_session_candidate_readiness(
                     summary,
@@ -1736,6 +1743,9 @@ impl SynapseService {
                     .unwrap_or("unknown")
                     .to_owned();
                 *readiness_reason_counts.entry(reason.clone()).or_default() += 1;
+                if reason == "tool_call_not_observed" {
+                    lenient_candidates.push(summary.registry.session_id.clone());
+                }
                 if matched_session.is_none()
                     && readiness.get("ready").and_then(Value::as_bool) == Some(true)
                 {
@@ -1775,6 +1785,38 @@ impl SynapseService {
                 return Ok(matched);
             }
 
+            // Robust fallback for the agent-cooperative readiness protocol: a
+            // session that registered, matches this spawn's CLI, and started in
+            // the launch window is ours even if it never issued a daemon MCP
+            // tool call (codex drives its own app-server tools; any agent may
+            // skip the injected ceremony). Bind it only when the daemon
+            // INDEPENDENTLY observes the task is underway, and only when the
+            // candidate is unambiguous — fan_out disambiguates via the agent's
+            // self-named session in the task-start artifact.
+            if !lenient_candidates.is_empty()
+                && agent_spawn_observed_task_progress(files, agent_kind).is_some()
+            {
+                let bind = if lenient_candidates.len() == 1 {
+                    Some(lenient_candidates[0].clone())
+                } else {
+                    read_json_file_lossy(&files.task_started_path)
+                        .and_then(|value| {
+                            value
+                                .get("session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .filter(|session_id| lenient_candidates.contains(session_id))
+                };
+                if let Some(session_id) = bind {
+                    return Ok(MatchedSpawnSession {
+                        session_id,
+                        registered_at_unix_ms: unix_time_ms_now(),
+                        agent_process_id: discover_agent_process_id(launcher_pid, agent_kind),
+                    });
+                }
+            }
+
             if process_has_exited(launcher_pid) {
                 return Err(json!({
                     "reason": "launcher_process_exited_before_registry_match",
@@ -1811,6 +1853,18 @@ impl SynapseService {
             )? {
                 Some(read) => return Ok(read),
                 None => {
+                    // The cooperative artifact is absent. Before treating that as
+                    // "not started", check whether the daemon can OBSERVE the agent
+                    // already executing — a capable agent often does the work but
+                    // skips the bookkeeping helper. Observed liveness is real proof.
+                    if let Some(evidence) =
+                        agent_spawn_observed_task_progress(files, agent_kind)
+                    {
+                        return Ok(AgentSpawnTaskStartRead {
+                            started_at_unix_ms: unix_time_ms_now(),
+                            readiness_source: evidence,
+                        });
+                    }
                     last_observed = json!({
                         "reason": "task_start_artifact_not_observed",
                         "task_started_path": files.task_started_path.display().to_string(),
@@ -2085,6 +2139,11 @@ struct MatchedSpawnSession {
 #[derive(Debug)]
 struct AgentSpawnTaskStartRead {
     started_at_unix_ms: u64,
+    /// How task-start readiness was proven: `"task_start_artifact"` (the agent
+    /// ran the cooperative write-task-started helper) or a daemon-OBSERVED
+    /// liveness signal label when the agent did real work but skipped the
+    /// bookkeeping step. Surfaced in the spawn response for auditing.
+    readiness_source: &'static str,
 }
 
 #[derive(Debug)]
@@ -3277,8 +3336,19 @@ fn prepare_agent_spawn_files(
                     "type": "http",
                     "url": params.mcp_url,
                     "headers": {
-                        "Authorization": "Bearer ${SYNAPSE_BEARER_TOKEN}"
-                    }
+                        "Authorization": "Bearer ${SYNAPSE_BEARER_TOKEN}",
+                        // Lets the approval_gate tool attribute a permission
+                        // request to THIS spawn (#927); the bearer is shared
+                        // across spawns and can't distinguish them. Read by
+                        // server::permission_gate::SPAWN_ID_HEADER (case-insensitive).
+                        "X-Synapse-Spawn-Id": spawn_id
+                    },
+                    // Per-server tool-call wall-clock (ms). The approval_gate
+                    // call blocks while a human decides; Claude's default
+                    // MCP_TOOL_TIMEOUT (~28h) is plenty, but we pin 30 min here
+                    // so a forgotten approval can't pin the agent forever — the
+                    // gate itself denies at ~25 min, just inside this wall.
+                    "timeout": 1_800_000
                 }
             }
         });
@@ -3300,7 +3370,8 @@ fn prepare_agent_spawn_files(
     }
 
     if let Some(settings_path) = &hook_settings_path {
-        let settings = build_claude_hook_settings(spawn_id, &params.mcp_url)?;
+        let settings =
+            build_claude_hook_settings(spawn_id, &params.mcp_url, params.require_approval_gate)?;
         let encoded = serde_json::to_vec_pretty(&settings).map_err(|error| {
             mcp_error(
                 error_codes::TOOL_INTERNAL_ERROR,
@@ -3418,7 +3489,11 @@ fn agent_event_ingress_url(
 /// CLI's native HTTP hooks (verified on Claude Code 2.1.176): no per-event
 /// child process, bearer injected via `allowedEnvVars` interpolation, and
 /// delivery failures are non-blocking for the agent.
-fn build_claude_hook_settings(spawn_id: &str, mcp_url: &str) -> Result<Value, ErrorData> {
+fn build_claude_hook_settings(
+    spawn_id: &str,
+    mcp_url: &str,
+    require_approval_gate: bool,
+) -> Result<Value, ErrorData> {
     let ingress_url = agent_event_ingress_url(spawn_id, mcp_url, "claude_code_hooks")?;
     let hook_entry = json!({
         "type": "http",
@@ -3436,12 +3511,61 @@ fn build_claude_hook_settings(spawn_id: &str, mcp_url: &str) -> Result<Value, Er
             json!([{ "hooks": [hook_entry.clone()] }]),
         );
     }
-    Ok(json!({
+    let mut settings = json!({
         "hooks": hooks,
         "allowedHttpHookUrls": [format!("{}*", ingress_url)],
         "httpHookAllowedEnvVars": ["SYNAPSE_BEARER_TOKEN"],
-    }))
+    });
+    if require_approval_gate {
+        // Static allow rules are consulted BEFORE the permission-prompt-tool,
+        // so listing the read-only / low-consequence tools here lets them run
+        // without a gate round-trip (#927). Anything not matched falls through
+        // to mcp__synapse__approval_gate, whose server-side policy is the
+        // authoritative backstop (server::permission_policy).
+        settings["permissions"] = json!({ "allow": CLAUDE_AUTO_ALLOW_RULES });
+    }
+    Ok(settings)
 }
+
+/// Tools pre-approved in a gated Claude spawn's `--settings` so they skip the
+/// approval_gate round-trip. Mirrors the auto-allow side of
+/// [`super::permission_policy`]; the gate still backstops anything unmatched.
+const CLAUDE_AUTO_ALLOW_RULES: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "LS",
+    "NotebookRead",
+    "NotebookEdit",
+    "TodoWrite",
+    "ExitPlanMode",
+    "BashOutput",
+    "Task",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(pwd)",
+    "Bash(echo:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(grep:*)",
+    "Bash(rg:*)",
+    "Bash(find:*)",
+    "Bash(which:*)",
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git branch:*)",
+    "Bash(cargo build:*)",
+    "Bash(cargo check:*)",
+    "Bash(cargo test:*)",
+    "Bash(cargo clippy:*)",
+    "Bash(cargo fmt:*)",
+];
 
 /// Codex `notify` program: receives the notification JSON as its final argv
 /// argument and POSTs it verbatim to the ingress. Codex spawns it
@@ -3768,11 +3892,24 @@ fn agent_spawn_powershell_script(
                 .as_deref()
                 .map(|model| format!(",'--model',{}", ps_single_quote(model)))
                 .unwrap_or_default();
+            // #927: by default route risky tool calls through the human
+            // Approvals inbox. `--permission-mode default` consults the
+            // static `permissions.allow` rules in the --settings file first
+            // (so safe tools never pause), then delegates anything unmatched to
+            // the approval_gate MCP tool, which blocks until a human decides.
+            // The legacy auto-approve-everything behavior is opt-in via
+            // require_approval_gate=false (trusted unattended automation).
+            let permission_args = if params.require_approval_gate {
+                "'--permission-mode','default','--permission-prompt-tool','mcp__synapse__approval_gate'"
+            } else {
+                "'--permission-mode','bypassPermissions'"
+            };
             format!(
-                "$claudeArgs = @('-p'{model_arg},'--verbose','--output-format','stream-json','--input-format','text','--permission-mode','bypassPermissions','--mcp-config',{mcp_config_path},'--strict-mcp-config','--settings',{hook_settings_path},'--add-dir',{working_dir},'--debug-file',{debug_path})\n\
+                "$claudeArgs = @('-p'{model_arg},'--verbose','--output-format','stream-json','--input-format','text',{permission_args},'--mcp-config',{mcp_config_path},'--strict-mcp-config','--settings',{hook_settings_path},'--add-dir',{working_dir},'--debug-file',{debug_path})\n\
 $prompt | & claude @claudeArgs 1> {stdout_path} 2> {stderr_path}\n\
 ",
                 model_arg = model_arg,
+                permission_args = permission_args,
                 working_dir = working_dir,
                 mcp_config_path = mcp_config_path,
                 hook_settings_path = hook_settings_path,
@@ -4204,7 +4341,64 @@ fn read_agent_spawn_task_start_artifact(
         }));
     }
 
-    Ok(Some(AgentSpawnTaskStartRead { started_at_unix_ms }))
+    Ok(Some(AgentSpawnTaskStartRead {
+        started_at_unix_ms,
+        readiness_source: "task_start_artifact",
+    }))
+}
+
+/// Daemon-OBSERVABLE evidence that a spawned agent actually began (and often
+/// finished) executing its task, independent of whether the model chose to run
+/// the cooperative `write-task-started.ps1` bookkeeping helper. The spawn
+/// readiness protocol injects prompt instructions telling the agent to call MCP
+/// tools and run that helper; a capable agent frequently does its real work but
+/// skips or reorders the ceremony. Gating liveness solely on the bookkeeping
+/// artifact then declares a working — often already finished — agent "dead".
+/// This inspects signals the daemon controls/observes directly and returns the
+/// evidence label when the task is provably underway. Positive evidence only;
+/// absence returns None so the deadline still governs genuinely stuck spawns.
+fn agent_spawn_observed_task_progress(
+    files: &AgentSpawnFiles,
+    agent_kind: ActSpawnAgentCli,
+) -> Option<&'static str> {
+    // The agent emitted a final message: it executed the task to completion.
+    if file_len(&files.final_message_path) > 0 {
+        return Some("final_message_present");
+    }
+    // Codex: the app-server control artifact (written by the daemon-controlled
+    // runner, not the model) shows a thread established and a turn underway.
+    if agent_kind == ActSpawnAgentCli::Codex {
+        if let Some(path) = files.codex_app_server_control_path.as_ref() {
+            if let Some(value) = read_json_file_lossy(path) {
+                let thread_present = value
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty());
+                let turn_status = value
+                    .get("turn_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                // `starting`/`app_server_started` predate the agent's thread; any
+                // later status means codex created its thread and is executing.
+                let turn_underway = !matches!(turn_status, "" | "starting" | "app_server_started");
+                if thread_present && turn_underway {
+                    return Some("codex_control_thread_established");
+                }
+            }
+        }
+    }
+    // The agent's stdout shows turn/assistant activity (local-model or codex):
+    // it began reasoning or acting, which proves the task is underway.
+    if let Some(tail) = tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES) {
+        if tail.contains("local.turn.started")
+            || tail.contains("local.assistant.message")
+            || tail.contains("\"turn.started\"")
+            || tail.contains("\"item.completed\"")
+        {
+            return Some("stdout_turn_activity");
+        }
+    }
+    None
 }
 
 fn read_spawned_agent_control_artifact(
@@ -4544,6 +4738,7 @@ mod tests {
             mcp_url: "http://127.0.0.1:7700/mcp".to_owned(),
             wait_timeout_ms: 30_000,
             hold_open_ms: 1234,
+            require_approval_gate: true,
             template_id: None,
             template_version: None,
             template_config_hash: None,
@@ -4846,6 +5041,96 @@ mod tests {
         .expect("task start present");
 
         assert_eq!(read.started_at_unix_ms, 1234);
+        assert_eq!(read.readiness_source, "task_start_artifact");
+    }
+
+    fn observed_progress_test_files(dir: &Path) -> AgentSpawnFiles {
+        AgentSpawnFiles {
+            log_dir: dir.to_path_buf(),
+            prompt_path: dir.join("prompt.txt"),
+            stdout_path: dir.join("stdout.jsonl"),
+            stderr_path: dir.join("stderr.log"),
+            final_message_path: dir.join("final-message.txt"),
+            completion_status_path: dir.join("completion-status.json"),
+            task_started_path: dir.join("task-started.json"),
+            task_started_script_path: dir.join("write-task-started.ps1"),
+            debug_path: None,
+            mcp_config_path: None,
+            hook_settings_path: None,
+            notify_script_path: None,
+            codex_app_server_runner_path: None,
+            codex_app_server_control_path: Some(dir.join("codex-control.json")),
+            codex_app_server_events_path: None,
+            codex_app_server_stdout_path: None,
+            codex_app_server_stderr_path: None,
+            local_model_runner_path: None,
+        }
+    }
+
+    #[test]
+    fn observed_task_progress_detects_real_liveness_without_artifact() {
+        // No artifact + no activity => no false-positive (deadline still governs).
+        let empty = tempfile::TempDir::new().expect("temp");
+        let files = observed_progress_test_files(empty.path());
+        assert_eq!(
+            agent_spawn_observed_task_progress(&files, ActSpawnAgentCli::Codex),
+            None,
+            "an idle spawn dir must not be reported as making progress"
+        );
+
+        // A produced final message proves the agent ran the task to completion,
+        // even though it never wrote the cooperative task-start artifact.
+        let finished = tempfile::TempDir::new().expect("temp");
+        let files = observed_progress_test_files(finished.path());
+        fs::write(&files.final_message_path, b"PONG").expect("write final message");
+        assert_eq!(
+            agent_spawn_observed_task_progress(&files, ActSpawnAgentCli::Claude),
+            Some("final_message_present")
+        );
+
+        // Codex: a control artifact with an established thread + underway turn is
+        // daemon-trusted proof the agent connected and is executing.
+        let codex = tempfile::TempDir::new().expect("temp");
+        let files = observed_progress_test_files(codex.path());
+        fs::write(
+            files.codex_app_server_control_path.as_ref().unwrap(),
+            serde_json::to_vec(&json!({
+                "thread_id": "019ec782-052f-7083-a7f9-79d97702b344",
+                "turn_status": "completed"
+            }))
+            .unwrap(),
+        )
+        .expect("write codex control");
+        assert_eq!(
+            agent_spawn_observed_task_progress(&files, ActSpawnAgentCli::Codex),
+            Some("codex_control_thread_established")
+        );
+
+        // A control artifact that only reached `starting` is NOT yet proof.
+        let codex_early = tempfile::TempDir::new().expect("temp");
+        let files = observed_progress_test_files(codex_early.path());
+        fs::write(
+            files.codex_app_server_control_path.as_ref().unwrap(),
+            serde_json::to_vec(&json!({ "thread_id": "", "turn_status": "starting" })).unwrap(),
+        )
+        .expect("write codex control");
+        assert_eq!(
+            agent_spawn_observed_task_progress(&files, ActSpawnAgentCli::Codex),
+            None
+        );
+
+        // Local-model stdout turn activity proves the task is underway.
+        let local = tempfile::TempDir::new().expect("temp");
+        let files = observed_progress_test_files(local.path());
+        fs::write(
+            &files.stdout_path,
+            b"{\"type\":\"local.turn.started\",\"turn_index\":1}\n",
+        )
+        .expect("write stdout");
+        assert_eq!(
+            agent_spawn_observed_task_progress(&files, ActSpawnAgentCli::LocalModel),
+            Some("stdout_turn_activity")
+        );
     }
 
     #[test]
@@ -5315,8 +5600,9 @@ mod tests {
 
     #[test]
     fn claude_hook_settings_subscribe_every_ingress_event_with_bearer() {
-        let settings = build_claude_hook_settings("agent-spawn-test", "http://127.0.0.1:7700/mcp")
-            .expect("settings build");
+        let settings =
+            build_claude_hook_settings("agent-spawn-test", "http://127.0.0.1:7700/mcp", true)
+                .expect("settings build");
         let hooks = settings["hooks"].as_object().expect("hooks object");
         for event in super::super::agent_event_ingress::CLAUDE_HOOK_SUBSCRIBED_EVENTS {
             let entry = &hooks[*event][0]["hooks"][0];
@@ -5338,6 +5624,23 @@ mod tests {
         assert_eq!(
             settings["httpHookAllowedEnvVars"][0],
             "SYNAPSE_BEARER_TOKEN"
+        );
+        // Gated spawns pre-approve the safe tools so they skip the gate (#927).
+        let allow = settings["permissions"]["allow"]
+            .as_array()
+            .expect("permissions.allow present when gating");
+        assert!(allow.iter().any(|rule| rule == "Read"));
+        assert!(allow.iter().any(|rule| rule == "Bash(git status:*)"));
+    }
+
+    #[test]
+    fn claude_hook_settings_omit_permissions_when_gate_disabled() {
+        let settings =
+            build_claude_hook_settings("agent-spawn-test", "http://127.0.0.1:7700/mcp", false)
+                .expect("settings build");
+        assert!(
+            settings.get("permissions").is_none(),
+            "ungated spawn (bypassPermissions) must not inject allow rules"
         );
     }
 

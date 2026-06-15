@@ -555,9 +555,7 @@ pub async fn update_local_model(
     };
 
     if params.api_key.is_some() && params.clear_api_key {
-        return Err(invalid(
-            "api_key and clear_api_key are mutually exclusive",
-        ));
+        return Err(invalid("api_key and clear_api_key are mutually exclusive"));
     }
     if params.api_key.is_some() && row.api_key_env_var.is_none() {
         return Err(invalid(
@@ -787,8 +785,8 @@ pub fn put_model_secret(
         )
     })?;
     let now = unix_time_ms_now();
-    let created_at_unix_ms = read_secret_row_optional(db, &row_key)?
-        .map_or(now, |existing| existing.created_at_unix_ms);
+    let created_at_unix_ms =
+        read_secret_row_optional(db, &row_key)?.map_or(now, |existing| existing.created_at_unix_ms);
     let row = LocalModelSecretRow {
         schema_version: SCHEMA_VERSION,
         row_key: row_key.clone(),
@@ -2013,7 +2011,10 @@ mod tests {
 
         assert!(!model_secret_present(&db, model)?, "no secret before store");
         put_model_secret(&db, model, plaintext, "session-fsv")?;
-        assert!(model_secret_present(&db, model)?, "secret present after store");
+        assert!(
+            model_secret_present(&db, model)?,
+            "secret present after store"
+        );
 
         // Inspect the physical stored bytes: plaintext must be absent.
         let row_key = secret_row_key(model)?;
@@ -2035,8 +2036,14 @@ mod tests {
 
         // Delete removes it.
         assert!(delete_model_secret(&db, model)?, "delete reports present");
-        assert!(!model_secret_present(&db, model)?, "secret gone after delete");
-        assert!(read_model_secret(&db, model)?.is_none(), "no key after delete");
+        assert!(
+            !model_secret_present(&db, model)?,
+            "secret gone after delete"
+        );
+        assert!(
+            read_model_secret(&db, model)?.is_none(),
+            "no key after delete"
+        );
         Ok(())
     }
 

@@ -12,10 +12,14 @@
 //! recorder control gate, never a parallel cache.
 
 use super::{ErrorData, Json, Parameters, SynapseService, tool, tool_router};
+use crate::m3::storage::{
+    StorageGcOnceParams, StorageGcOnceResponse, required_permissions_gc, run_storage_gc_once,
+};
 use crate::m3::timeline::{
-    RecorderStatus, TimelineGetParams, TimelineGetResponse, TimelineStatsParams,
-    TimelineStatsResponse, get_timeline, required_permissions_get, required_permissions_stats,
-    timeline_stats_data,
+    RecorderStatus, TimelineGetParams, TimelineGetResponse, TimelinePurgeParams,
+    TimelinePurgeResponse, TimelineStatsParams, TimelineStatsResponse, get_timeline,
+    purge_timeline, required_permissions_get, required_permissions_purge,
+    required_permissions_stats, timeline_stats_data,
 };
 use crate::m3::timeline_control::{
     TimelinePauseParams, TimelinePauseResponse, TimelineResumeParams, TimelineResumeResponse,
@@ -48,6 +52,36 @@ impl SynapseService {
     ) -> Result<TimelineResumeResponse, ErrorData> {
         self.require_m3_permissions("timeline_resume", &required_permissions_resume(&params))?;
         resume_timeline(&self.m3_state_handle(), &params, "dashboard")
+    }
+
+    /// Hard-deletes operator timeline rows from the dashboard storage manager.
+    ///
+    /// Reuses the exact [`purge_timeline`] tool logic (same filter machinery,
+    /// scan budget, hard-delete + range compaction, and counts-only audit row)
+    /// so the dashboard can never diverge from the `timeline_purge` MCP tool.
+    /// The audit row records `dashboard` as the actor.
+    pub(crate) fn dashboard_timeline_purge(
+        &self,
+        params: TimelinePurgeParams,
+    ) -> Result<TimelinePurgeResponse, ErrorData> {
+        self.require_m3_permissions("timeline_purge", &required_permissions_purge(&params))?;
+        let runtime = self.reflex_runtime()?;
+        purge_timeline(&runtime, &params, "dashboard")
+    }
+
+    /// Runs one row-cap storage GC pass from the dashboard storage manager.
+    ///
+    /// Reuses the [`run_storage_gc_once`] tool logic: when `before_rows >
+    /// soft_cap_rows` the oldest rows in the column family are evicted down to
+    /// `soft_cap_rows` (keep-newest-N), with the same `AUDIT_RETENTION` age mode
+    /// the MCP tool exposes. Returns exact before/after row counts.
+    pub(crate) fn dashboard_storage_gc(
+        &self,
+        params: StorageGcOnceParams,
+    ) -> Result<StorageGcOnceResponse, ErrorData> {
+        self.require_m3_permissions("storage_gc_once", &required_permissions_gc(&params))?;
+        let runtime = self.reflex_runtime()?;
+        run_storage_gc_once(&runtime, &params)
     }
 
     #[tool(

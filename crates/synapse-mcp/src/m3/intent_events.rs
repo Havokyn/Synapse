@@ -53,8 +53,8 @@
 //! intent). A misconfigured schedule is a startup error, not a silent default.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rmcp::{ErrorData, schemars::JsonSchema};
@@ -289,7 +289,9 @@ impl IntentTracker {
                         existing.phase = IntentPhase::Confirmed;
                     }
                     existing.label.clone_from(&candidate.label);
-                    existing.schedule_label.clone_from(&candidate.schedule_label);
+                    existing
+                        .schedule_label
+                        .clone_from(&candidate.schedule_label);
                     existing.lifecycle = candidate.lifecycle;
                     existing.confidence = candidate.confidence;
                     existing.matched_prefix_len = candidate.matched_prefix_len;
@@ -554,7 +556,9 @@ fn parse_min_confidence(value: Option<&str>, default: f64) -> anyhow::Result<f64
         return Ok(default);
     };
     let parsed = trimmed.parse::<f64>().map_err(|error| {
-        anyhow::anyhow!("{MIN_CONFIDENCE_ENV} must be a float in [0.0, 1.0]; got {trimmed:?}: {error}")
+        anyhow::anyhow!(
+            "{MIN_CONFIDENCE_ENV} must be a float in [0.0, 1.0]; got {trimmed:?}: {error}"
+        )
     })?;
     if !(0.0..=1.0).contains(&parsed) {
         anyhow::bail!("{MIN_CONFIDENCE_ENV} must be within [0.0, 1.0]; got {parsed}");
@@ -598,7 +602,10 @@ fn detect_config_from_env() -> anyhow::Result<IntentDetectConfig> {
             env_value(MIN_CONFIDENCE_ENV)?.as_deref(),
             DEFAULT_MIN_CONFIDENCE,
         )?,
-        lookback_hours: parse_lookback(env_value(LOOKBACK_ENV)?.as_deref(), DEFAULT_LOOKBACK_HOURS)?,
+        lookback_hours: parse_lookback(
+            env_value(LOOKBACK_ENV)?.as_deref(),
+            DEFAULT_LOOKBACK_HOURS,
+        )?,
         max_candidates: IntentDetectConfig::default().max_candidates,
     })
 }
@@ -739,7 +746,13 @@ mod tests {
             matched_prefix_len: matched,
             total_steps: total,
             matched_steps: Vec::new(),
-            remaining_steps: vec![RoutineStep { app: "x".to_owned(), document: None }; total - matched],
+            remaining_steps: vec![
+                RoutineStep {
+                    app: "x".to_owned(),
+                    document: None
+                };
+                total - matched
+            ],
             last_matched_end_ts_ns: 0,
             schedule: ScheduleContext {
                 dow_class: RoutineDowClass::Daily,
@@ -775,7 +788,10 @@ mod tests {
         let _ = tracker.reconcile(&[candidate("rt1-a", 1, 3, 0.8)]);
         // Same prefix depth next tick (confidence drift only): nothing fires.
         let out = tracker.reconcile(&[candidate("rt1-a", 1, 3, 0.7)]);
-        assert!(out.is_empty(), "an unchanged detection must not re-fire: {out:?}");
+        assert!(
+            out.is_empty(),
+            "an unchanged detection must not re-fire: {out:?}"
+        );
         assert_eq!(tracker.tracked_count(), 1);
     }
 
@@ -787,13 +803,21 @@ mod tests {
             vec![IntentTransitionKind::Detected]
         );
         // Deepens but not complete: no event.
-        assert!(tracker.reconcile(&[candidate("rt1-a", 2, 3, 0.8)]).is_empty());
+        assert!(
+            tracker
+                .reconcile(&[candidate("rt1-a", 2, 3, 0.8)])
+                .is_empty()
+        );
         // Completes: confirmed fires once.
         let confirmed = tracker.reconcile(&[candidate("rt1-a", 3, 3, 0.8)]);
         assert_eq!(kinds(&confirmed), vec![IntentTransitionKind::Confirmed]);
         assert_eq!(confirmed[0].reason, "all_steps_completed");
         // Staying complete does not re-confirm.
-        assert!(tracker.reconcile(&[candidate("rt1-a", 3, 3, 0.8)]).is_empty());
+        assert!(
+            tracker
+                .reconcile(&[candidate("rt1-a", 3, 3, 0.8)])
+                .is_empty()
+        );
     }
 
     #[test]
@@ -802,7 +826,10 @@ mod tests {
         let out = tracker.reconcile(&[candidate("rt1-a", 2, 2, 0.9)]);
         assert_eq!(
             kinds(&out),
-            vec![IntentTransitionKind::Detected, IntentTransitionKind::Confirmed]
+            vec![
+                IntentTransitionKind::Detected,
+                IntentTransitionKind::Confirmed
+            ]
         );
     }
 
@@ -855,7 +882,9 @@ mod tests {
             candidate("rt1-aaa", 1, 2, 0.7),
         ]);
         assert_eq!(
-            out.iter().map(|t| (t.kind, t.routine_id.as_str())).collect::<Vec<_>>(),
+            out.iter()
+                .map(|t| (t.kind, t.routine_id.as_str()))
+                .collect::<Vec<_>>(),
             vec![
                 (IntentTransitionKind::Detected, "rt1-bbb"),
                 (IntentTransitionKind::Detected, "rt1-aaa"),
@@ -874,9 +903,18 @@ mod tests {
         assert!((parse_min_confidence(Some("0"), 0.3).expect("floor edge") - 0.0).abs() < 1e-9);
         assert!((parse_min_confidence(Some("1"), 0.3).expect("ceil edge") - 1.0).abs() < 1e-9);
         // Out of range and non-numeric are loud errors, never a silent clamp.
-        assert!(parse_min_confidence(Some("1.5"), 0.3).is_err(), "above 1.0 must error");
-        assert!(parse_min_confidence(Some("-0.1"), 0.3).is_err(), "below 0.0 must error");
-        assert!(parse_min_confidence(Some("high"), 0.3).is_err(), "garbage must error");
+        assert!(
+            parse_min_confidence(Some("1.5"), 0.3).is_err(),
+            "above 1.0 must error"
+        );
+        assert!(
+            parse_min_confidence(Some("-0.1"), 0.3).is_err(),
+            "below 0.0 must error"
+        );
+        assert!(
+            parse_min_confidence(Some("high"), 0.3).is_err(),
+            "garbage must error"
+        );
     }
 
     #[test]
@@ -889,16 +927,34 @@ mod tests {
             parse_lookback(Some("168"), 6).expect("max edge"),
             super::super::intent::MAX_LOOKBACK_HOURS
         );
-        assert!(parse_lookback(Some("0"), 6).is_err(), "zero hours must error");
-        assert!(parse_lookback(Some("169"), 6).is_err(), "above max must error");
-        assert!(parse_lookback(Some("six"), 6).is_err(), "garbage must error");
+        assert!(
+            parse_lookback(Some("0"), 6).is_err(),
+            "zero hours must error"
+        );
+        assert!(
+            parse_lookback(Some("169"), 6).is_err(),
+            "above max must error"
+        );
+        assert!(
+            parse_lookback(Some("six"), 6).is_err(),
+            "garbage must error"
+        );
     }
 
     #[test]
     fn event_kinds_and_payload_are_stable() {
-        assert_eq!(IntentTransitionKind::Detected.event_kind(), "intent-detected");
-        assert_eq!(IntentTransitionKind::Confirmed.event_kind(), "intent-confirmed");
-        assert_eq!(IntentTransitionKind::Abandoned.event_kind(), "intent-abandoned");
+        assert_eq!(
+            IntentTransitionKind::Detected.event_kind(),
+            "intent-detected"
+        );
+        assert_eq!(
+            IntentTransitionKind::Confirmed.event_kind(),
+            "intent-confirmed"
+        );
+        assert_eq!(
+            IntentTransitionKind::Abandoned.event_kind(),
+            "intent-abandoned"
+        );
         let event = transition_event(&detected_transition(&candidate("rt1-a", 1, 2, 0.5)));
         assert_eq!(event.kind, "intent-detected");
         assert_eq!(event.source, EventSource::System);

@@ -180,6 +180,7 @@ mod audit_context;
 pub(crate) mod command_audit;
 mod context;
 pub(crate) use context::AgentTranscriptSnapshotRow;
+mod data_cleaning;
 pub(crate) mod drain;
 pub(crate) mod escalation;
 mod everquest_autocombat;
@@ -201,7 +202,6 @@ mod everquest_trajectory;
 mod everquest_ui_context;
 mod everquest_world_model;
 mod everquest_world_summary;
-mod data_cleaning;
 mod handler;
 mod health;
 mod hygiene_report;
@@ -212,6 +212,8 @@ mod m2_tools;
 mod m3_tools;
 pub(crate) mod m4_tools;
 mod notify_tools;
+mod permission_gate;
+mod permission_policy;
 mod reality;
 mod schema_sanitize;
 pub(crate) mod session_continuity;
@@ -574,6 +576,7 @@ impl SynapseService {
             + Self::notify_tool_router()
             + Self::hygiene_report_tool_router()
             + Self::data_cleaning_tool_router()
+            + Self::permission_gate_tool_router()
             + Self::escalation_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface
         // unless the operator opts in (SYNAPSE_ENABLE_EVERQUEST). No capability

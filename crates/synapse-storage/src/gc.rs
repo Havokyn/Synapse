@@ -1,4 +1,4 @@
-use std::{cmp, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use rocksdb::{ColumnFamilyRef, DB, IteratorMode};
 use synapse_core::{error_codes, retention::DEFAULTS};
@@ -240,14 +240,20 @@ fn evict_oldest(
 }
 
 fn remove_count(budget: GcBudget, key_count: usize, before_value: u64) -> usize {
-    let quarter = key_count.div_ceil(4);
-    let needed = match budget.unit {
+    match budget.unit {
+        // Explicit row cap (storage_gc_once / dashboard "cap at N"): evict exactly
+        // the overage so the column family lands precisely at `soft_cap`. This is
+        // an operator-driven, one-shot action — there is no minimum batch, so
+        // capping a 140-row store at 136 removes 4 rows, not a forced quarter.
         CapUnit::Rows => {
             usize::try_from(before_value.saturating_sub(budget.soft_cap)).unwrap_or(usize::MAX)
         }
-        CapUnit::Bytes => quarter,
-    };
-    cmp::max(quarter, needed).min(key_count)
+        // Byte/disk-pressure GC cannot map a byte overage onto an exact row count,
+        // so it evicts a 25%-of-store batch per pass to amortize compaction across
+        // the periodic ticks rather than thrash on every run.
+        CapUnit::Bytes => key_count.div_ceil(4),
+    }
+    .min(key_count)
 }
 
 fn measured_value(

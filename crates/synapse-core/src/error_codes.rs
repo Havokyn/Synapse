@@ -166,6 +166,10 @@ pub const MODEL_HASH_MISMATCH: &str = "MODEL_HASH_MISMATCH";
 pub const MODEL_LOAD_FAILED: &str = "MODEL_LOAD_FAILED";
 pub const MODEL_BACKEND_UNAVAILABLE: &str = "MODEL_BACKEND_UNAVAILABLE";
 pub const MODEL_TOOLS_UNSUPPORTED: &str = "MODEL_TOOLS_UNSUPPORTED";
+/// A local-model turn produced neither a tool call nor any message content: a
+/// genuinely degenerate completion. A plain text answer (no tool call but with
+/// content) is a legitimate completion and is NOT this error.
+pub const MODEL_EMPTY_COMPLETION: &str = "MODEL_EMPTY_COMPLETION";
 pub const MODEL_ENDPOINT_UNREACHABLE: &str = "MODEL_ENDPOINT_UNREACHABLE";
 pub const MODEL_REGISTRY_NOT_FOUND: &str = "MODEL_REGISTRY_NOT_FOUND";
 pub const MODEL_REGISTRY_CONFLICT: &str = "MODEL_REGISTRY_CONFLICT";

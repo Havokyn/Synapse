@@ -1218,6 +1218,7 @@ impl SynapseService {
             mcp_url: params.mcp_url,
             wait_timeout_ms: params.wait_timeout_ms,
             hold_open_ms: default_agent_spawn_hold_open_ms(),
+            require_approval_gate: crate::m4::default_require_approval_gate(),
         };
 
         tracing::info!(
