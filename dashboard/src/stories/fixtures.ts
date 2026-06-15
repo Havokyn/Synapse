@@ -31,17 +31,11 @@ export function dashboardFixture(kind: "populated" | "empty" = "populated"): Das
     schema_version: 1,
     generated_at_unix_ms: baseTime,
     bind_addr: "127.0.0.1:7700",
-    token_policy: "httpOnly",
-    auth: panel("CF_KV dashboard-auth/v1", {
-      source_of_truth: "CF_KV dashboard-auth/v1",
-      session_row_count: 1,
-      active_session_count: 1,
-      revoked_session_count: 0,
-      expired_session_count: 0,
-      failure_count: 0,
-      corrupt_session_rows: 0,
-      corrupt_failure_rows: 0,
-      recent_failures: []
+    token_policy: "dashboard responses never include bearer tokens",
+    auth: panel("local-only trust model (loopback bind + Host guard; no app-layer auth)", {
+      mode: "local_only",
+      authenticated: true,
+      source: "loopback bind + Host header guard"
     }),
     daemon: panel("health", {
       version: "0.1.0",

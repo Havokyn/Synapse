@@ -35,7 +35,6 @@ use crate::{
     http::sse::{self, SseState},
     http::{
         auth::{self, HttpAuth},
-        dashboard_auth::{self, CsrfPolicy, DashboardAuth},
     },
     m2::M2ServiceConfig,
     m3::M3ServiceConfig,
@@ -60,7 +59,6 @@ struct HttpState {
     shutdown_cancel: CancellationToken,
     drain_state: crate::server::drain::DaemonDrainState,
     sse_state: SseState,
-    dashboard_auth: DashboardAuth,
     /// Journal handle for the push-telemetry ingress (#899); the same DB the
     /// MCP session store writes through.
     agent_events_db: Arc<Db>,
@@ -450,8 +448,6 @@ fn router(
         session_lifecycle.clone(),
         shutdown_cancel.child_token(),
     );
-    let dashboard_auth =
-        DashboardAuth::new(Arc::clone(&agent_events_db), Arc::clone(&auth), bind_addr);
     let state = HttpState {
         bind_addr,
         health_service,
@@ -459,7 +455,6 @@ fn router(
         shutdown_cancel: shutdown_cancel.clone(),
         drain_state: drain_state.clone(),
         sse_state,
-        dashboard_auth,
         agent_events_db,
     };
     let protected_routes = Router::new()
@@ -510,10 +505,6 @@ fn router(
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard_index))
         .route("/dashboard/assets/{asset}", get(dashboard_asset))
-        .route("/dashboard/auth/status", get(dashboard_auth_status))
-        .route("/dashboard/auth/login", post(dashboard_auth_login))
-        .route("/dashboard/auth/logout", post(dashboard_auth_logout))
-        .route("/dashboard/auth/failures", get(dashboard_auth_failures))
         .route("/dashboard/state.json", get(dashboard_state))
         .route("/dashboard/audit/query", get(dashboard_audit_query))
         .route(
@@ -1502,41 +1493,6 @@ struct DashboardCdpAttachmentSurface {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DashboardLoginRequest {
-    credential: String,
-}
-
-#[derive(Serialize)]
-struct DashboardAuthStatusResponse {
-    ok: bool,
-    authenticated: bool,
-    method: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    csrf_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_unix_ms: Option<u64>,
-    source_of_truth: &'static str,
-}
-
-#[derive(Serialize)]
-struct DashboardAuthLoginResponse {
-    ok: bool,
-    authenticated: bool,
-    method: &'static str,
-    csrf_token: String,
-    expires_unix_ms: u64,
-    source_of_truth: &'static str,
-}
-
-#[derive(Serialize)]
-struct DashboardAuthLogoutResponse {
-    ok: bool,
-    revoked_row_key: Option<String>,
-    source_of_truth: &'static str,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DashboardTimelinePauseRequest {
     #[serde(default)]
     duration_ms: Option<u64>,
@@ -1961,109 +1917,9 @@ async fn dashboard_asset(
     }
 }
 
-async fn dashboard_auth_status(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    match state
-        .dashboard_auth
-        .status(&headers, "GET", "/dashboard/auth/status")
-    {
-        Ok(status) => with_dashboard_security_headers(
-            Json(DashboardAuthStatusResponse {
-                ok: true,
-                authenticated: status.authenticated,
-                method: dashboard_auth_method_label(&status.method),
-                csrf_token: status.csrf_token,
-                expires_unix_ms: status.expires_unix_ms,
-                source_of_truth: "CF_KV dashboard-auth/v1",
-            })
-            .into_response(),
-        ),
-        Err(response) => with_dashboard_security_headers(response),
-    }
-}
-
-async fn dashboard_auth_login(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    Json(request): Json<DashboardLoginRequest>,
-) -> Response {
-    match state.dashboard_auth.login(
-        &headers,
-        "POST",
-        "/dashboard/auth/login",
-        &request.credential,
-    ) {
-        Ok(login) => {
-            let max_age_ms = login
-                .expires_unix_ms
-                .saturating_sub(dashboard_unix_time_ms());
-            let cookie = match dashboard_auth::session_cookie_header(
-                &login.session_cookie_value,
-                max_age_ms,
-            ) {
-                Ok(cookie) => cookie,
-                Err(response) => return with_dashboard_security_headers(response),
-            };
-            let mut response = with_dashboard_security_headers(
-                Json(DashboardAuthLoginResponse {
-                    ok: true,
-                    authenticated: true,
-                    method: "cookie",
-                    csrf_token: login.csrf_token,
-                    expires_unix_ms: login.expires_unix_ms,
-                    source_of_truth: "CF_KV dashboard-auth/v1",
-                })
-                .into_response(),
-            );
-            response.headers_mut().insert(header::SET_COOKIE, cookie);
-            response
-        }
-        Err(response) => with_dashboard_security_headers(response),
-    }
-}
-
-async fn dashboard_auth_logout(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    match state
-        .dashboard_auth
-        .logout(&headers, "POST", "/dashboard/auth/logout")
-    {
-        Ok(logout) => {
-            let mut response = with_dashboard_security_headers(
-                Json(DashboardAuthLogoutResponse {
-                    ok: true,
-                    revoked_row_key: logout.revoked_row_key,
-                    source_of_truth: "CF_KV dashboard-auth/v1",
-                })
-                .into_response(),
-            );
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                dashboard_auth::clear_session_cookie_header(),
-            );
-            response
-        }
-        Err(response) => with_dashboard_security_headers(response),
-    }
-}
-
-async fn dashboard_auth_failures(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/auth/failures",
-        CsrfPolicy::NotRequired,
-    ) {
-        return with_dashboard_security_headers(response);
-    }
-    with_dashboard_security_headers(Json(state.dashboard_auth.snapshot()).into_response())
-}
 
 async fn dashboard_saved_views(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/saved-views",
-        CsrfPolicy::NotRequired,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match dashboard_saved_view_rows(&state.agent_events_db) {
@@ -2085,12 +1941,7 @@ async fn dashboard_saved_view_upsert(
     headers: HeaderMap,
     Json(request): Json<DashboardSavedViewUpsertRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/saved-views",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match dashboard_save_view_row(&state.agent_events_db, request) {
@@ -2113,12 +1964,7 @@ async fn dashboard_saved_view_delete(
     headers: HeaderMap,
     Path(view_id): Path<String>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "DELETE",
-        "/dashboard/saved-views/{view_id}",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let view_id = match dashboard_validate_saved_view_id(&view_id) {
@@ -2147,12 +1993,7 @@ async fn dashboard_saved_view_delete(
 }
 
 async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/state.json",
-        CsrfPolicy::NotRequired,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let active_sessions = state.session_manager.sessions.read().await.len();
@@ -2209,7 +2050,14 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
                 css_file: DASHBOARD_CSS_FILE,
             },
         ),
-        auth: DashboardPanel::ok("CF_KV dashboard-auth/v1", state.dashboard_auth.snapshot()),
+        auth: DashboardPanel::ok(
+            "local-only trust model (loopback bind + Host guard; no app-layer auth)",
+            serde_json::json!({
+                "mode": "local_only",
+                "authenticated": true,
+                "source": "loopback bind + Host header guard",
+            }),
+        ),
         daemon: DashboardPanel::ok("health", &health),
         sessions,
         lease,
@@ -2244,12 +2092,7 @@ async fn dashboard_audit_query(
     headers: HeaderMap,
     Query(request): Query<DashboardAuditQueryRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/audit/query",
-        CsrfPolicy::NotRequired,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = crate::server::command_audit::CommandAuditQueryParams {
@@ -2538,12 +2381,7 @@ async fn dashboard_local_model_spawn(
     headers: HeaderMap,
     Json(request): Json<DashboardLocalModelSpawnRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/local-model-spawn",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let mut params = match dashboard_local_model_spawn_params(request) {
@@ -2582,12 +2420,7 @@ async fn dashboard_spawn_agent(
     headers: HeaderMap,
     Json(request): Json<DashboardSpawnAgentRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/spawn-agent",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let (fan_out, mut spawn_request) = match dashboard_spawn_agent_request_params(request) {
@@ -2648,12 +2481,7 @@ async fn dashboard_approval_decide(
     headers: HeaderMap,
     Json(request): Json<DashboardApprovalDecideRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/approval/decide",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let approval_id = request.approval_id.trim();
@@ -2715,12 +2543,7 @@ async fn dashboard_agent_kill(
     headers: HeaderMap,
     Json(request): Json<DashboardAgentKillRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/agent-kill",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = match dashboard_agent_kill_params(request) {
@@ -2756,12 +2579,7 @@ async fn dashboard_timeline_pause(
     headers: HeaderMap,
     Json(request): Json<DashboardTimelinePauseRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/timeline/pause",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = crate::m3::timeline_control::TimelinePauseParams {
@@ -2787,12 +2605,7 @@ async fn dashboard_timeline_pause(
 }
 
 async fn dashboard_timeline_resume(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/timeline/resume",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match state
@@ -2843,12 +2656,7 @@ async fn dashboard_storage_timeline_purge(
     headers: HeaderMap,
     Json(request): Json<DashboardTimelinePurgeRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/storage/timeline-purge",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let start_ts_ns = match parse_optional_ns(request.start_ts_ns.as_deref(), "start_ts_ns") {
@@ -2895,12 +2703,7 @@ async fn dashboard_storage_gc(
     headers: HeaderMap,
     Json(request): Json<DashboardStorageGcRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/storage/gc",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = crate::m3::storage::StorageGcOnceParams {
@@ -2937,12 +2740,7 @@ async fn dashboard_control_lease_force_release(
     headers: HeaderMap,
     Json(request): Json<DashboardControlLeaseForceReleaseRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/control-lease/force-release",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let (owner_session_id, confirmed) = match dashboard_control_lease_force_release_params(request)
@@ -2978,12 +2776,7 @@ async fn dashboard_control_lease_handoff(
     headers: HeaderMap,
     Json(request): Json<DashboardControlLeaseHandoffRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/control-lease/handoff",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let (from_session_id, to_session_id, ttl_ms) =
@@ -3018,12 +2811,7 @@ async fn dashboard_target_claims_prune(
     State(state): State<HttpState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/target-claims/prune",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match state.health_service.dashboard_target_claim_prune() {
@@ -3046,12 +2834,7 @@ async fn dashboard_target_claims_prune(
 }
 
 async fn dashboard_template_list(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/templates",
-        CsrfPolicy::NotRequired,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match state.health_service.dashboard_list_agent_templates() {
@@ -3253,12 +3036,7 @@ async fn dashboard_api_model_register(
     headers: HeaderMap,
     Json(request): Json<DashboardApiModelRegisterRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/api-model/register",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = match dashboard_api_model_register_params(request) {
@@ -3293,12 +3071,7 @@ async fn dashboard_api_model_update(
     headers: HeaderMap,
     Json(params): Json<crate::m3::local_models::LocalModelUpdateParams>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/api-model/update",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match state
@@ -3329,12 +3102,7 @@ async fn dashboard_api_model_remove(
     headers: HeaderMap,
     Json(request): Json<DashboardModelRemoveRequest>,
 ) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "POST",
-        "/dashboard/api-model/remove",
-        CsrfPolicy::Required,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     let params = crate::m3::local_models::LocalModelRemoveParams { name: request.name };
@@ -3358,12 +3126,7 @@ async fn dashboard_api_model_remove(
 }
 
 async fn dashboard_model_list(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = state.dashboard_auth.authenticate(
-        &headers,
-        "GET",
-        "/dashboard/models",
-        CsrfPolicy::NotRequired,
-    ) {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
     match state.health_service.dashboard_list_local_models() {
@@ -3435,12 +3198,6 @@ fn trim_optional_non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-fn dashboard_auth_method_label(method: &dashboard_auth::DashboardAuthMethod) -> &'static str {
-    match method {
-        dashboard_auth::DashboardAuthMethod::Bearer => "bearer",
-        dashboard_auth::DashboardAuthMethod::Cookie => "cookie",
-    }
-}
 
 fn dashboard_error_response(
     status: StatusCode,
@@ -3801,12 +3558,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-DGTECjYz.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-B67Ki1g-.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-CxFc5IQw.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-NIwAXe2m.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-DGTECjYz.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-B67Ki1g-.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-CxFc5IQw.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-NIwAXe2m.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
