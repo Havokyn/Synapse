@@ -6,7 +6,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 78] = [
+const EXPECTED_MATRIX_TOOLS: [&str; 79] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -47,6 +47,7 @@ const EXPECTED_MATRIX_TOOLS: [&str; 78] = [
     "audio_tail",
     "audio_transcribe",
     "capture_screenshot",
+    "cdp_bridge_reload",
     "cdp_close_tab",
     "cdp_navigate_tab",
     "cdp_open_tab",

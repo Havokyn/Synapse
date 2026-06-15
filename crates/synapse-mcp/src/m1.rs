@@ -670,6 +670,78 @@ pub struct CdpTargetInfoResponse {
     pub active_element: Option<CdpActiveElementInfo>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpBridgeReloadParams {
+    /// Optional reconnect wait budget. Defaults to 10000 ms and is capped at
+    /// 30000 ms. The tool returns only after a separate bridge host readback
+    /// observes a new extension registration.
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpBridgeHostReadback {
+    pub host_id: String,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_protocol_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_build_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_build_sha256: Option<String>,
+    pub extension_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_user_agent: Option<String>,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    pub registered_unix_ms: u64,
+    pub last_seen_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_disconnect_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_detach_reason: Option<String>,
+    pub extension_stale: bool,
+    pub extension_stale_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpBridgeReloadAckReadback {
+    pub ok: bool,
+    pub extension_id: String,
+    pub version: String,
+    pub protocol_version: u32,
+    pub build_id: String,
+    pub build_sha256: String,
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    pub reload_requested_at_unix_ms: u64,
+    pub reload_delay_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpBridgeReloadResponse {
+    pub session_id: String,
+    pub required_foreground: bool,
+    pub wait_timeout_ms: u64,
+    pub before: CdpBridgeHostReadback,
+    pub command_ack: CdpBridgeReloadAckReadback,
+    pub after: CdpBridgeHostReadback,
+    pub reconnected: bool,
+    pub waited_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CdpActiveElementInfo {

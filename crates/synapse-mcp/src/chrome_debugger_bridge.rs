@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     ffi::OsString,
     path::PathBuf,
     process::ExitCode,
@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, bail};
@@ -29,7 +29,7 @@ use synapse_core::{AccessibleNode, CdpCapability, CdpStatus, Rect, SubsystemHeal
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Notify, RwLock, oneshot},
-    time::timeout,
+    time::{sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -38,9 +38,24 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-15-1011-reload-self-v1";
+const EXPECTED_EXTENSION_BUILD_SHA256: &str =
+    "462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7";
+const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
+    "closeTab",
+    "navigateTab",
+    "openTab",
+    "reloadSelf",
+    "targetInfo",
+];
+const LEGACY_DIRECT_HTTP_CAPABILITIES: &[&str] =
+    &["closeTab", "navigateTab", "openTab", "targetInfo"];
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const NATIVE_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 const DIRECT_WS_COMMAND_WAIT: Duration = Duration::from_secs(25);
+const DEFAULT_RELOAD_WAIT_TIMEOUT_MS: u64 = 10_000;
+const MAX_RELOAD_WAIT_TIMEOUT_MS: u64 = 30_000;
+const RELOAD_RECONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
@@ -95,7 +110,9 @@ impl ChromeDebuggerBridgeError {
 
     #[must_use]
     pub(crate) fn cdp_status(&self) -> CdpStatus {
-        if self.code == error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE {
+        if self.code == error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE
+            || self.code == error_codes::CHROME_BRIDGE_EXTENSION_STALE
+        {
             CdpStatus::ExtensionUnavailable
         } else {
             CdpStatus::AttachFailed
@@ -142,6 +159,9 @@ impl ChromeDebuggerBridgeError {
             Some(error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED) => {
                 error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
             }
+            Some(error_codes::CHROME_BRIDGE_EXTENSION_STALE) => {
+                error_codes::CHROME_BRIDGE_EXTENSION_STALE
+            }
             Some(error_codes::A11Y_CDP_AXTREE_FAILED) => error_codes::A11Y_CDP_AXTREE_FAILED,
             Some(error_codes::A11Y_CDP_ATTACH_FAILED) => error_codes::A11Y_CDP_ATTACH_FAILED,
             _ => error_codes::A11Y_CDP_ATTACH_FAILED,
@@ -149,6 +169,28 @@ impl ChromeDebuggerBridgeError {
         Self {
             code,
             detail: detail.into(),
+        }
+    }
+
+    fn stale(command_kind: &str, host_id: &str, host: &HostRecord, reason: &str) -> Self {
+        Self {
+            code: error_codes::CHROME_BRIDGE_EXTENSION_STALE,
+            detail: format!(
+                "Chrome bridge extension is stale for command {command_kind:?}; host_id={host_id} reason={reason} extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} extension_build_sha256={} capabilities={} expected_build_id={} expected_build_sha256={} required_capabilities={} remediation=update extensions\\synapse-chrome-debugger on disk, then call cdp_bridge_reload from a bridge that advertises reloadSelf; if the loaded worker predates reloadSelf, fail closed and wait for a Chrome restart/reload rather than using foreground chrome://extensions automation",
+                host.extension_id.as_deref().unwrap_or("not_seen_yet"),
+                host.extension_version.as_deref().unwrap_or("not_seen_yet"),
+                host.extension_protocol_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "not_seen_yet".to_owned()),
+                host.extension_build_id.as_deref().unwrap_or("not_seen_yet"),
+                host.extension_build_sha256
+                    .as_deref()
+                    .unwrap_or("not_seen_yet"),
+                format_capabilities(&host.extension_capabilities),
+                EXPECTED_EXTENSION_BUILD_ID,
+                EXPECTED_EXTENSION_BUILD_SHA256,
+                REQUIRED_DIRECT_HTTP_CAPABILITIES.join(",")
+            ),
         }
     }
 
@@ -578,6 +620,56 @@ pub(crate) struct ChromeDebuggerNavigateResult {
     pub extension_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeBridgeReloadCommandAck {
+    pub ok: bool,
+    #[serde(rename = "extensionId")]
+    pub extension_id: String,
+    pub version: String,
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: u32,
+    #[serde(rename = "buildId")]
+    pub build_id: String,
+    #[serde(rename = "buildSha256")]
+    pub build_sha256: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub host_id: Option<String>,
+    pub reload_requested_at_unix_ms: u64,
+    pub reload_delay_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeBridgeHostSnapshot {
+    pub host_id: String,
+    pub origin: String,
+    pub extension_id: Option<String>,
+    pub extension_version: Option<String>,
+    pub extension_protocol_version: Option<u32>,
+    pub extension_build_id: Option<String>,
+    pub extension_build_sha256: Option<String>,
+    pub extension_capabilities: Vec<String>,
+    pub extension_user_agent: Option<String>,
+    pub pid: u32,
+    pub parent_window: Option<String>,
+    pub transport: Option<String>,
+    pub registered_unix_ms: u64,
+    pub last_seen_unix_ms: u64,
+    pub last_disconnect_detail: Option<String>,
+    pub last_detach_reason: Option<String>,
+    pub extension_stale: bool,
+    pub extension_stale_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeBridgeReloadResult {
+    pub before: ChromeBridgeHostSnapshot,
+    pub command_ack: ChromeBridgeReloadCommandAck,
+    pub after: ChromeBridgeHostSnapshot,
+    pub reconnected: bool,
+    pub waited_ms: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtensionSnapshotResponse {
     nodes: Vec<ExtensionDomNode>,
@@ -719,6 +811,12 @@ struct PendingResponse {
 struct HostRecord {
     origin: String,
     extension_id: Option<String>,
+    extension_version: Option<String>,
+    extension_protocol_version: Option<u32>,
+    extension_build_id: Option<String>,
+    extension_build_sha256: Option<String>,
+    extension_capabilities: BTreeSet<String>,
+    extension_user_agent: Option<String>,
     pid: u32,
     parent_window: Option<String>,
     transport: Option<String>,
@@ -734,6 +832,12 @@ struct ChromeBridgeHealthRecord {
     host_id: String,
     origin: String,
     extension_id: Option<String>,
+    extension_version: Option<String>,
+    extension_protocol_version: Option<u32>,
+    extension_build_id: Option<String>,
+    extension_build_sha256: Option<String>,
+    extension_capabilities: BTreeSet<String>,
+    extension_user_agent: Option<String>,
     pid: u32,
     parent_window: Option<String>,
     transport: Option<String>,
@@ -791,6 +895,146 @@ fn emit_browser_navigation_event(event: ChromeDebuggerBrowserNavigationEvent) {
     }
 }
 
+fn string_set_field(value: &Value, field: &str) -> BTreeSet<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn format_capabilities(capabilities: &BTreeSet<String>) -> String {
+    if capabilities.is_empty() {
+        "<none>".to_owned()
+    } else {
+        capabilities
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn bridge_missing_required_capabilities(capabilities: &BTreeSet<String>) -> Vec<String> {
+    REQUIRED_DIRECT_HTTP_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|capability| !capabilities.contains(*capability))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn legacy_direct_http_capability(kind: &str) -> bool {
+    LEGACY_DIRECT_HTTP_CAPABILITIES.contains(&kind)
+}
+
+fn bridge_command_stale_reason(host: &HostRecord, kind: &str) -> Option<String> {
+    if host.transport.as_deref() != Some("direct_http") {
+        return None;
+    }
+    if host.extension_id.as_deref() != Some(EXTENSION_ID) {
+        return Some(format!(
+            "extension_id_mismatch actual={} expected={EXTENSION_ID}",
+            host.extension_id.as_deref().unwrap_or("not_seen_yet")
+        ));
+    }
+    if host.extension_capabilities.is_empty() {
+        if legacy_direct_http_capability(kind) {
+            return None;
+        }
+        return Some(format!(
+            "capabilities_not_advertised command={kind} legacy_supported={}",
+            LEGACY_DIRECT_HTTP_CAPABILITIES.join(",")
+        ));
+    }
+    if !host.extension_capabilities.contains(kind) {
+        return Some(format!(
+            "missing_capability={kind} loaded_capabilities={}",
+            format_capabilities(&host.extension_capabilities)
+        ));
+    }
+    None
+}
+
+fn bridge_identity_stale_reasons(host: &ChromeBridgeHealthRecord) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if host.extension_id.as_deref() != Some(EXTENSION_ID) {
+        reasons.push(format!(
+            "extension_id={} expected={EXTENSION_ID}",
+            host.extension_id.as_deref().unwrap_or("not_seen_yet")
+        ));
+    }
+    if host.extension_build_id.as_deref() != Some(EXPECTED_EXTENSION_BUILD_ID) {
+        reasons.push(format!(
+            "build_id={} expected={EXPECTED_EXTENSION_BUILD_ID}",
+            host.extension_build_id.as_deref().unwrap_or("not_seen_yet")
+        ));
+    }
+    if host.extension_build_sha256.as_deref() != Some(EXPECTED_EXTENSION_BUILD_SHA256) {
+        reasons.push(format!(
+            "build_sha256={} expected={EXPECTED_EXTENSION_BUILD_SHA256}",
+            host.extension_build_sha256
+                .as_deref()
+                .unwrap_or("not_seen_yet")
+        ));
+    }
+    let missing = bridge_missing_required_capabilities(&host.extension_capabilities);
+    if !missing.is_empty() {
+        reasons.push(format!("missing_capabilities={}", missing.join(",")));
+    }
+    reasons
+}
+
+fn host_record_to_health_record(host_id: &str, host: &HostRecord) -> ChromeBridgeHealthRecord {
+    ChromeBridgeHealthRecord {
+        host_id: host_id.to_owned(),
+        origin: host.origin.clone(),
+        extension_id: host.extension_id.clone(),
+        extension_version: host.extension_version.clone(),
+        extension_protocol_version: host.extension_protocol_version,
+        extension_build_id: host.extension_build_id.clone(),
+        extension_build_sha256: host.extension_build_sha256.clone(),
+        extension_capabilities: host.extension_capabilities.clone(),
+        extension_user_agent: host.extension_user_agent.clone(),
+        pid: host.pid,
+        parent_window: host.parent_window.clone(),
+        transport: host.transport.clone(),
+        registered_unix_ms: host.registered_unix_ms,
+        last_seen_unix_ms: host.last_seen_unix_ms,
+        last_disconnect_detail: host.last_disconnect_detail.clone(),
+        last_detach_reason: host.last_detach_reason.clone(),
+    }
+}
+
+fn health_record_to_host_snapshot(host: &ChromeBridgeHealthRecord) -> ChromeBridgeHostSnapshot {
+    let stale_reasons = bridge_identity_stale_reasons(host);
+    ChromeBridgeHostSnapshot {
+        host_id: host.host_id.clone(),
+        origin: host.origin.clone(),
+        extension_id: host.extension_id.clone(),
+        extension_version: host.extension_version.clone(),
+        extension_protocol_version: host.extension_protocol_version,
+        extension_build_id: host.extension_build_id.clone(),
+        extension_build_sha256: host.extension_build_sha256.clone(),
+        extension_capabilities: host.extension_capabilities.iter().cloned().collect(),
+        extension_user_agent: host.extension_user_agent.clone(),
+        pid: host.pid,
+        parent_window: host.parent_window.clone(),
+        transport: host.transport.clone(),
+        registered_unix_ms: host.registered_unix_ms,
+        last_seen_unix_ms: host.last_seen_unix_ms,
+        last_disconnect_detail: host.last_disconnect_detail.clone(),
+        last_detach_reason: host.last_detach_reason.clone(),
+        extension_stale: !stale_reasons.is_empty(),
+        extension_stale_reasons: stale_reasons,
+    }
+}
+
 impl ChromeDebuggerBridge {
     fn register(&self, request: NativeRegisterRequest) -> Result<NativeRegisterResponse, String> {
         if request.bridge_protocol_version != BRIDGE_PROTOCOL_VERSION {
@@ -811,6 +1055,12 @@ impl ChromeDebuggerBridge {
         let record = HostRecord {
             origin: request.origin,
             extension_id: None,
+            extension_version: None,
+            extension_protocol_version: None,
+            extension_build_id: None,
+            extension_build_sha256: None,
+            extension_capabilities: BTreeSet::new(),
+            extension_user_agent: None,
             pid: request.pid,
             parent_window: request.parent_window,
             transport: request.transport,
@@ -877,11 +1127,42 @@ impl ChromeDebuggerBridge {
                     .get("extensionId")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
+                host.extension_version = request
+                    .message
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                host.extension_protocol_version = request
+                    .message
+                    .get("protocolVersion")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok());
+                host.extension_build_id = request
+                    .message
+                    .get("buildId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                host.extension_build_sha256 = request
+                    .message
+                    .get("buildSha256")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                host.extension_user_agent = request
+                    .message
+                    .get("userAgent")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                host.extension_capabilities = string_set_field(&request.message, "capabilities");
                 tracing::info!(
                     code = "CHROME_DEBUGGER_EXTENSION_HELLO",
                     host_id = %request.host_id,
                     origin = %host.origin,
                     extension_id = host.extension_id.as_deref().unwrap_or_default(),
+                    extension_version = host.extension_version.as_deref().unwrap_or_default(),
+                    extension_protocol_version = host.extension_protocol_version.unwrap_or_default(),
+                    extension_build_id = host.extension_build_id.as_deref().unwrap_or_default(),
+                    extension_build_sha256 = host.extension_build_sha256.as_deref().unwrap_or_default(),
+                    capabilities = %format_capabilities(&host.extension_capabilities),
                     pid = host.pid,
                     parent_window = host.parent_window.as_deref().unwrap_or_default(),
                     transport = host.transport.as_deref().unwrap_or("native_messaging"),
@@ -1057,6 +1338,80 @@ impl ChromeDebuggerBridge {
         Ok(())
     }
 
+    fn active_host_snapshot(&self) -> Result<ChromeBridgeHostSnapshot, ChromeDebuggerBridgeError> {
+        let inner = self.inner.lock().map_err(|_| {
+            ChromeDebuggerBridgeError::protocol(
+                "chrome debugger bridge lock poisoned during host snapshot",
+            )
+        })?;
+        let Some(host_id) = inner.active_host_id.as_deref() else {
+            return Err(ChromeDebuggerBridgeError::unavailable());
+        };
+        let Some(host) = inner.hosts.get(host_id) else {
+            return Err(ChromeDebuggerBridgeError::unavailable());
+        };
+        Ok(health_record_to_host_snapshot(
+            &host_record_to_health_record(host_id, host),
+        ))
+    }
+
+    async fn reload_self(
+        &self,
+        wait_timeout_ms: u64,
+    ) -> Result<ChromeBridgeReloadResult, ChromeDebuggerBridgeError> {
+        let wait_timeout = Duration::from_millis(wait_timeout_ms);
+        let before = self.active_host_snapshot()?;
+        let ack = self
+            .send_command(
+                "reloadSelf",
+                json!({
+                    "expectedExtensionId": EXTENSION_ID,
+                    "expectedBuildId": EXPECTED_EXTENSION_BUILD_ID,
+                    "reloadDelayMs": 100u64,
+                }),
+            )
+            .await
+            .and_then(|result| {
+                serde_json::from_value::<ChromeBridgeReloadCommandAck>(result).map_err(|error| {
+                    ChromeDebuggerBridgeError::protocol(format!(
+                        "decode Chrome bridge reloadSelf acknowledgement: {error}"
+                    ))
+                })
+            })?;
+        let started = Instant::now();
+        loop {
+            if started.elapsed() >= wait_timeout {
+                return Err(ChromeDebuggerBridgeError::timeout("reloadSelf"));
+            }
+            if let Ok(after) = self.active_host_snapshot()
+                && after.host_id != before.host_id
+                && after.extension_id.as_deref() == Some(EXTENSION_ID)
+                && after.last_disconnect_detail.is_none()
+            {
+                let waited_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if after.extension_stale {
+                    return Err(ChromeDebuggerBridgeError {
+                        code: error_codes::CHROME_BRIDGE_EXTENSION_STALE,
+                        detail: format!(
+                            "Chrome bridge reconnected after reloadSelf but loaded extension is still stale; before_host_id={} after_host_id={} stale_reasons={} waited_ms={waited_ms}",
+                            before.host_id,
+                            after.host_id,
+                            after.extension_stale_reasons.join("|")
+                        ),
+                    });
+                }
+                return Ok(ChromeBridgeReloadResult {
+                    before,
+                    command_ack: ack,
+                    after,
+                    reconnected: true,
+                    waited_ms,
+                });
+            }
+            sleep(RELOAD_RECONNECT_POLL_INTERVAL).await;
+        }
+    }
+
     async fn next_command(
         &self,
         host_id: &str,
@@ -1136,10 +1491,24 @@ impl ChromeDebuggerBridge {
                 inner.active_host_id = None;
                 return Err(ChromeDebuggerBridgeError::unavailable());
             }
-            let transport_label = inner
+            let host = inner
                 .hosts
                 .get(&host_id)
-                .and_then(|host| host.transport.as_deref())
+                .ok_or_else(ChromeDebuggerBridgeError::unavailable)?;
+            if let Some(reason) = bridge_command_stale_reason(host, kind) {
+                let error = ChromeDebuggerBridgeError::stale(kind, &host_id, host, &reason);
+                tracing::warn!(
+                    code = error.code(),
+                    host_id = %host_id,
+                    command_kind = %kind,
+                    detail = %error.detail(),
+                    "Chrome debugger command refused before enqueue because loaded extension bridge is stale"
+                );
+                return Err(error);
+            }
+            let transport_label = host
+                .transport
+                .as_deref()
                 .unwrap_or("native_messaging")
                 .to_owned();
             inner.pending.insert(
@@ -1343,6 +1712,12 @@ pub(crate) fn health_subsystem() -> SubsystemHealth {
                     host_id: host_id.clone(),
                     origin: host.origin.clone(),
                     extension_id: host.extension_id.clone(),
+                    extension_version: host.extension_version.clone(),
+                    extension_protocol_version: host.extension_protocol_version,
+                    extension_build_id: host.extension_build_id.clone(),
+                    extension_build_sha256: host.extension_build_sha256.clone(),
+                    extension_capabilities: host.extension_capabilities.clone(),
+                    extension_user_agent: host.extension_user_agent.clone(),
                     pid: host.pid,
                     parent_window: host.parent_window.clone(),
                     transport: host.transport.clone(),
@@ -1421,10 +1796,29 @@ fn chrome_bridge_health_from_snapshot(
     let extension_id = host.extension_id.as_deref().unwrap_or("not_seen_yet");
     let endpoint_extension_id = host.extension_id.as_deref().unwrap_or(EXTENSION_ID);
     let parent_window = host.parent_window.as_deref().unwrap_or("");
+    let extension_version = host.extension_version.as_deref().unwrap_or("not_seen_yet");
+    let extension_protocol_version = host
+        .extension_protocol_version
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "not_seen_yet".to_owned());
+    let extension_build_id = host.extension_build_id.as_deref().unwrap_or("not_seen_yet");
+    let extension_build_sha256 = host
+        .extension_build_sha256
+        .as_deref()
+        .unwrap_or("not_seen_yet");
+    let extension_capabilities = format_capabilities(&host.extension_capabilities);
+    let extension_user_agent = host.extension_user_agent.as_deref().unwrap_or("");
+    let stale_reasons = bridge_identity_stale_reasons(host);
+    let extension_stale = !stale_reasons.is_empty();
+    let extension_stale_reasons = if stale_reasons.is_empty() {
+        "none".to_owned()
+    } else {
+        stale_reasons.join("|")
+    };
     let tab_control_available =
         extension_id == EXTENSION_ID && host.last_disconnect_detail.is_none();
     let status = if tab_control_available {
-        "ok"
+        if extension_stale { "stale" } else { "ok" }
     } else if host.last_disconnect_detail.is_some() {
         "unavailable"
     } else {
@@ -1436,13 +1830,23 @@ fn chrome_bridge_health_from_snapshot(
     SubsystemHealth {
         status: status.to_owned(),
         detail: Some(format!(
-            "tab_control_available={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} install_guidance={}",
+            "tab_control_available={} extension_stale={} extension_stale_reasons={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} expected_extension_build_id={} extension_build_sha256={} expected_extension_build_sha256={} extension_capabilities={} required_extension_capabilities={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} extension_user_agent={} install_guidance={}",
             tab_control_available,
+            extension_stale,
+            extension_stale_reasons,
             host.host_id,
             host_count,
             host.origin,
             extension_id,
             EXTENSION_ID,
+            extension_version,
+            extension_protocol_version,
+            extension_build_id,
+            EXPECTED_EXTENSION_BUILD_ID,
+            extension_build_sha256,
+            EXPECTED_EXTENSION_BUILD_SHA256,
+            extension_capabilities,
+            REQUIRED_DIRECT_HTTP_CAPABILITIES.join(","),
             chrome_debugger_health_endpoint(endpoint_extension_id),
             transport,
             host.pid,
@@ -1453,6 +1857,7 @@ fn chrome_bridge_health_from_snapshot(
             pending_count,
             disconnect_detail,
             detach_reason,
+            extension_user_agent,
             INSTALL_GUIDANCE
         )),
         ..SubsystemHealth::default()
@@ -1712,6 +2117,24 @@ pub(crate) async fn navigate_tab(
             "decode Chrome debugger navigate response: {error}"
         ))
     })
+}
+
+pub(crate) fn validate_reload_wait_timeout(
+    value: Option<u64>,
+) -> Result<u64, ChromeDebuggerBridgeError> {
+    let value = value.unwrap_or(DEFAULT_RELOAD_WAIT_TIMEOUT_MS);
+    if value == 0 || value > MAX_RELOAD_WAIT_TIMEOUT_MS {
+        return Err(ChromeDebuggerBridgeError::protocol(format!(
+            "cdp_bridge_reload wait_timeout_ms must be 1..={MAX_RELOAD_WAIT_TIMEOUT_MS}"
+        )));
+    }
+    Ok(value)
+}
+
+pub(crate) async fn reload_bridge(
+    wait_timeout_ms: u64,
+) -> Result<ChromeBridgeReloadResult, ChromeDebuggerBridgeError> {
+    bridge().reload_self(wait_timeout_ms).await
 }
 
 pub(crate) fn cdp_capabilities() -> Vec<CdpCapability> {
@@ -2564,6 +2987,15 @@ mod tests {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
             extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+            extension_version: Some("0.1.0".to_owned()),
+            extension_protocol_version: Some(BRIDGE_PROTOCOL_VERSION),
+            extension_build_id: Some(EXPECTED_EXTENSION_BUILD_ID.to_owned()),
+            extension_build_sha256: Some(EXPECTED_EXTENSION_BUILD_SHA256.to_owned()),
+            extension_capabilities: REQUIRED_DIRECT_HTTP_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            extension_user_agent: Some("Chrome test".to_owned()),
             pid: 42,
             parent_window: Some("1001".to_owned()),
             transport: Some("direct_http".to_owned()),
@@ -2594,6 +3026,15 @@ mod tests {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
             extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+            extension_version: Some("0.1.0".to_owned()),
+            extension_protocol_version: Some(BRIDGE_PROTOCOL_VERSION),
+            extension_build_id: Some(EXPECTED_EXTENSION_BUILD_ID.to_owned()),
+            extension_build_sha256: Some(EXPECTED_EXTENSION_BUILD_SHA256.to_owned()),
+            extension_capabilities: REQUIRED_DIRECT_HTTP_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            extension_user_agent: Some("Chrome test".to_owned()),
             pid: 42,
             parent_window: None,
             transport: Some("direct_http".to_owned()),
@@ -2616,6 +3057,61 @@ mod tests {
         assert!(detail.contains("tab_control_available=false"));
         assert!(detail.contains("reason=external_chrome_popup_risk"));
         assert!(detail.contains("extension_id=external"));
+    }
+
+    #[test]
+    fn direct_http_bridge_refuses_new_commands_without_capability_readback() {
+        let mut host = HostRecord {
+            origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
+            extension_id: Some(EXTENSION_ID.to_owned()),
+            extension_version: None,
+            extension_protocol_version: None,
+            extension_build_id: None,
+            extension_build_sha256: None,
+            extension_capabilities: BTreeSet::new(),
+            extension_user_agent: None,
+            pid: 42,
+            parent_window: None,
+            transport: Some("direct_http".to_owned()),
+            bridge_token_digest: [0; 32],
+            registered_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            last_disconnect_detail: None,
+            last_detach_reason: None,
+        };
+
+        assert_eq!(bridge_command_stale_reason(&host, "openTab"), None);
+        let reason = bridge_command_stale_reason(&host, "reloadSelf").expect("stale reason");
+        assert!(reason.contains("capabilities_not_advertised"));
+        assert!(reason.contains("legacy_supported=closeTab,navigateTab,openTab,targetInfo"));
+
+        host.extension_capabilities = ["openTab", "closeTab", "targetInfo"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let reason = bridge_command_stale_reason(&host, "reloadSelf").expect("missing capability");
+        assert!(reason.contains("missing_capability=reloadSelf"));
+
+        host.extension_capabilities = REQUIRED_DIRECT_HTTP_CAPABILITIES
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect();
+        assert_eq!(bridge_command_stale_reason(&host, "reloadSelf"), None);
+    }
+
+    #[test]
+    fn reload_wait_timeout_validation_is_bounded() {
+        assert_eq!(
+            validate_reload_wait_timeout(None).expect("default accepted"),
+            DEFAULT_RELOAD_WAIT_TIMEOUT_MS
+        );
+        assert_eq!(validate_reload_wait_timeout(Some(1)).expect("min"), 1);
+        assert_eq!(
+            validate_reload_wait_timeout(Some(MAX_RELOAD_WAIT_TIMEOUT_MS)).expect("max"),
+            MAX_RELOAD_WAIT_TIMEOUT_MS
+        );
+        assert!(validate_reload_wait_timeout(Some(0)).is_err());
+        assert!(validate_reload_wait_timeout(Some(MAX_RELOAD_WAIT_TIMEOUT_MS + 1)).is_err());
     }
 
     #[test]

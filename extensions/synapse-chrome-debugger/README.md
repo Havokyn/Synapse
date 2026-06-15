@@ -16,6 +16,21 @@ The service worker checks `chrome.runtime.id` against that stable ID before it
 contacts the daemon. If Chrome loads the unpacked directory under any other ID,
 the bridge stays dormant until the extension is reloaded correctly.
 
+The bridge reports its extension version, protocol version, build ID, build
+SHA-256, and command capabilities in the daemon `hello` readback. The daemon
+uses that identity as the Source of Truth for extension/runtime skew. A loaded
+worker that does not advertise a command needed by the daemon fails closed with
+`CHROME_BRIDGE_EXTENSION_STALE` before the command is queued to Chrome.
+
+Future bridge updates reload through the background MCP tool
+`cdp_bridge_reload`. That tool asks the loaded extension to run
+`chrome.runtime.reload()`, then waits for a new authenticated bridge host
+registration in daemon health. It does not open `chrome://extensions`, does not
+activate Chrome, and does not use coordinates. If the currently loaded worker
+predates the `reloadSelf` capability, Synapse cannot make that old worker run
+new code; the correct behavior is a visible stale-worker error, not foreground
+automation.
+
 Install/verify the local bridge registration with:
 
 ```powershell
@@ -66,6 +81,12 @@ returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
 queueing them whenever the live Chrome profile/process Source of Truth still
 contains any external `debugger` or `nativeMessaging` surface, because even a tab
 event can wake another extension's debugger/native-host popup on an unsafe host.
+
+The lifecycle command `reloadSelf` is limited to self-reload. It validates the
+expected extension ID and expected build ID, acknowledges the request to the
+daemon, then schedules `chrome.runtime.reload()`. The daemon accepts the reload
+only after a separate post-reconnect host readback reports the expected build
+and the full required capability set.
 
 Attach-capable commands (`snapshot`, `clickNode`, `typeNode`, and `nodeValue`)
 are unavailable in the normal end-user install. The normal service worker

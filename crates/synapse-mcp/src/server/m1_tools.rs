@@ -1,6 +1,7 @@
 use super::{
     CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
-    CdpActiveElementInfo, CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction,
+    CdpActiveElementInfo, CdpBridgeHostReadback, CdpBridgeReloadAckReadback, CdpBridgeReloadParams,
+    CdpBridgeReloadResponse, CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction,
     CdpNavigateTabParams, CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse,
     CdpTargetInfoParams, CdpTargetInfoResponse, CdpTargetOwner, ErrorData, FindParams,
     FindResponse, Health, HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse,
@@ -1177,6 +1178,39 @@ impl SynapseService {
         let result = self
             .cdp_target_info_impl(&session_id, window_hwnd, &cdp_target_id)
             .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Ask the installed normal Chrome bridge extension to reload itself in the background via chrome.runtime.reload(), then wait for a new authenticated bridge host registration. This never opens chrome://extensions, never activates Chrome, and fails closed with CHROME_BRIDGE_EXTENSION_STALE when the loaded worker does not advertise reloadSelf."
+    )]
+    pub async fn cdp_bridge_reload(
+        &self,
+        params: Parameters<CdpBridgeReloadParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<CdpBridgeReloadResponse>, ErrorData> {
+        const TOOL: &str = "cdp_bridge_reload";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=cdp_bridge_reload"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let wait_timeout_ms =
+            crate::chrome_debugger_bridge::validate_reload_wait_timeout(params.0.wait_timeout_ms)
+                .map_err(|error| mcp_error(error.code(), error.detail().to_owned()))?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "wait_timeout_ms": wait_timeout_ms,
+            "required_foreground": false,
+            "trigger": "chrome.runtime.reload",
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = crate::chrome_debugger_bridge::reload_bridge(wait_timeout_ms)
+            .await
+            .map(|reload| chrome_bridge_reload_response(&session_id, wait_timeout_ms, reload))
+            .map_err(|error| mcp_error(error.code(), error.detail().to_owned()));
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
@@ -3743,6 +3777,65 @@ fn chrome_active_element_info(
             .error_detail
             .as_deref()
             .and_then(non_empty_text_sha256),
+    }
+}
+
+fn chrome_bridge_reload_response(
+    session_id: &str,
+    wait_timeout_ms: u64,
+    reload: crate::chrome_debugger_bridge::ChromeBridgeReloadResult,
+) -> CdpBridgeReloadResponse {
+    CdpBridgeReloadResponse {
+        session_id: session_id.to_owned(),
+        required_foreground: false,
+        wait_timeout_ms,
+        before: chrome_bridge_host_readback(reload.before),
+        command_ack: chrome_bridge_reload_ack_readback(reload.command_ack),
+        after: chrome_bridge_host_readback(reload.after),
+        reconnected: reload.reconnected,
+        waited_ms: reload.waited_ms,
+    }
+}
+
+fn chrome_bridge_host_readback(
+    host: crate::chrome_debugger_bridge::ChromeBridgeHostSnapshot,
+) -> CdpBridgeHostReadback {
+    CdpBridgeHostReadback {
+        host_id: host.host_id,
+        origin: host.origin,
+        extension_id: host.extension_id,
+        extension_version: host.extension_version,
+        extension_protocol_version: host.extension_protocol_version,
+        extension_build_id: host.extension_build_id,
+        extension_build_sha256: host.extension_build_sha256,
+        extension_capabilities: host.extension_capabilities,
+        extension_user_agent: host.extension_user_agent,
+        pid: host.pid,
+        parent_window: host.parent_window,
+        transport: host.transport,
+        registered_unix_ms: host.registered_unix_ms,
+        last_seen_unix_ms: host.last_seen_unix_ms,
+        last_disconnect_detail: host.last_disconnect_detail,
+        last_detach_reason: host.last_detach_reason,
+        extension_stale: host.extension_stale,
+        extension_stale_reasons: host.extension_stale_reasons,
+    }
+}
+
+fn chrome_bridge_reload_ack_readback(
+    ack: crate::chrome_debugger_bridge::ChromeBridgeReloadCommandAck,
+) -> CdpBridgeReloadAckReadback {
+    CdpBridgeReloadAckReadback {
+        ok: ack.ok,
+        extension_id: ack.extension_id,
+        version: ack.version,
+        protocol_version: ack.protocol_version,
+        build_id: ack.build_id,
+        build_sha256: ack.build_sha256,
+        capabilities: ack.capabilities,
+        host_id: ack.host_id,
+        reload_requested_at_unix_ms: ack.reload_requested_at_unix_ms,
+        reload_delay_ms: ack.reload_delay_ms,
     }
 }
 

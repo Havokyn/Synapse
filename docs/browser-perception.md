@@ -143,6 +143,10 @@ Chrome session, the supported attach path is:
    If Chrome loads the unpacked directory under any extension ID other than
    `leoocgnkjnplbfdbklajepahofecgfbk`, the service worker remains dormant before
    making any daemon HTTP request.
+   The bridge hello reports extension version, protocol version, build ID,
+   build SHA-256, user agent, and command capabilities. Daemon health treats
+   missing or mismatched identity as extension skew and command preflight fails
+   closed with `CHROME_BRIDGE_EXTENSION_STALE`.
    The verifier removes stale Synapse native-host registration from all Windows
    Chrome lookup hives (`HKCU`/`HKLM`, 32-bit and 64-bit views) and fails closed
    with per-key readback/ACL evidence if any Synapse native-host registration
@@ -156,7 +160,14 @@ Chrome session, the supported attach path is:
    `chrome.tabs.goBack`, and `chrome.tabs.goForward`; it must not call
    `chrome.debugger.getTargets` or `chrome.debugger.attach`. Its target IDs are
    synthetic `chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback.
-8. The normal end-user extension is structurally tabs-only: it does not request
+8. Use `cdp_bridge_reload` for background bridge lifecycle updates after the
+   loaded worker advertises `reloadSelf`. The tool asks the extension to run
+   `chrome.runtime.reload()`, then accepts success only after daemon health sees
+   a new authenticated bridge host with the expected build/capabilities. It must
+   not open `chrome://extensions` or activate Chrome. A worker that predates
+   `reloadSelf` is a fail-closed stale-worker condition, not permission to click
+   the foreground extension UI.
+9. The normal end-user extension is structurally tabs-only: it does not request
    `debugger`, does not call `chrome.debugger`, and rejects attach-capable
    commands before any browser debugger startup. The daemon also refuses those
    commands before queueing anything to Chrome. Chrome intentionally shows a
@@ -164,7 +175,7 @@ Chrome session, the supported attach path is:
    `chrome.debugger.attach` without `--silent-debugger-extension-api`; Synapse's
    normal bridge therefore cannot use that API. DOM attach for a normal Chrome
    profile requires raw CDP on a dedicated Synapse-launched automation profile.
-9. The verifier fails closed if the live Chrome profile has another active
+10. The verifier fails closed if the live Chrome profile has another active
    extension with the `debugger` permission, or if Chrome is already running an
    external native-messaging wrapper process. Those surfaces can display the
    same user-visible debugger/native-host popup even though Synapse is not the
@@ -204,7 +215,7 @@ Chrome session, the supported attach path is:
    `external_chrome_popup_risk` profile/process summary when Synapse refuses a
    normal-profile attach-capable command, so remaining popups are attributed to
    the exact external browser surface instead of to Synapse's tabs-only bridge.
-10. If the current browser session still exposes no endpoint or extension bridge,
+11. If the current browser session still exposes no endpoint or extension bridge,
    fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch
    is a user/session decision because it changes the authenticated browser

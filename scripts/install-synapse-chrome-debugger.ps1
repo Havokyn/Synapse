@@ -810,11 +810,11 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
 }
 if ($staleSynapseActivePermissions.Count -gt 0) {
     $detail = $staleSynapseActivePermissions | ConvertTo-Json -Depth 6 -Compress
-    throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_DEBUGGER_PERMISSION extension_id=$ExtensionId detail=$detail remediation=reload the unpacked Synapse Chrome Bridge from chrome://extensions or remove/re-add it; the normal bridge must be active with tabs only before setup can pass"
+    throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_DEBUGGER_PERMISSION extension_id=$ExtensionId detail=$detail remediation=if daemon health shows the live bridge advertises reloadSelf, call cdp_bridge_reload through the real Synapse MCP tool; if the loaded worker predates reloadSelf, fail closed and let Chrome reload/restart the extension out-of-band instead of automating chrome://extensions foreground UI; the normal bridge must be active with tabs only before setup can pass"
 }
 if ($staleSynapseRecurringWakePermissions.Count -gt 0) {
     $detail = $staleSynapseRecurringWakePermissions | ConvertTo-Json -Depth 6 -Compress
-    throw "SYNAPSE_CHROME_EXTENSION_STALE_ALARMS_PERMISSION extension_id=$ExtensionId detail=$detail remediation=reload the unpacked Synapse Chrome Bridge from chrome://extensions or remove/re-add it; the normal bridge must be active with tabs only and no recurring wake permission before setup can certify popup-free behavior"
+    throw "SYNAPSE_CHROME_EXTENSION_STALE_ALARMS_PERMISSION extension_id=$ExtensionId detail=$detail remediation=if daemon health shows the live bridge advertises reloadSelf, call cdp_bridge_reload through the real Synapse MCP tool; if the loaded worker predates reloadSelf, fail closed and let Chrome reload/restart the extension out-of-band instead of automating chrome://extensions foreground UI; the normal bridge must be active with tabs only and no recurring wake permission before setup can certify popup-free behavior"
 }
 
 $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -891,6 +891,10 @@ if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
     extension_dir = $extensionDir
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
+    bridge_self_reload_command = 'cdp_bridge_reload'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-15-1011-reload-self-v1'
+    bridge_build_sha256_expected = '462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7'
+    bridge_required_capabilities = @('closeTab', 'navigateTab', 'openTab', 'reloadSelf', 'targetInfo')
     background_navigation_backend = 'chrome.tabs_no_debugger_permission_no_native_messaging'
     reconnect_driver = 'bounded_websocket_reconnect_with_disconnected_extension_keepalive_no_alarms'
     attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_daemon_side_attach_disabled'

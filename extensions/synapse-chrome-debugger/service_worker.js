@@ -1,10 +1,20 @@
 const PROTOCOL_VERSION = 1;
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-15-1011-reload-self-v1";
+const BRIDGE_BUILD_SHA256 = "462418c38bd38ed6fec0d5b485caa64829fe55dfaf6bba917054764a9e3cdfa7";
+const COMMAND_CAPABILITIES = Object.freeze([
+  "openTab",
+  "closeTab",
+  "targetInfo",
+  "navigateTab",
+  "reloadSelf"
+]);
 const EXPECTED_EXTENSION_ID = "leoocgnkjnplbfdbklajepahofecgfbk";
 const DAEMON_BASE_URL = "http://127.0.0.1:7700";
 const ERROR_ATTACH_FAILED = "A11Y_CDP_ATTACH_FAILED";
 const ERROR_AXTREE_FAILED = "A11Y_CDP_AXTREE_FAILED";
 const ERROR_DEBUGGER_WARNING_UNSUPPRESSED = "A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED";
 const ERROR_EXTENSION_TIMEOUT = "A11Y_CDP_EXTENSION_TIMEOUT";
+const ERROR_EXTENSION_STALE = "CHROME_BRIDGE_EXTENSION_STALE";
 const ERROR_EXTENSION_ID_MISMATCH = "SYNAPSE_CHROME_EXTENSION_ID_MISMATCH";
 const ERROR_DAEMON_UNAVAILABLE = "SYNAPSE_CHROME_DAEMON_UNAVAILABLE";
 const TAB_TARGET_PREFIX = "chrome-tab:";
@@ -103,11 +113,9 @@ async function registerDaemon() {
   bridgeToken = registered.bridge_token;
   await postDaemonMessage({
     type: "hello",
-    extensionId: chrome.runtime.id,
-    version: chrome.runtime.getManifest().version,
-    protocolVersion: PROTOCOL_VERSION,
     transport: "direct_http",
-    userAgent: navigator.userAgent
+    userAgent: navigator.userAgent,
+    ...bridgeIdentity()
   });
   connectWebSocket();
 }
@@ -323,6 +331,7 @@ async function handleCommand(command) {
   }
   try {
     let result;
+    let reloadAfterResponse = false;
     if (kind === "snapshot") {
       result = rejectAttachCommand(kind, params);
     } else if (kind === "clickNode") {
@@ -339,13 +348,35 @@ async function handleCommand(command) {
       result = await handleTargetInfo(params);
     } else if (kind === "navigateTab") {
       result = await handleNavigateTab(params);
+    } else if (kind === "reloadSelf") {
+      result = handleReloadSelf(params);
+      reloadAfterResponse = true;
     } else {
-      throw bridgeError(ERROR_ATTACH_FAILED, `unknown command kind ${String(kind)}`);
+      throw bridgeError(
+        ERROR_EXTENSION_STALE,
+        `unknown command kind ${String(kind)}; loaded_build_id=${BRIDGE_BUILD_ID} ` +
+          `loaded_capabilities=${COMMAND_CAPABILITIES.join(",")}`
+      );
     }
     await postResponse(id, true, result, null);
+    if (reloadAfterResponse) {
+      scheduleRuntimeReload(result.reload_delay_ms);
+    }
   } catch (error) {
     await postResponse(id, false, null, errorPayload(error));
   }
+}
+
+function bridgeIdentity() {
+  return {
+    extensionId: chrome.runtime.id,
+    version: chrome.runtime.getManifest().version,
+    protocolVersion: PROTOCOL_VERSION,
+    buildId: BRIDGE_BUILD_ID,
+    buildSha256: BRIDGE_BUILD_SHA256,
+    capabilities: [...COMMAND_CAPABILITIES],
+    commandCapabilities: [...COMMAND_CAPABILITIES]
+  };
 }
 
 function rejectAttachCommand(kind, params) {
@@ -517,6 +548,51 @@ async function handleNavigateTab(params) {
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
+}
+
+function handleReloadSelf(params = {}) {
+  const expectedExtensionId = String(params.expectedExtensionId || EXPECTED_EXTENSION_ID).trim();
+  if (expectedExtensionId !== chrome.runtime.id) {
+    throw bridgeError(
+      ERROR_EXTENSION_ID_MISMATCH,
+      `reloadSelf refused extension_id mismatch: actual=${chrome.runtime.id} expected=${expectedExtensionId}`
+    );
+  }
+  const expectedBuildId = String(params.expectedBuildId || BRIDGE_BUILD_ID).trim();
+  if (expectedBuildId && expectedBuildId !== BRIDGE_BUILD_ID) {
+    throw bridgeError(
+      ERROR_EXTENSION_STALE,
+      `reloadSelf refused stale loaded build: loaded_build_id=${BRIDGE_BUILD_ID} expected_build_id=${expectedBuildId}`
+    );
+  }
+  const delayMs = normalizeReloadDelay(params.reloadDelayMs);
+  return {
+    ok: true,
+    ...bridgeIdentity(),
+    host_id: hostId,
+    reload_requested_at_unix_ms: Date.now(),
+    reload_delay_ms: delayMs
+  };
+}
+
+function scheduleRuntimeReload(delayMs) {
+  const boundedDelayMs = normalizeReloadDelay(delayMs);
+  postDaemonMessage({
+    type: "event",
+    event: "extensionReloadScheduled",
+    ...bridgeIdentity(),
+    reload_delay_ms: boundedDelayMs,
+    scheduled_at_unix_ms: Date.now()
+  }).catch((error) => {
+    console.warn(`Synapse reload schedule event dropped: ${errorMessage(error)}`);
+  });
+  setTimeout(() => {
+    try {
+      chrome.runtime.reload();
+    } catch (error) {
+      console.error(`Synapse runtime.reload failed: ${errorMessage(error)}`);
+    }
+  }, boundedDelayMs);
 }
 
 async function selectTabTarget(params, options = {}) {
@@ -938,6 +1014,17 @@ function normalizeWaitTimeout(value) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1 || number > 30000) {
     throw bridgeError(ERROR_ATTACH_FAILED, "waitTimeoutMs must be an integer from 1 through 30000");
+  }
+  return number;
+}
+
+function normalizeReloadDelay(value) {
+  if (value === undefined || value === null) {
+    return 100;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0 || number > 5000) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "reloadDelayMs must be an integer from 0 through 5000");
   }
   return number;
 }

@@ -1,10 +1,9 @@
 ---
 source: crates/synapse-mcp/tests/m4_tools_list.rs
-assertion_line: 56
 expression: snapshot
 ---
 {
-  "count": 171,
+  "count": 172,
   "m4_defaults": [
     {
       "actual": 33,
@@ -256,6 +255,7 @@ expression: snapshot
     "audit_export_bundle",
     "audit_intelligence_query",
     "capture_screenshot",
+    "cdp_bridge_reload",
     "cdp_close_tab",
     "cdp_navigate_tab",
     "cdp_open_tab",
