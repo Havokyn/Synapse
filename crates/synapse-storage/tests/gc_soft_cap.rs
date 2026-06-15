@@ -11,6 +11,11 @@ fn gc_soft_cap_edges_and_restart() -> Result<(), Box<dyn Error>> {
         Case::new("below_soft", 9, 10, 20, 9, 0, None),
         Case::new("at_soft", 10, 10, 20, 10, 0, None),
         Case::new("soft_cap", 20, 10, 30, 10, 10, None),
+        // Small trim: capping 100 rows at 96 must evict EXACTLY the 4-row overage
+        // and land on 96 — explicit row caps have no minimum batch. (The retired
+        // 25%-floor would have evicted 25 here and left 75; this case guards the
+        // operator "cap at N" semantics the dashboard storage manager relies on.)
+        Case::new("small_trim_no_quarter_floor", 100, 96, 200, 96, 4, None),
         Case::new(
             "hard_cap",
             25,

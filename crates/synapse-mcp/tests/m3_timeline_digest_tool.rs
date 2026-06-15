@@ -106,13 +106,18 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
     // reports zero rows scanned in both stores.
     let empty = structured(
         &client
-            .tools_call("timeline_digest", json!({"period": "day", "anchor_ts_ns": base}))
+            .tools_call(
+                "timeline_digest",
+                json!({"period": "day", "anchor_ts_ns": base}),
+            )
             .await?,
     )?;
     println!(
         "readback=timeline_digest edge=empty_store episodes={} active_ms={} per_day_len={} routines_scanned={}",
-        empty["episode_count"], empty["active_ms"],
-        empty["per_day"].as_array().map_or(0, Vec::len), empty["routines_scanned_rows"]
+        empty["episode_count"],
+        empty["active_ms"],
+        empty["per_day"].as_array().map_or(0, Vec::len),
+        empty["routines_scanned_rows"]
     );
     assert_eq!(u64_at(&empty, "episode_count")?, 0);
     assert_eq!(u64_at(&empty, "active_ms")?, 0);
@@ -192,13 +197,24 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
     // Happy path: the day digest reconciles with the two episodes exactly.
     let digest = structured(
         &client
-            .tools_call("timeline_digest", json!({"period": "day", "anchor_ts_ns": base}))
+            .tools_call(
+                "timeline_digest",
+                json!({"period": "day", "anchor_ts_ns": base}),
+            )
             .await?,
     )?;
     println!("readback=timeline_digest scenario=day {digest}");
     assert_eq!(u64_at(&digest, "episode_count")?, 2);
-    assert_eq!(u64_at(&digest, "active_ms")?, 400_000, "120s + 280s human active");
-    assert_eq!(u64_at(&digest, "idle_ms")?, 0, "contiguous episodes ⇒ no idle");
+    assert_eq!(
+        u64_at(&digest, "active_ms")?,
+        400_000,
+        "120s + 280s human active"
+    );
+    assert_eq!(
+        u64_at(&digest, "idle_ms")?,
+        0,
+        "contiguous episodes ⇒ no idle"
+    );
     assert_eq!(u64_at(&digest, "total_keystrokes")?, 100);
     assert_eq!(u64_at(&digest, "total_clicks")?, 5);
     assert_eq!(digest["actor_filter"], "human");
@@ -222,7 +238,10 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
     assert_eq!(github["url"], "https://github.com/org/repo");
 
     // Reconciliation invariants: active == Σ by_app(+residual) == Σ per_day.
-    let app_sum: u64 = by_app.iter().filter_map(|g| g["active_ms"].as_u64()).sum::<u64>()
+    let app_sum: u64 = by_app
+        .iter()
+        .filter_map(|g| g["active_ms"].as_u64())
+        .sum::<u64>()
         + u64_at(&digest["by_app_other"], "active_ms")?;
     assert_eq!(app_sum, 400_000, "Σ by_app + residual == active_ms");
     let day_sum: u64 = digest["per_day"]
@@ -241,7 +260,10 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
     // the breakdown now spans seven local-day rows with one populated.
     let week = structured(
         &client
-            .tools_call("timeline_digest", json!({"period": "week", "anchor_ts_ns": base}))
+            .tools_call(
+                "timeline_digest",
+                json!({"period": "week", "anchor_ts_ns": base}),
+            )
             .await?,
     )?;
     println!(
@@ -250,7 +272,11 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
     );
     assert_eq!(u64_at(&week, "days_covered")?, 7);
     assert_eq!(week["per_day"].as_array().map_or(0, Vec::len), 7);
-    assert_eq!(u64_at(&week, "active_ms")?, 400_000, "all activity is in one day");
+    assert_eq!(
+        u64_at(&week, "active_ms")?,
+        400_000,
+        "all activity is in one day"
+    );
     let populated = week["per_day"]
         .as_array()
         .context("week per_day")?
@@ -275,12 +301,23 @@ async fn timeline_digest_reconciles_with_the_episode_store() -> anyhow::Result<(
 
     // Edge: structured validation errors, never a guessed digest.
     for (params, fragment) in [
-        (json!({"period": "month", "anchor_ts_ns": base}), "period must be"),
-        (json!({"period": "day", "anchor_ts_ns": base, "top_n": 0}), "top_n"),
-        (json!({"period": "day", "date": "2026-06-13", "anchor_ts_ns": base}), "at most one"),
+        (
+            json!({"period": "month", "anchor_ts_ns": base}),
+            "period must be",
+        ),
+        (
+            json!({"period": "day", "anchor_ts_ns": base, "top_n": 0}),
+            "top_n",
+        ),
+        (
+            json!({"period": "day", "date": "2026-06-13", "anchor_ts_ns": base}),
+            "at most one",
+        ),
         (json!({"period": "day", "date": "not-a-date"}), "YYYY-MM-DD"),
     ] {
-        let error = client.tools_call_error("timeline_digest", params.clone()).await?;
+        let error = client
+            .tools_call_error("timeline_digest", params.clone())
+            .await?;
         let text = error.to_string();
         println!("readback=timeline_digest edge=invalid params={params} err={text}");
         assert!(

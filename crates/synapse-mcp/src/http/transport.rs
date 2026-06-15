@@ -542,6 +542,16 @@ fn router(
                 .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
         )
         .route(
+            "/dashboard/storage/timeline-purge",
+            post(dashboard_storage_timeline_purge)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/storage/gc",
+            post(dashboard_storage_gc)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/dashboard/control-lease/force-release",
             post(dashboard_control_lease_force_release)
                 .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
@@ -563,6 +573,21 @@ fn router(
             post(dashboard_api_model_register).layer(DefaultBodyLimit::max(
                 DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES,
             )),
+        )
+        .route(
+            "/dashboard/api-model/update",
+            post(dashboard_api_model_update).layer(DefaultBodyLimit::max(
+                DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/dashboard/api-model/remove",
+            post(dashboard_api_model_remove),
+        )
+        .route(
+            "/dashboard/approval/decide",
+            post(dashboard_approval_decide)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
         )
         .route("/approval/activate", get(approval_activate));
     let app = Router::new()
@@ -1496,6 +1521,27 @@ struct DashboardTimelinePauseRequest {
     duration_ms: Option<u64>,
 }
 
+/// Dashboard Approvals-inbox decision (#927). Resolves one pending approval —
+/// including the `agent_permission` rows a blocked `approval_gate` call is
+/// waiting on, so deciding here resumes the agent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardApprovalDecideRequest {
+    approval_id: String,
+    /// "approve"/"accept", "deny"/"decline"/"reject", or "snooze".
+    decision: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DashboardApprovalDecideResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    decision: crate::m3::approvals::ApprovalDecideResponse,
+}
+
 #[derive(Serialize)]
 struct DashboardTimelineControlResponse<T>
 where
@@ -1505,6 +1551,56 @@ where
     trigger: &'static str,
     source_of_truth: &'static str,
     readback: T,
+}
+
+/// Dashboard storage-manager request to purge operator timeline recordings by
+/// time period / kind / app / actor. Maps to the [`timeline_purge`] tool params
+/// (`flag_ids`/`text` are intentionally not exposed here — flag-id deletes flow
+/// through the hygiene surface, free-text purges through `timeline_search`).
+/// `dry_run` previews the matched count without deleting.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardTimelinePurgeRequest {
+    /// Epoch-nanosecond bound as a decimal string — ns values exceed JS
+    /// `Number.MAX_SAFE_INTEGER`, so the client serializes them as strings to
+    /// avoid silent precision loss.
+    #[serde(default)]
+    start_ts_ns: Option<String>,
+    #[serde(default)]
+    end_ts_ns: Option<String>,
+    #[serde(default)]
+    kinds: Option<Vec<String>>,
+    #[serde(default)]
+    apps: Option<Vec<String>>,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// Dashboard storage-manager request to trim a column family to its newest rows
+/// (`soft_cap_rows` = keep-newest-N) or run the `AUDIT_RETENTION` age sweep.
+/// Maps directly to the [`storage_gc_once`] tool params.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardStorageGcRequest {
+    cf_name: String,
+    soft_cap_rows: u64,
+    hard_cap_rows: u64,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    now_ns: Option<u64>,
+    #[serde(default)]
+    max_age_ns: Option<u64>,
+    #[serde(default)]
+    dedupe_window_ns: Option<u64>,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1599,6 +1695,10 @@ struct DashboardSpawnAgentRequest {
     wait_timeout_ms: Option<u64>,
     #[serde(default)]
     hold_open_ms: Option<u64>,
+    /// Route the spawned agent's risky tool calls through the Approvals inbox
+    /// (#927). Defaults true; the dashboard may send false for trusted spawns.
+    #[serde(default)]
+    require_approval_gate: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -1703,6 +1803,29 @@ struct DashboardModelListResponse {
     trigger: &'static str,
     source_of_truth: &'static str,
     list: crate::m3::local_models::LocalModelListResponse,
+}
+
+/// Browser-facing request to remove a model-registry row (and its stored key).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardModelRemoveRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct DashboardModelRemoveResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    remove: crate::m3::local_models::LocalModelRemoveResponse,
+}
+
+#[derive(Serialize)]
+struct DashboardModelUpdateResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    update: crate::m3::local_models::LocalModelUpdateResponse,
 }
 
 #[derive(Serialize)]
@@ -2490,6 +2613,73 @@ async fn dashboard_spawn_agent(
     )
 }
 
+async fn dashboard_approval_decide(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardApprovalDecideRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/approval/decide",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let approval_id = request.approval_id.trim();
+    if approval_id.is_empty() {
+        return with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            "APPROVAL_DECIDE_ID_EMPTY",
+            "approval_id must be a non-empty approval id",
+            None,
+        ));
+    }
+    let decision = match request.decision.trim().to_ascii_lowercase().as_str() {
+        "approve" | "accept" | "allow" => crate::m3::approvals::ApprovalDecision::Accept,
+        "deny" | "decline" | "reject" => crate::m3::approvals::ApprovalDecision::Decline,
+        "snooze" => crate::m3::approvals::ApprovalDecision::Snooze,
+        other => {
+            return with_dashboard_security_headers(dashboard_error_response(
+                StatusCode::BAD_REQUEST,
+                "APPROVAL_DECIDE_DECISION_INVALID",
+                &format!(
+                    "decision {other:?} is not one of approve|accept|allow|deny|decline|reject|snooze"
+                ),
+                None,
+            ));
+        }
+    };
+    let note = request
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty());
+    match state.health_service.approval_decide_from_dashboard(
+        approval_id,
+        decision,
+        note,
+        "dashboard_inbox",
+    ) {
+        Ok(decision) => with_dashboard_security_headers(
+            Json(DashboardApprovalDecideResponse {
+                ok: true,
+                trigger: "dashboard.approval_decide",
+                source_of_truth:
+                    "CF_KV approval queue rows + approval audit rows + command audit; blocked approval_gate resumed",
+                decision,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
 async fn dashboard_agent_kill(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -2584,6 +2774,121 @@ async fn dashboard_timeline_resume(State(state): State<HttpState>, headers: Head
                 ok: true,
                 trigger: "dashboard.timeline_resume",
                 source_of_truth: "CF_KV timeline recorder control row + live recorder gate",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+/// Parses an optional decimal epoch-nanosecond string into `Option<u64>`,
+/// returning a `TOOL_PARAMS_INVALID` response on a malformed value. ns values
+/// arrive as strings because they exceed JS `Number.MAX_SAFE_INTEGER`.
+fn parse_optional_ns(value: Option<&str>, field: &str) -> Result<Option<u64>, Response> {
+    let Some(raw) = value else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<u64>().map(Some).map_err(|error| {
+        dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            &format!(
+                "dashboard storage purge {field} must be a decimal nanosecond integer: {error}"
+            ),
+            None,
+        )
+    })
+}
+
+async fn dashboard_storage_timeline_purge(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardTimelinePurgeRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/storage/timeline-purge",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let start_ts_ns = match parse_optional_ns(request.start_ts_ns.as_deref(), "start_ts_ns") {
+        Ok(value) => value,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    let end_ts_ns = match parse_optional_ns(request.end_ts_ns.as_deref(), "end_ts_ns") {
+        Ok(value) => value,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    let params = crate::m3::timeline::TimelinePurgeParams {
+        start_ts_ns,
+        end_ts_ns,
+        apps: request.apps,
+        text: None,
+        kinds: request.kinds,
+        actor: request.actor,
+        flag_ids: None,
+        all: request.all,
+        dry_run: request.dry_run,
+        cursor: request.cursor,
+    };
+    match state.health_service.dashboard_timeline_purge(params) {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardTimelineControlResponse {
+                ok: true,
+                trigger: "dashboard.timeline_purge",
+                source_of_truth: "CF_TIMELINE hard-delete + range compaction + counts-only purge audit row",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_storage_gc(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardStorageGcRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/storage/gc",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let params = crate::m3::storage::StorageGcOnceParams {
+        cf_name: request.cf_name,
+        soft_cap_rows: request.soft_cap_rows,
+        hard_cap_rows: request.hard_cap_rows,
+        run_id: request.run_id,
+        now_ns: request.now_ns,
+        max_age_ns: request.max_age_ns,
+        dedupe_window_ns: request.dedupe_window_ns,
+        profile_id: request.profile_id,
+    };
+    match state.health_service.dashboard_storage_gc(params) {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardTimelineControlResponse {
+                ok: true,
+                trigger: "dashboard.storage_gc_once",
+                source_of_truth: "storage_gc_once oldest-row eviction over the column family",
                 readback,
             })
             .into_response(),
@@ -2776,6 +3081,9 @@ fn dashboard_local_model_spawn_params(
         hold_open_ms: request
             .hold_open_ms
             .unwrap_or_else(crate::m4::default_agent_spawn_hold_open_ms),
+        // Local-model spawns have no permission-prompt-tool hook; the gate flag
+        // is inert for them but kept at the default for struct completeness.
+        require_approval_gate: crate::m4::default_require_approval_gate(),
         template_id: None,
         template_version: None,
         template_config_hash: None,
@@ -2824,6 +3132,9 @@ fn dashboard_spawn_agent_request_params(
             hold_open_ms: request
                 .hold_open_ms
                 .unwrap_or_else(crate::m4::default_agent_spawn_hold_open_ms),
+            require_approval_gate: request
+                .require_approval_gate
+                .unwrap_or_else(crate::m4::default_require_approval_gate),
         },
     ))
 }
@@ -2935,6 +3246,73 @@ async fn dashboard_api_model_register(
                 trigger: "dashboard.api_model_register",
                 source_of_truth: "CF_KV local_model_registry/v1/model/name_hex/",
                 register,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_api_model_update(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(params): Json<crate::m3::local_models::LocalModelUpdateParams>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/api-model/update",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    match state.health_service.dashboard_update_local_model(params).await {
+        Ok(update) => with_dashboard_security_headers(
+            Json(DashboardModelUpdateResponse {
+                ok: true,
+                trigger: "dashboard.api_model_update",
+                source_of_truth: "CF_KV local_model_registry/v1/model/name_hex/",
+                update,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_api_model_remove(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardModelRemoveRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/api-model/remove",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let params = crate::m3::local_models::LocalModelRemoveParams {
+        name: request.name,
+    };
+    match state.health_service.dashboard_remove_local_model(params) {
+        Ok(remove) => with_dashboard_security_headers(
+            Json(DashboardModelRemoveResponse {
+                ok: true,
+                trigger: "dashboard.api_model_remove",
+                source_of_truth: "CF_KV local_model_registry/v1/model/name_hex/",
+                remove,
             })
             .into_response(),
         ),
@@ -3391,12 +3769,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-C715IKfj.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-D-XGGNl5.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-DGTECjYz.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-CZx4g_x2.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-C715IKfj.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-D-XGGNl5.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-DGTECjYz.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-CZx4g_x2.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -3803,6 +4181,7 @@ mod tests {
             working_dir: None,
             wait_timeout_ms: None,
             hold_open_ms: None,
+            require_approval_gate: None,
         }
     }
 

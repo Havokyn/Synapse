@@ -264,9 +264,11 @@ fn resolve_window(params: &TimelineDigestParams) -> Result<PeriodWindow, ErrorDa
     let mut day_starts = vec![anchor_day_start];
     let mut cursor = anchor_day_start;
     for _ in 0..days_back {
-        let prev = local_day_start(cursor.checked_sub(1).ok_or_else(|| {
-            internal("period extends before the Unix epoch")
-        })?)?;
+        let prev = local_day_start(
+            cursor
+                .checked_sub(1)
+                .ok_or_else(|| internal("period extends before the Unix epoch"))?,
+        )?;
         day_starts.push(prev);
         cursor = prev;
     }
@@ -321,8 +323,7 @@ fn collect_period_episodes(
         let page = list_episodes(runtime, &params)?;
         scanned_rows = scanned_rows.saturating_add(page.scanned_rows);
         for view in page.episodes {
-            if view.start_ts_ns >= window.period_start_ns
-                && view.start_ts_ns < window.period_end_ns
+            if view.start_ts_ns >= window.period_start_ns && view.start_ts_ns < window.period_end_ns
             {
                 episodes.push(view);
                 if u64::try_from(episodes.len()).unwrap_or(u64::MAX) > MAX_DIGEST_EPISODES {
@@ -499,8 +500,9 @@ fn split_groups(
             residual.group_count = residual.group_count.saturating_add(1);
             residual.active_ms = residual.active_ms.saturating_add(accum.active_ms);
             residual.episode_count = residual.episode_count.saturating_add(accum.episode_count);
-            residual.keystroke_count =
-                residual.keystroke_count.saturating_add(accum.keystroke_count);
+            residual.keystroke_count = residual
+                .keystroke_count
+                .saturating_add(accum.keystroke_count);
             residual.click_count = residual.click_count.saturating_add(accum.click_count);
         }
     }
@@ -555,10 +557,7 @@ fn aggregate_digest(
         first_activity_ns = Some(min_opt(first_activity_ns, view.start_ts_ns));
         last_activity_ns = Some(max_opt(last_activity_ns, view.end_ts_ns));
 
-        let app_key = view
-            .app
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_KEY.to_owned());
+        let app_key = view.app.clone().unwrap_or_else(|| UNKNOWN_KEY.to_owned());
         by_app.entry(app_key).or_default().add(view);
         let doc_key = view
             .document
@@ -569,10 +568,7 @@ fn aggregate_digest(
         // Day bucket: the largest day_start <= the episode start. Episodes are
         // start-contained in the period and never span midnight, so exactly
         // one day matches.
-        if let Some((_, accum)) = day_accums
-            .range_mut(..=view.start_ts_ns)
-            .next_back()
-        {
+        if let Some((_, accum)) = day_accums.range_mut(..=view.start_ts_ns).next_back() {
             accum.episode_count += 1;
             accum.active_ms = accum.active_ms.saturating_add(view.duration_ms);
             accum.keystroke_count = accum.keystroke_count.saturating_add(view.keystroke_count);
@@ -764,18 +760,30 @@ mod tests {
         let day_active: u64 = resp.per_day.iter().map(|d| d.active_ms).sum();
         let day_idle: u64 = resp.per_day.iter().map(|d| d.idle_ms).sum();
         let day_eps: u64 = resp.per_day.iter().map(|d| d.episode_count).sum();
-        assert_eq!(resp.active_ms, day_active, "active_ms == Σ per_day.active_ms");
+        assert_eq!(
+            resp.active_ms, day_active,
+            "active_ms == Σ per_day.active_ms"
+        );
         assert_eq!(resp.idle_ms, day_idle, "idle_ms == Σ per_day.idle_ms");
         assert_eq!(resp.episode_count, day_eps, "episode_count == Σ per_day");
         let app_active: u64 =
             resp.by_app.iter().map(|g| g.active_ms).sum::<u64>() + resp.by_app_other.active_ms;
         let app_eps: u64 = resp.by_app.iter().map(|g| g.episode_count).sum::<u64>()
             + resp.by_app_other.episode_count;
-        assert_eq!(resp.active_ms, app_active, "active_ms == Σ by_app + residual");
-        assert_eq!(resp.episode_count, app_eps, "episode_count == Σ by_app + residual");
+        assert_eq!(
+            resp.active_ms, app_active,
+            "active_ms == Σ by_app + residual"
+        );
+        assert_eq!(
+            resp.episode_count, app_eps,
+            "episode_count == Σ by_app + residual"
+        );
         let doc_active: u64 = resp.top_documents.iter().map(|g| g.active_ms).sum::<u64>()
             + resp.top_documents_other.active_ms;
-        assert_eq!(resp.active_ms, doc_active, "active_ms == Σ documents + residual");
+        assert_eq!(
+            resp.active_ms, doc_active,
+            "active_ms == Σ documents + residual"
+        );
     }
 
     #[test]
@@ -814,7 +822,15 @@ mod tests {
         // [100s,160s) code (60s), 30s gap, [190s,250s) code (60s).
         let episodes = vec![
             view(base, 60_000, Some("code.exe"), None, None, 10, 1),
-            view(base + 90 * SEC_NS, 60_000, Some("code.exe"), None, None, 20, 2),
+            view(
+                base + 90 * SEC_NS,
+                60_000,
+                Some("code.exe"),
+                None,
+                None,
+                20,
+                2,
+            ),
         ];
         let resp = aggregate_digest(&day_window(0), &episodes, false, 10, Vec::new());
         assert_eq!(resp.active_ms, 120_000, "2 x 60s active");
@@ -856,8 +872,24 @@ mod tests {
     fn document_url_is_representative_and_documents_aggregate() {
         let base = 100 * SEC_NS;
         let episodes = vec![
-            view(base, 50_000, Some("chrome.exe"), Some("github.com"), Some("https://github.com/a"), 0, 0),
-            view(base + 60 * SEC_NS, 70_000, Some("chrome.exe"), Some("github.com"), Some("https://github.com/b"), 0, 0),
+            view(
+                base,
+                50_000,
+                Some("chrome.exe"),
+                Some("github.com"),
+                Some("https://github.com/a"),
+                0,
+                0,
+            ),
+            view(
+                base + 60 * SEC_NS,
+                70_000,
+                Some("chrome.exe"),
+                Some("github.com"),
+                Some("https://github.com/b"),
+                0,
+                0,
+            ),
         ];
         let resp = aggregate_digest(&day_window(0), &episodes, false, 10, Vec::new());
         assert_eq!(resp.top_documents.len(), 1, "same host folds together");
@@ -883,15 +915,37 @@ mod tests {
             day_starts: vec![day0, day1, day2],
         };
         let episodes = vec![
-            view(day0 + 3_600 * SEC_NS, 60_000, Some("code.exe"), None, None, 0, 0),
-            view(day2 + 7_200 * SEC_NS, 90_000, Some("chrome.exe"), None, None, 0, 0),
+            view(
+                day0 + 3_600 * SEC_NS,
+                60_000,
+                Some("code.exe"),
+                None,
+                None,
+                0,
+                0,
+            ),
+            view(
+                day2 + 7_200 * SEC_NS,
+                90_000,
+                Some("chrome.exe"),
+                None,
+                None,
+                0,
+                0,
+            ),
         ];
         let resp = aggregate_digest(&window, &episodes, false, 10, Vec::new());
         assert_eq!(resp.days_covered, 3);
         assert_eq!(resp.per_day.len(), 3);
-        assert_eq!(resp.per_day[0].active_ms, 60_000, "day0 has the code episode");
+        assert_eq!(
+            resp.per_day[0].active_ms, 60_000,
+            "day0 has the code episode"
+        );
         assert_eq!(resp.per_day[1].active_ms, 0, "day1 empty");
-        assert_eq!(resp.per_day[2].active_ms, 90_000, "day2 has the chrome episode");
+        assert_eq!(
+            resp.per_day[2].active_ms, 90_000,
+            "day2 has the chrome episode"
+        );
         assert_eq!(resp.active_ms, 150_000);
         reconciles(&resp);
     }
@@ -933,10 +987,17 @@ mod tests {
     #[test]
     fn routine_matching_is_by_episode_id_intersection() {
         // Two routines: one whose evidence overlaps the period, one that does not.
-        let in_period: BTreeSet<String> =
-            ["ep1-a", "ep1-b", "ep1-c"].iter().map(|s| (*s).to_owned()).collect();
+        let in_period: BTreeSet<String> = ["ep1-a", "ep1-b", "ep1-c"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
         let routines = vec![
-            routine("rt-match", &["ep1-b", "ep1-zzz"], &["code.exe", "chrome.exe"], 0.812),
+            routine(
+                "rt-match",
+                &["ep1-b", "ep1-zzz"],
+                &["code.exe", "chrome.exe"],
+                0.812,
+            ),
             routine("rt-miss", &["ep1-x", "ep1-y"], &["slack.exe"], 0.5),
         ];
         // Exercise the same selection logic the storage reader applies.

@@ -53,7 +53,10 @@ async fn agent_tasks_lifecycle_round_trips_against_physical_cf_rows() -> anyhow:
     let empty = client.tools_call("task_list", json!({})).await?;
     let empty = structured(&empty)?;
     println!("readback=task_list edge=before state={empty}");
-    ensure!(empty["count"] == json!(0), "board must start empty, got {empty}");
+    ensure!(
+        empty["count"] == json!(0),
+        "board must start empty, got {empty}"
+    );
 
     // ---- ACTION: create three tasks ------------------------------------
     for (id, template, priority, seq) in [
@@ -136,7 +139,9 @@ async fn agent_tasks_lifecycle_round_trips_against_physical_cf_rows() -> anyhow:
         .await?;
     println!("readback=task_claim edge=duplicate err={dup_claim}");
     ensure!(
-        dup_claim.to_string().contains("AGENT_TASK_INVALID_TRANSITION")
+        dup_claim
+            .to_string()
+            .contains("AGENT_TASK_INVALID_TRANSITION")
             && dup_claim.to_string().contains("not todo"),
         "double claim must be rejected, got {dup_claim}"
     );
@@ -254,9 +259,20 @@ async fn agent_tasks_lifecycle_round_trips_against_physical_cf_rows() -> anyhow:
             task["task_id"].as_str().unwrap_or_default().to_owned(),
             task,
         );
-        println!("readback=cf_kv edge=physical_row key={key} state={}", by_id.values().last().map(|t| t["state"].clone()).unwrap_or(Value::Null));
+        println!(
+            "readback=cf_kv edge=physical_row key={key} state={}",
+            by_id
+                .values()
+                .last()
+                .map(|t| t["state"].clone())
+                .unwrap_or(Value::Null)
+        );
     }
-    ensure!(by_id.len() == 3, "exactly 3 task rows on disk, got {}", by_id.len());
+    ensure!(
+        by_id.len() == 3,
+        "exactly 3 task rows on disk, got {}",
+        by_id.len()
+    );
     ensure!(
         by_id["deploy"]["state"] == json!("done"),
         "deploy must be done on disk, got {}",
@@ -272,10 +288,7 @@ async fn agent_tasks_lifecycle_round_trips_against_physical_cf_rows() -> anyhow:
         "docs must be a flagged orphan on disk, got {}",
         by_id["docs"]
     );
-    println!(
-        "readback=cf_kv edge=decoded_orphan row={}",
-        by_id["docs"]
-    );
+    println!("readback=cf_kv edge=decoded_orphan row={}", by_id["docs"]);
 
     Ok(())
 }

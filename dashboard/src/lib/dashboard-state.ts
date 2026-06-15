@@ -522,6 +522,36 @@ export async function killAgent(request: AgentKillRequest): Promise<AgentKillRes
   return (await readJsonOrThrow(response)) as unknown as AgentKillResponse;
 }
 
+export type ApprovalDecisionVerb = "approve" | "deny";
+
+export interface ApprovalDecideRequest {
+  approval_id: string;
+  decision: ApprovalDecisionVerb;
+  note?: string;
+}
+
+export interface ApprovalDecideResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  decision: Record<string, unknown>;
+}
+
+// Resolve one pending approval from the inbox (#927). For an `agent_permission`
+// row this unblocks the still-running agent's permission_gate call.
+export async function decideApproval(
+  request: ApprovalDecideRequest
+): Promise<ApprovalDecideResponse> {
+  const response = await fetch("/dashboard/approval/decide", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as ApprovalDecideResponse;
+}
+
 export async function pauseTimeline(duration_ms?: number): Promise<TimelineControlResponse> {
   const response = await fetch("/dashboard/timeline/pause", {
     method: "POST",
@@ -565,6 +595,81 @@ export async function handoffLease(request: LeaseHandoffRequest): Promise<Dashbo
     body: JSON.stringify(request)
   });
   return (await readJsonOrThrow(response)) as unknown as DashboardControlResponse;
+}
+
+export interface TimelinePurgeRequest {
+  /** Inclusive lower bound, epoch ns as a decimal string (avoids JS precision loss). */
+  start_ts_ns?: string;
+  /** Inclusive upper bound, epoch ns as a decimal string. */
+  end_ts_ns?: string;
+  kinds?: string[];
+  apps?: string[];
+  actor?: string;
+  all?: boolean;
+  dry_run?: boolean;
+  cursor?: string;
+}
+
+export interface TimelinePurgeReadback {
+  matched_rows: number;
+  deleted_rows: number;
+  scanned_rows: number;
+  invalid_rows: number;
+  protected_audit_rows: number;
+  dry_run: boolean;
+  audit_key_hex?: string;
+  compacted: boolean;
+  next_cursor?: string;
+  stopped_because: string;
+}
+
+export interface StorageGcRequest {
+  cf_name: string;
+  soft_cap_rows: number;
+  hard_cap_rows: number;
+}
+
+export interface StorageGcCfReport {
+  cf_name: string;
+  before_value: number;
+  after_value: number;
+  evicted_rows: number;
+  hard_cap_reached: boolean;
+  hard_cap_code?: string | null;
+}
+
+export interface StorageGcReadback {
+  cf_name: string;
+  before_rows: number;
+  after_rows: number;
+  total_evicted_rows: number;
+  cache_evictions_total_delta: number;
+  cf_reports: StorageGcCfReport[];
+  audit_retention_report_key?: string;
+}
+
+export async function purgeTimelineRecordings(request: TimelinePurgeRequest): Promise<TimelinePurgeReadback> {
+  const response = await fetch("/dashboard/storage/timeline-purge", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  const body = await readJsonOrThrow(response);
+  return body.readback as TimelinePurgeReadback;
+}
+
+export async function runStorageGc(request: StorageGcRequest): Promise<StorageGcReadback> {
+  const response = await fetch("/dashboard/storage/gc", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  const body = await readJsonOrThrow(response);
+  return body.readback as StorageGcReadback;
 }
 
 export async function pruneTargetClaims(): Promise<DashboardControlResponse> {

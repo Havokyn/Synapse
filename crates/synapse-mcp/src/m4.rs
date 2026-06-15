@@ -967,6 +967,17 @@ pub struct ActSpawnAgentParams {
     #[serde(default = "default_agent_spawn_hold_open_ms")]
     #[schemars(default = "default_agent_spawn_hold_open_ms", range(min = 0))]
     pub hold_open_ms: u64,
+    /// Gate the spawned agent's risky tool calls through the human Approvals
+    /// inbox (#927). When true (the default) a Claude agent is launched with
+    /// `--permission-mode default --permission-prompt-tool
+    /// mcp__synapse__approval_gate`, so destructive/mutating/network actions
+    /// pause for a human decision instead of auto-running. Set false only for
+    /// trusted unattended automation that should keep the legacy
+    /// `bypassPermissions` behavior. No effect on Codex/local-model spawns,
+    /// which lack an equivalent prompt-tool hook.
+    #[serde(default = "default_require_approval_gate")]
+    #[schemars(default = "default_require_approval_gate")]
+    pub require_approval_gate: bool,
     /// Spawn-template provenance (#909), stamped server-side when this spawn was
     /// rendered from an `agent_template_*` template. Never set by callers
     /// directly — `act_spawn_agent` resolves a template into these. Recorded in
@@ -1054,6 +1065,16 @@ pub struct ActSpawnAgentRequest {
     #[serde(default = "default_agent_spawn_hold_open_ms")]
     #[schemars(default = "default_agent_spawn_hold_open_ms", range(min = 0))]
     pub hold_open_ms: u64,
+    /// Route the spawned agent's risky tool calls through the human Approvals
+    /// inbox (#927). Defaults true; a runtime safety knob applied to both
+    /// direct and template spawns (not template config). Only affects Claude.
+    #[serde(default = "default_require_approval_gate")]
+    #[schemars(default = "default_require_approval_gate")]
+    pub require_approval_gate: bool,
+}
+
+fn default_task_readiness_source() -> String {
+    "task_start_artifact".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1075,6 +1096,12 @@ pub struct ActSpawnAgentResponse {
     pub launched_at_unix_ms: u64,
     pub registered_at_unix_ms: u64,
     pub task_started_at_unix_ms: u64,
+    /// How task-start readiness was proven: `task_start_artifact` (the agent ran
+    /// the cooperative write-task-started helper) or a daemon-observed liveness
+    /// signal (`final_message_present`, `codex_control_thread_established`,
+    /// `stdout_turn_activity`) when the agent did real work but skipped it.
+    #[serde(default = "default_task_readiness_source")]
+    pub task_readiness_source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ActSpawnAgentTarget>,
     /// Spawn-template provenance (#909): present when this spawn was rendered
@@ -1155,6 +1182,11 @@ pub const fn default_agent_spawn_wait_timeout_ms() -> u64 {
 #[must_use]
 pub const fn default_agent_spawn_hold_open_ms() -> u64 {
     DEFAULT_AGENT_SPAWN_HOLD_OPEN_MS
+}
+
+/// Approval gating is on by default for every spawned Claude agent (#927).
+pub const fn default_require_approval_gate() -> bool {
+    true
 }
 
 pub fn validate_agent_spawn_params(params: &ActSpawnAgentParams) -> Result<(), ErrorData> {

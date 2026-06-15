@@ -1125,7 +1125,10 @@ fn per_turn_codex_cumulative_delta_reconciles_to_spawn_total() {
     for (turn, (ti, input, cache_read, output)) in turns.iter().zip(expect) {
         assert_eq!(turn.turn_index, ti, "turn_index");
         assert_eq!(turn.usage.input_tokens, input, "turn {ti} input");
-        assert_eq!(turn.usage.cache_read_tokens, cache_read, "turn {ti} cache_read");
+        assert_eq!(
+            turn.usage.cache_read_tokens, cache_read,
+            "turn {ti} cache_read"
+        );
         assert_eq!(turn.usage.output_tokens, output, "turn {ti} output");
         assert!(
             matches!(turn.output_basis, TurnOutputBasis::Exact),
@@ -1251,7 +1254,10 @@ fn per_turn_claude_real_fixture_exposes_per_message_with_partial_output_flag() {
         CLAUDE_REAL_STREAM,
     );
     let outcome = ingest_spawn_dir_once(&db, spawn, &log_dir, false).expect("ingest");
-    assert_eq!(outcome.new_invalid_rows, 0, "real Claude capture parses fully");
+    assert_eq!(
+        outcome.new_invalid_rows, 0,
+        "real Claude capture parses fully"
+    );
 
     let out = service
         .agent_cost_impl(cost_params_per_turn(Some(spawn)))
@@ -1319,8 +1325,28 @@ fn journal_spawn_with_template(db: &Db, spawn: &str, template_id: &str, version:
 /// returns its hand-computed cost in micro-USD under `fable_price()` rates
 /// (input 3, output 15 USD/Mtok; no cache).
 fn write_simple_claude_spawn(db: &Db, spawn: &str, input: u64, output: u64, ts: u64) -> u64 {
-    write_row(db, spawn, 1, ts, TranscriptSource::ClaudeStreamJson, "system/init", Some("claude-fable-5"), TranscriptRole::System, None);
-    write_row(db, spawn, 2, ts + 10, TranscriptSource::ClaudeStreamJson, "result/success", Some("claude-fable-5"), TranscriptRole::Result, Some(claude_usage(input, output, 0, 0, None)));
+    write_row(
+        db,
+        spawn,
+        1,
+        ts,
+        TranscriptSource::ClaudeStreamJson,
+        "system/init",
+        Some("claude-fable-5"),
+        TranscriptRole::System,
+        None,
+    );
+    write_row(
+        db,
+        spawn,
+        2,
+        ts + 10,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("claude-fable-5"),
+        TranscriptRole::Result,
+        Some(claude_usage(input, output, 0, 0, None)),
+    );
     // micro-USD per token = rate_per_mtok / 1e6, so input*3 + output*15.
     input * 3 + output * 15
 }
@@ -1330,7 +1356,9 @@ fn per_template_rollup_reconciles_and_buckets_unattributed() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     let a = "agent-spawn-aaaa";
     let b = "agent-spawn-bbbb";
@@ -1347,7 +1375,11 @@ fn per_template_rollup_reconciles_and_buckets_unattributed() {
     let out = service.agent_cost_impl(params).expect("rollup");
 
     assert_eq!(out.fleet.computed_micro_usd, cost_a + cost_b + cost_c);
-    assert!(out.scanned_event_rows >= 2, "scanned >=2 SpawnRequested rows, got {}", out.scanned_event_rows);
+    assert!(
+        out.scanned_event_rows >= 2,
+        "scanned >=2 SpawnRequested rows, got {}",
+        out.scanned_event_rows
+    );
 
     let groups = out.per_template.expect("per_template present");
     assert_eq!(groups.len(), 2, "rev + unattributed: {groups:#?}");
@@ -1370,7 +1402,10 @@ fn per_template_rollup_reconciles_and_buckets_unattributed() {
     assert_eq!(resid.spawn_ids, vec![c.to_owned()]);
 
     let summed: u64 = groups.iter().map(|g| g.computed_micro_usd).sum();
-    assert_eq!(summed, out.fleet.computed_micro_usd, "per_template must reconcile with fleet");
+    assert_eq!(
+        summed, out.fleet.computed_micro_usd,
+        "per_template must reconcile with fleet"
+    );
     println!(
         "FSV[per_template] rev={} unattributed={} fleet={} (reconciles)",
         rev.computed_micro_usd, resid.computed_micro_usd, out.fleet.computed_micro_usd
@@ -1382,7 +1417,9 @@ fn per_task_rollup_groups_by_task_and_carries_template() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     let a = "agent-spawn-task-a";
     let b = "agent-spawn-task-b";
@@ -1411,23 +1448,39 @@ fn per_task_rollup_groups_by_task_and_carries_template() {
 
     let groups = out.per_task.expect("per_task present");
     assert_eq!(groups.len(), 3, "two tasks + unattributed: {groups:#?}");
-    let alpha = groups.iter().find(|g| g.key == "task-alpha").expect("alpha");
+    let alpha = groups
+        .iter()
+        .find(|g| g.key == "task-alpha")
+        .expect("alpha");
     assert_eq!(alpha.template_id.as_deref(), Some("rev"));
     assert_eq!(alpha.computed_micro_usd, cost_a);
     assert_eq!(alpha.spawn_ids, vec![a.to_owned()]);
     let beta = groups.iter().find(|g| g.key == "task-beta").expect("beta");
     assert_eq!(beta.template_id.as_deref(), Some("deep"));
     assert_eq!(beta.computed_micro_usd, cost_b);
-    let resid = groups.iter().find(|g| g.key == "(unattributed)").expect("residual");
+    let resid = groups
+        .iter()
+        .find(|g| g.key == "(unattributed)")
+        .expect("residual");
     assert!(!resid.attributed);
     assert_eq!(resid.computed_micro_usd, cost_c);
-    assert_eq!(groups.last().expect("nonempty").key, "(unattributed)", "residual is last");
+    assert_eq!(
+        groups.last().expect("nonempty").key,
+        "(unattributed)",
+        "residual is last"
+    );
 
     let summed: u64 = groups.iter().map(|g| g.computed_micro_usd).sum();
-    assert_eq!(summed, out.fleet.computed_micro_usd, "per_task must reconcile with fleet");
+    assert_eq!(
+        summed, out.fleet.computed_micro_usd,
+        "per_task must reconcile with fleet"
+    );
     println!(
         "FSV[per_task] alpha={} beta={} unattributed={} fleet={} (reconciles)",
-        alpha.computed_micro_usd, beta.computed_micro_usd, resid.computed_micro_usd, out.fleet.computed_micro_usd
+        alpha.computed_micro_usd,
+        beta.computed_micro_usd,
+        resid.computed_micro_usd,
+        out.fleet.computed_micro_usd
     );
 }
 
@@ -1436,29 +1489,50 @@ fn group_by_both_returns_both_rollups_and_omitted_returns_neither() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     let a = "agent-spawn-both-a";
     write_simple_claude_spawn(&db, a, 1_000, 100, 100);
     journal_spawn_with_template(&db, a, "rev", 1, 1_000);
-    service.task_create_for_test("task-x", "rev").expect("create");
+    service
+        .task_create_for_test("task-x", "rev")
+        .expect("create");
     service
         .task_claim_with_spawn_for_test("task-x", "sess-x", a, 1)
         .expect("bind");
 
     // Omitted: no grouping, and the event journal is not scanned at all.
-    let bare = service.agent_cost_impl(cost_params(None, None, None)).expect("bare");
+    let bare = service
+        .agent_cost_impl(cost_params(None, None, None))
+        .expect("bare");
     assert!(bare.per_template.is_none());
     assert!(bare.per_task.is_none());
-    assert_eq!(bare.scanned_event_rows, 0, "no event scan when template not requested");
+    assert_eq!(
+        bare.scanned_event_rows, 0,
+        "no event scan when template not requested"
+    );
 
     let mut params = cost_params(None, None, None);
     params.group_by = vec![AgentCostGroupBy::Template, AgentCostGroupBy::Task];
     let out = service.agent_cost_impl(params).expect("both");
     let tmpl = out.per_template.expect("per_template");
     let task = out.per_task.expect("per_task");
-    assert_eq!(tmpl.iter().find(|g| g.key == "rev").expect("rev").computed_micro_usd, out.fleet.computed_micro_usd);
-    assert_eq!(task.iter().find(|g| g.key == "task-x").expect("task-x").computed_micro_usd, out.fleet.computed_micro_usd);
+    assert_eq!(
+        tmpl.iter()
+            .find(|g| g.key == "rev")
+            .expect("rev")
+            .computed_micro_usd,
+        out.fleet.computed_micro_usd
+    );
+    assert_eq!(
+        task.iter()
+            .find(|g| g.key == "task-x")
+            .expect("task-x")
+            .computed_micro_usd,
+        out.fleet.computed_micro_usd
+    );
 }
 
 #[test]
@@ -1466,17 +1540,49 @@ fn per_template_surfaces_unpriced_model_and_counts_incomplete() {
     let temp = TempDir::new().expect("tempdir");
     let service = service_with_db(temp.path());
     let db = db_of(&service);
-    service.agent_cost_price_put_impl(fable_price()).expect("price");
+    service
+        .agent_cost_price_put_impl(fable_price())
+        .expect("price");
 
     let priced = "agent-spawn-priced";
     let unpriced = "agent-spawn-unpriced";
     let running = "agent-spawn-running";
     let cost_priced = write_simple_claude_spawn(&db, priced, 1_000, 100, 100);
     // Unpriced model, complete: tokens counted, no cost.
-    write_row(&db, unpriced, 1, 200, TranscriptSource::ClaudeStreamJson, "system/init", Some("claude-mystery"), TranscriptRole::System, None);
-    write_row(&db, unpriced, 2, 210, TranscriptSource::ClaudeStreamJson, "result/success", Some("claude-mystery"), TranscriptRole::Result, Some(claude_usage(900, 9, 0, 0, None)));
+    write_row(
+        &db,
+        unpriced,
+        1,
+        200,
+        TranscriptSource::ClaudeStreamJson,
+        "system/init",
+        Some("claude-mystery"),
+        TranscriptRole::System,
+        None,
+    );
+    write_row(
+        &db,
+        unpriced,
+        2,
+        210,
+        TranscriptSource::ClaudeStreamJson,
+        "result/success",
+        Some("claude-mystery"),
+        TranscriptRole::Result,
+        Some(claude_usage(900, 9, 0, 0, None)),
+    );
     // Running: only a non-terminal row -> incomplete.
-    write_row(&db, running, 1, 300, TranscriptSource::ClaudeStreamJson, "system/init", Some("claude-fable-5"), TranscriptRole::System, None);
+    write_row(
+        &db,
+        running,
+        1,
+        300,
+        TranscriptSource::ClaudeStreamJson,
+        "system/init",
+        Some("claude-fable-5"),
+        TranscriptRole::System,
+        None,
+    );
 
     journal_spawn_with_template(&db, priced, "rev", 1, 1_000);
     journal_spawn_with_template(&db, unpriced, "rev", 1, 2_000);
@@ -1489,11 +1595,28 @@ fn per_template_surfaces_unpriced_model_and_counts_incomplete() {
     let groups = out.per_template.expect("per_template");
     let rev = groups.iter().find(|g| g.key == "rev").expect("rev");
     assert_eq!(rev.spawns, 3, "all three counted");
-    assert_eq!(rev.spawns_complete, 2, "priced + unpriced complete; running not");
-    assert_eq!(rev.computed_micro_usd, cost_priced, "cost excludes unpriced + running");
-    assert!(rev.unpriced_models.contains(&"claude-mystery".to_owned()), "{:?}", rev.unpriced_models);
-    assert!(rev.total_tokens >= 900 + 9 + 1_000 + 100, "unpriced tokens still counted: {}", rev.total_tokens);
+    assert_eq!(
+        rev.spawns_complete, 2,
+        "priced + unpriced complete; running not"
+    );
+    assert_eq!(
+        rev.computed_micro_usd, cost_priced,
+        "cost excludes unpriced + running"
+    );
+    assert!(
+        rev.unpriced_models.contains(&"claude-mystery".to_owned()),
+        "{:?}",
+        rev.unpriced_models
+    );
+    assert!(
+        rev.total_tokens >= 900 + 9 + 1_000 + 100,
+        "unpriced tokens still counted: {}",
+        rev.total_tokens
+    );
     let summed: u64 = groups.iter().map(|g| g.computed_micro_usd).sum();
     assert_eq!(summed, out.fleet.computed_micro_usd);
-    println!("FSV[per_template unpriced] rev.computed={} unpriced_models={:?}", rev.computed_micro_usd, rev.unpriced_models);
+    println!(
+        "FSV[per_template unpriced] rev.computed={} unpriced_models={:?}",
+        rev.computed_micro_usd, rev.unpriced_models
+    );
 }

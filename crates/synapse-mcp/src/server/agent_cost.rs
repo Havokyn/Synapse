@@ -934,11 +934,13 @@ impl SynapseService {
             let (spawn_template, scanned) = build_spawn_template_map(&db)?;
             scanned_event_rows = scanned;
             Some(group_rollups(&spawn_rollups, |spawn_id| {
-                spawn_template.get(spawn_id).map(|(template_id, version)| Attribution {
-                    key: template_id.clone(),
-                    template_id: None,
-                    template_version: *version,
-                })
+                spawn_template
+                    .get(spawn_id)
+                    .map(|(template_id, version)| Attribution {
+                        key: template_id.clone(),
+                        template_id: None,
+                        template_version: *version,
+                    })
             }))
         } else {
             None
@@ -946,11 +948,13 @@ impl SynapseService {
         let per_task = if want_task {
             let spawn_task = build_spawn_task_map(&db)?;
             Some(group_rollups(&spawn_rollups, |spawn_id| {
-                spawn_task.get(spawn_id).map(|(task_id, template_id)| Attribution {
-                    key: task_id.clone(),
-                    template_id: Some(template_id.clone()),
-                    template_version: None,
-                })
+                spawn_task
+                    .get(spawn_id)
+                    .map(|(task_id, template_id)| Attribution {
+                        key: task_id.clone(),
+                        template_id: Some(template_id.clone()),
+                        template_version: None,
+                    })
             }))
         } else {
             None
@@ -1371,12 +1375,12 @@ fn build_spawn_turns(
     let price = prices.get(&ModelPrice::normalize_id(&model_label));
 
     let (method, output_basis, exact) = match resolved.source {
-        TranscriptSource::CodexExecJson => {
-            ("codex_cumulative_delta", TurnOutputBasis::Exact, true)
-        }
-        TranscriptSource::ClaudeStreamJson => {
-            ("claude_per_message", TurnOutputBasis::PartialSnapshot, false)
-        }
+        TranscriptSource::CodexExecJson => ("codex_cumulative_delta", TurnOutputBasis::Exact, true),
+        TranscriptSource::ClaudeStreamJson => (
+            "claude_per_message",
+            TurnOutputBasis::PartialSnapshot,
+            false,
+        ),
         TranscriptSource::LocalModelJson => ("local_per_turn", TurnOutputBasis::Exact, true),
     };
 

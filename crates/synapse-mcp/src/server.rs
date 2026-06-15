@@ -213,6 +213,8 @@ mod m2_tools;
 mod m3_tools;
 pub(crate) mod m4_tools;
 mod notify_tools;
+mod permission_gate;
+mod permission_policy;
 mod reality;
 mod schema_sanitize;
 pub(crate) mod session_continuity;
@@ -558,6 +560,7 @@ impl SynapseService {
             + Self::notify_tool_router()
             + Self::hygiene_report_tool_router()
             + Self::data_cleaning_tool_router()
+            + Self::permission_gate_tool_router()
             + Self::escalation_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface
         // unless the operator opts in (SYNAPSE_ENABLE_EVERQUEST). No capability

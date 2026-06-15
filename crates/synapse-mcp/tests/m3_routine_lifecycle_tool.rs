@@ -152,11 +152,33 @@ async fn routine_lifecycle_survives_mining_and_audits_transitions() -> anyhow::R
     let jitter_min: [i64; 5] = [0, 5, -5, 10, -10];
     for (index, jitter) in jitter_min.iter().enumerate() {
         let days_ago = u64::try_from(5 - index)?;
-        let base = u64::try_from(i64::try_from(local_ts_ns(days_ago, 9, 0)?)? + jitter * 60_000_000_000)?;
+        let base =
+            u64::try_from(i64::try_from(local_ts_ns(days_ago, 9, 0)?)? + jitter * 60_000_000_000)?;
         let tag = format!("d{days_ago}");
-        seed_focus(&mut client, &format!("{tag}-outlook"), base, "outlook.exe", "Inbox - Outlook").await?;
-        seed_focus(&mut client, &format!("{tag}-excel"), base + 2 * MIN, "excel.exe", "report.xlsx - Excel").await?;
-        seed_focus(&mut client, &format!("{tag}-teams"), base + 7 * MIN, "teams.exe", "Chat - Teams").await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-outlook"),
+            base,
+            "outlook.exe",
+            "Inbox - Outlook",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-excel"),
+            base + 2 * MIN,
+            "excel.exe",
+            "report.xlsx - Excel",
+        )
+        .await?;
+        seed_focus(
+            &mut client,
+            &format!("{tag}-teams"),
+            base + 7 * MIN,
+            "teams.exe",
+            "Chat - Teams",
+        )
+        .await?;
         seed_idle(&mut client, &format!("{tag}-idle"), base + 9 * MIN).await?;
     }
     let segmented = structured(&client.tools_call("episode_segment", json!({})).await?)?;
@@ -221,7 +243,10 @@ async fn routine_lifecycle_survives_mining_and_audits_transitions() -> anyhow::R
         .to_owned();
     let episode = structured(
         &client
-            .tools_call("episode_get", json!({"episode_id": first_episode_id.clone()}))
+            .tools_call(
+                "episode_get",
+                json!({"episode_id": first_episode_id.clone()}),
+            )
             .await?,
     )?;
     println!(
@@ -279,7 +304,10 @@ async fn routine_lifecycle_survives_mining_and_audits_transitions() -> anyhow::R
         )
         .await?
         .to_string();
-    assert!(rename_no_label.contains("requires a label"), "{rename_no_label}");
+    assert!(
+        rename_no_label.contains("requires a label"),
+        "{rename_no_label}"
+    );
 
     // Rename: label set, lifecycle unchanged, audit entry records both.
     let renamed = structured(
@@ -440,7 +468,10 @@ async fn routine_lifecycle_survives_mining_and_audits_transitions() -> anyhow::R
 
     // Re-mining re-derives the same stable id and re-links the state row.
     let restored = structured(&client.tools_call("routine_mine", json!({})).await?)?;
-    assert_eq!(restored["routines"][0]["routine_id"], json!(routine_id.clone()));
+    assert_eq!(
+        restored["routines"][0]["routine_id"],
+        json!(routine_id.clone())
+    );
     assert_eq!(restored["state_rows_created"], 0);
     assert_eq!(restored["state_rows_updated"], 1);
 

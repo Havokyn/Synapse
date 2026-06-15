@@ -368,7 +368,12 @@ pub fn current_intents(
     let mut scanned_rows = 0_u64;
     let episodes = recent_episodes(db, window_start_ns, now_ts, &mut scanned_rows)?;
     let routines = load_cf(db, cf::CF_ROUTINES, &mut scanned_rows, decode_routine_row)?;
-    let states = load_cf(db, cf::CF_ROUTINE_STATE, &mut scanned_rows, decode_state_row)?;
+    let states = load_cf(
+        db,
+        cf::CF_ROUTINE_STATE,
+        &mut scanned_rows,
+        decode_state_row,
+    )?;
 
     let total_mined_routines = u64::try_from(routines.len()).unwrap_or(u64::MAX);
     let total_state_rows = u64::try_from(states.len()).unwrap_or(u64::MAX);
@@ -396,9 +401,8 @@ pub fn current_intents(
         .collect();
     let evaluated_routines = u64::try_from(for_match.len()).unwrap_or(u64::MAX);
 
-    let candidates = match_intents(&episodes, &for_match, now, &config).map_err(|error| {
-        internal(format!("intent_current matcher failed: {error}"))
-    })?;
+    let candidates = match_intents(&episodes, &for_match, now, &config)
+        .map_err(|error| internal(format!("intent_current matcher failed: {error}")))?;
 
     tracing::info!(
         code = "INTENT_CURRENT_COMPUTED",

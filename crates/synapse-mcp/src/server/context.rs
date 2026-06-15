@@ -525,6 +525,120 @@ impl SynapseService {
         result
     }
 
+    /// Decide a pending approval from the dashboard Approvals inbox (#927).
+    ///
+    /// Unlike [`Self::approval_decide_from_activation`] this needs no one-time
+    /// token — the HTTP route is already loopback + CSRF guarded. It records
+    /// the decision in the durable `CF_KV` queue, wakes any `approval_gate`
+    /// call blocked on this approval so the agent resumes immediately, and
+    /// acknowledges any linked escalation (a no-op for `agent_permission`
+    /// gate rows, which carry no escalation).
+    pub(crate) fn approval_decide_from_dashboard(
+        &self,
+        approval_id: &str,
+        decision: crate::m3::approvals::ApprovalDecision,
+        note: Option<&str>,
+        by_session: &str,
+    ) -> Result<crate::m3::approvals::ApprovalDecideResponse, ErrorData> {
+        let db = self.m3_storage()?;
+        let command_payload = json!({
+            "approval_id": approval_id,
+            "decision": decision.as_str(),
+            "note": note,
+        });
+        let command_before = json!({
+            "source_of_truth": "CF_KV approval queue rows plus approval audit rows",
+            "approval_id": approval_id,
+        });
+        self.command_audit_intent(
+            super::command_audit::CommandAuditInput::mcp(
+                "approval_decide",
+                "approval_decision",
+                Some(by_session.to_owned()),
+                Some(by_session.to_owned()),
+                command_payload.clone(),
+                command_before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_channel("dashboard"),
+        )?;
+        let params = crate::m3::approvals::ApprovalDecideParams {
+            approval_id: approval_id.to_owned(),
+            decision,
+            note: note.map(str::to_owned),
+            snooze_ms: None,
+        };
+        let result = match crate::m3::approvals::decide_approval(&db, &params, by_session) {
+            Ok(response) => {
+                // Wake the blocked gate promptly (the gate also re-reads CF_KV
+                // as source of truth, so this is an optimization, not the
+                // correctness path).
+                super::permission_gate::signal_decision(approval_id);
+                match super::escalation::ack_from_approval_item_decision(
+                    &db,
+                    &response.item,
+                    decision.as_str(),
+                    response.item.decision_note.as_deref(),
+                    by_session,
+                    super::session_registry::unix_time_ms_now(),
+                ) {
+                    Ok(_maybe_escalation) => Ok(response),
+                    Err(error) => {
+                        tracing::error!(
+                            code = "ESCALATION_APPROVAL_DASHBOARD_ACK_FAILED",
+                            approval_id = %approval_id,
+                            decision = %decision.as_str(),
+                            detail = %error.message,
+                            "dashboard decided durable queue row but failed to acknowledge linked escalation"
+                        );
+                        Err(error)
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        match &result {
+            Ok(response) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "approval_decide",
+                    "approval_decision",
+                    Some(by_session.to_owned()),
+                    Some(by_session.to_owned()),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "CF_KV approval queue rows plus approval audit rows",
+                        "approval_id": &response.approval_id,
+                        "before_status": response.before_status.as_str(),
+                        "after_status": response.after_status.as_str(),
+                        "item_row": &response.item_row,
+                        "audit_row": &response.audit_row,
+                    }),
+                    "ok",
+                )
+                .with_channel("dashboard"),
+            )?,
+            Err(error) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "approval_decide",
+                    "approval_decision",
+                    Some(by_session.to_owned()),
+                    Some(by_session.to_owned()),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "CF_KV approval queue rows plus approval audit rows",
+                    }),
+                    "error",
+                )
+                .with_channel("dashboard")
+                .with_error(super::command_audit::command_audit_error_from_error_data(error)),
+            )?,
+        };
+        result
+    }
+
     fn install_aim_track_target_source(
         &self,
         runtime: &Arc<Mutex<synapse_reflex::ReflexRuntime>>,

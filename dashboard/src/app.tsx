@@ -4,15 +4,16 @@ import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable, type Col
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import {
   ArrowUpDown,
-  BarChart3,
   Bell,
+  CalendarClock,
   ChevronDown,
   CheckCircle2,
   ClipboardList,
   Command,
+  Database,
+  Eraser,
   FileSearch,
   Gauge,
-  HardDrive,
   LogIn,
   LogOut,
   MonitorUp,
@@ -59,6 +60,7 @@ import {
 import {
   buildAgents,
   buildToolCalls,
+  decideApproval,
   deleteDashboardView,
   fetchAuditQuery,
   fetchTemplates,
@@ -74,8 +76,10 @@ import {
   panelData,
   pauseTimeline,
   pruneTargetClaims,
+  purgeTimelineRecordings,
   registerApiModel,
   resumeTimeline,
+  runStorageGc,
   saveDashboardView,
   spawnAgent,
   type AgentSummary,
@@ -91,7 +95,10 @@ import {
   type ModelRow,
   type AgentKillResponse,
   type SpawnAgentResponse,
-  type TimelineControlResponse
+  type StorageGcReadback,
+  type TimelineControlResponse,
+  type TimelinePurgeReadback,
+  type TimelinePurgeRequest
 } from "@/lib/dashboard-state";
 import { asArray, asRecord, cn, nsToTime, rawText, timeAgo, unixMsToTime } from "@/lib/utils";
 import { useUiStore, type DashboardRouteId, type Density, type Theme } from "@/store/ui-store";
@@ -108,11 +115,22 @@ const routeDefinitions: RouteDefinition[] = [
   { id: "agent", label: "Agent", title: "Agent Detail", icon: UserRound },
   { id: "tasks", label: "Tasks", title: "Task Board", icon: ClipboardList },
   { id: "approvals", label: "Approvals", title: "Approvals Inbox", icon: CheckCircle2 },
-  { id: "analytics", label: "Analytics", title: "Cost & Token Analytics", icon: BarChart3 },
-  { id: "timeline", label: "Timeline", title: "Timeline", icon: Rows3 },
-  { id: "system", label: "System", title: "System Status", icon: ServerCog },
+  { id: "system", label: "System", title: "System, Storage & Activity", icon: ServerCog },
   { id: "audit", label: "Audit", title: "Audit Explorer", icon: ShieldCheck }
 ];
+
+// `analytics` and `timeline` were merged into the System view (#927 follow-up).
+// They remain valid route ids (persisted UI state, saved views, and bookmarked
+// `#/analytics` / `#/timeline` links) but normalize to `system` so old links and
+// stored state land on the unified page instead of a blank route.
+const ROUTE_ALIASES: Partial<Record<DashboardRouteId, DashboardRouteId>> = {
+  analytics: "system",
+  timeline: "system"
+};
+
+function normalizeRoute(route: DashboardRouteId): DashboardRouteId {
+  return ROUTE_ALIASES[route] ?? route;
+}
 
 const auditTextFields = ["cursor", "start_ts_ns", "end_ts_ns", "session_id", "tool", "status", "error_code", "row_kind"] as const;
 
@@ -280,7 +298,8 @@ export function App() {
   const state = query.data;
   const freshnessMs = state ? Date.now() - state.generated_at_unix_ms : undefined;
   const stale = query.isError || (freshnessMs !== undefined && freshnessMs > 10000);
-  const activeRoute = routeDefinitions.find((item) => item.id === route) ?? routeDefinitions[0];
+  const normalizedRoute = normalizeRoute(route);
+  const activeRoute = routeDefinitions.find((item) => item.id === normalizedRoute) ?? routeDefinitions[0];
 
   const commands = useMemo(
     () => [
@@ -457,7 +476,7 @@ export function App() {
         }
       />
 
-      {route === "fleet" ? (
+      {normalizedRoute === "fleet" ? (
         <FleetView
           state={state}
           agents={agents}
@@ -472,13 +491,13 @@ export function App() {
           onAuditKeySelect={focusAuditKey}
         />
       ) : null}
-      {route === "agent" ? <AgentView state={state} selectedAgent={selectedAgent} toolCalls={toolCalls} onAuditKeySelect={focusAuditKey} /> : null}
-      {route === "tasks" ? <TasksView agents={agents} attentionCount={attentionCount} /> : null}
-      {route === "approvals" ? <ApprovalsView state={state} /> : null}
-      {route === "analytics" ? <AnalyticsView state={state} agents={agents} attentionCount={attentionCount} stale={stale} /> : null}
-      {route === "timeline" ? <TimelineView state={state} toolCalls={toolCalls} /> : null}
-      {route === "system" ? <SystemView state={state} stale={stale} onRefresh={() => query.refetch()} /> : null}
-      {route === "audit" ? (
+      {normalizedRoute === "agent" ? <AgentView state={state} selectedAgent={selectedAgent} toolCalls={toolCalls} onAuditKeySelect={focusAuditKey} /> : null}
+      {normalizedRoute === "tasks" ? <TasksView agents={agents} attentionCount={attentionCount} /> : null}
+      {normalizedRoute === "approvals" ? <ApprovalsView state={state} onDecided={() => query.refetch()} /> : null}
+      {normalizedRoute === "system" ? (
+        <SystemView state={state} agents={agents} attentionCount={attentionCount} toolCalls={toolCalls} stale={stale} onRefresh={() => query.refetch()} />
+      ) : null}
+      {normalizedRoute === "audit" ? (
         <AuditView state={state} toolCalls={toolCalls} filters={auditFilters} onFiltersChange={setAuditFilters} />
       ) : null}
 
@@ -933,63 +952,916 @@ function TasksView({ agents, attentionCount }: { agents: AgentSummary[]; attenti
   );
 }
 
-function ApprovalsView({ state }: { state?: DashboardState }) {
+interface ApprovalRow {
+  approvalId: string;
+  kind: string;
+  status: string;
+  title: string;
+  body: string;
+  destructive: boolean;
+  createdMs: number;
+  updatedMs: number;
+  expiresMs?: number;
+  toolName?: string;
+  spawnId?: string;
+  command?: string;
+  inputPretty?: string;
+  raw: Record<string, unknown>;
+}
+
+function parseApprovalRows(panel?: DashboardState["approvals"]): ApprovalRow[] {
+  const data = asRecord(panelData(panel));
+  const rows = asArray<Record<string, unknown>>(data.rows);
+  return rows
+    .map((row): ApprovalRow | null => {
+      const item = asRecord(row.item);
+      const approvalId = rawText(item.approval_id);
+      if (!approvalId) return null;
+      let payload: Record<string, unknown> = {};
+      const payloadJson = item.payload_json;
+      if (typeof payloadJson === "string" && payloadJson.length) {
+        try {
+          payload = asRecord(JSON.parse(payloadJson));
+        } catch {
+          /* leave payload empty; raw stays available below */
+        }
+      }
+      const input = payload.input;
+      const command =
+        asRecord(input).command && typeof asRecord(input).command === "string"
+          ? (asRecord(input).command as string)
+          : undefined;
+      const inputPretty =
+        input === undefined || input === null
+          ? undefined
+          : JSON.stringify(input, null, 2);
+      return {
+        approvalId,
+        kind: rawText(item.kind) || "unknown",
+        status: rawText(item.status) || "pending",
+        title: rawText(item.title) || approvalId,
+        body: rawText(item.body),
+        destructive: item.destructive === true,
+        createdMs: Number(item.created_at_unix_ms) || 0,
+        updatedMs: Number(item.updated_at_unix_ms) || 0,
+        expiresMs:
+          item.expires_at_unix_ms == null ? undefined : Number(item.expires_at_unix_ms),
+        toolName: rawText(payload.tool_name) || undefined,
+        spawnId: rawText(payload.spawn_id) || undefined,
+        command,
+        inputPretty,
+        raw: item
+      };
+    })
+    .filter((row): row is ApprovalRow => row !== null);
+}
+
+const APPROVAL_KIND_LABEL: Record<string, string> = {
+  agent_permission: "Agent permission",
+  agent_escalation: "Agent escalation",
+  suggestion: "Suggestion",
+  armed_run_review: "Armed run"
+};
+
+function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided?: () => void }) {
+  const rows = useMemo(() => parseApprovalRows(state?.approvals), [state]);
+  const agentRows = useMemo(
+    () => rows.filter((row) => row.kind === "agent_permission" || row.kind === "agent_escalation"),
+    [rows]
+  );
+  const otherRows = useMemo(
+    () => rows.filter((row) => row.kind !== "agent_permission" && row.kind !== "agent_escalation"),
+    [rows]
+  );
+
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  async function decide(approvalId: string, decision: "approve" | "deny") {
+    setBusy((prev) => ({ ...prev, [approvalId]: true }));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[approvalId];
+      return next;
+    });
+    try {
+      const note = notes[approvalId]?.trim();
+      await decideApproval({ approval_id: approvalId, decision, note: note || undefined });
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(approvalId);
+        return next;
+      });
+      onDecided?.();
+    } catch (err) {
+      setErrors((prev) => ({
+        ...prev,
+        [approvalId]: err instanceof Error ? err.message : String(err)
+      }));
+    } finally {
+      setBusy((prev) => ({ ...prev, [approvalId]: false }));
+    }
+  }
+
+  async function decideSelected(decision: "approve" | "deny") {
+    for (const id of Array.from(selected)) {
+      // Sequential so one failure surfaces against its own card without
+      // racing the shared refetch.
+      // eslint-disable-next-line no-await-in-loop
+      await decide(id, decision);
+    }
+  }
+
+  function toggleSelected(approvalId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(approvalId)) next.delete(approvalId);
+      else next.add(approvalId);
+      return next;
+    });
+  }
+
+  const selectedCount = selected.size;
+
   return (
-    <div className="grid gap-6 xl:grid-cols-3">
-      <ApprovalPanel title="Approvals" panel={state?.approvals} />
-      <ApprovalPanel title="Suggestions" panel={state?.suggestions} />
-      <ApprovalPanel title="Armed Runs" panel={state?.armed_runs} />
+    <div className="space-y-6">
+      <Section
+        title="Agents awaiting your decision"
+        tier="triage"
+        questions={[
+          "Which agents are paused waiting on a human?",
+          "What exact action does each want to run?",
+          "Does approving here resume the blocked agent?"
+        ]}
+        actions={
+          selectedCount ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-secondary">{selectedCount} selected</span>
+              <Button size="sm" variant="secondary" onClick={() => void decideSelected("approve")}>
+                <CheckCircle2 className="size-4" /> Approve selected
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void decideSelected("deny")}>
+                <X className="size-4" /> Deny selected
+              </Button>
+            </div>
+          ) : undefined
+        }
+      >
+        <div className="mb-3 flex items-center gap-3">
+          <StatCard
+            label="Pending"
+            value={agentRows.length}
+            status={agentRows.length ? "awaiting_approval" : "done"}
+            delta={agentRows.length ? "blocking agents" : "fleet unblocked"}
+          />
+        </div>
+        {agentRows.length ? (
+          <div className="space-y-3">
+            {agentRows.map((row) => (
+              <ApprovalCard
+                key={row.approvalId}
+                row={row}
+                busy={!!busy[row.approvalId]}
+                error={errors[row.approvalId]}
+                note={notes[row.approvalId] ?? ""}
+                selected={selected.has(row.approvalId)}
+                onToggleSelected={() => toggleSelected(row.approvalId)}
+                onNote={(value) => setNotes((prev) => ({ ...prev, [row.approvalId]: value }))}
+                onApprove={() => void decide(row.approvalId, "approve")}
+                onDeny={() => void decide(row.approvalId, "deny")}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyStateArt title="No agents are waiting for approval" />
+        )}
+      </Section>
+
+      {otherRows.length ? (
+        <Section
+          title="Suggestions & armed runs"
+          tier="triage"
+          questions={["Which non-blocking proposals are queued?", "Do any need a decision before they expire?"]}
+        >
+          <div className="space-y-3">
+            {otherRows.map((row) => (
+              <ApprovalCard
+                key={row.approvalId}
+                row={row}
+                busy={!!busy[row.approvalId]}
+                error={errors[row.approvalId]}
+                note={notes[row.approvalId] ?? ""}
+                selected={selected.has(row.approvalId)}
+                onToggleSelected={() => toggleSelected(row.approvalId)}
+                onNote={(value) => setNotes((prev) => ({ ...prev, [row.approvalId]: value }))}
+                onApprove={() => void decide(row.approvalId, "approve")}
+                onDeny={() => void decide(row.approvalId, "deny")}
+              />
+            ))}
+          </div>
+        </Section>
+      ) : null}
     </div>
   );
 }
 
-function ApprovalPanel({ title, panel }: { title: string; panel?: DashboardState["approvals"] }) {
-  const data = asRecord(panelData(panel));
-  const rows = asArray<Record<string, unknown>>(data.rows);
+function ApprovalCard({
+  row,
+  busy,
+  error,
+  note,
+  selected,
+  onToggleSelected,
+  onNote,
+  onApprove,
+  onDeny
+}: {
+  row: ApprovalRow;
+  busy: boolean;
+  error?: string;
+  note: string;
+  selected: boolean;
+  onToggleSelected: () => void;
+  onNote: (value: string) => void;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  const kindLabel = APPROVAL_KIND_LABEL[row.kind] ?? row.kind;
+  const expiresInMs = row.expiresMs ? row.expiresMs - Date.now() : undefined;
+  const expiresLabel =
+    expiresInMs === undefined
+      ? undefined
+      : expiresInMs <= 0
+        ? "expired"
+        : `expires in ${Math.max(1, Math.round(expiresInMs / 60000))}m`;
+
   return (
-    <Section
-      title={title}
-      tier="triage"
-      questions={["Which approvals are pending?", "What source row backs this list?", "Does raw detail stay collapsed?"]}
-    >
-      <div className="space-y-3">
-        <StatCard label="Rows" value={rows.length} status={rows.length ? "awaiting_approval" : "done"} delta={rawText(data.tool || panel?.source)} />
-        {rows.length ? rows.slice(0, 4).map((row, index) => <RawValue key={index} value={row} label="Approval row" />) : <EmptyStateArt title="No approval rows" />}
+    <div className="rounded-lg border border-border bg-surface p-[var(--density-card-padding)]">
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          aria-label="Select approval"
+          checked={selected}
+          onChange={onToggleSelected}
+          className="mt-1 size-4 accent-[var(--accent)]"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded bg-canvas px-2 py-0.5 font-mono text-[11px] uppercase tracking-wide text-secondary">
+              {kindLabel}
+            </span>
+            {row.destructive ? (
+              <span className="rounded bg-[var(--danger-surface,#3a1f1f)] px-2 py-0.5 text-[11px] font-semibold text-[var(--danger,#ff6b6b)]">
+                destructive
+              </span>
+            ) : null}
+            {row.toolName ? (
+              <span className="font-mono text-xs text-primary">{row.toolName}</span>
+            ) : null}
+            <span className="ml-auto text-[11px] text-tertiary">
+              {row.createdMs ? timeAgo(row.createdMs) : ""}
+              {expiresLabel ? ` · ${expiresLabel}` : ""}
+            </span>
+          </div>
+
+          <div className="mt-1 text-sm font-medium text-primary">{row.title}</div>
+          {row.spawnId ? (
+            <div className="mt-0.5 font-mono text-[11px] text-tertiary">agent: {row.spawnId}</div>
+          ) : null}
+
+          {row.command ? (
+            <pre className="mt-2 overflow-x-auto rounded bg-canvas p-2 font-mono text-xs text-primary">
+              {row.command}
+            </pre>
+          ) : row.inputPretty ? (
+            <pre className="mt-2 max-h-48 overflow-auto rounded bg-canvas p-2 font-mono text-[11px] text-secondary">
+              {row.inputPretty}
+            </pre>
+          ) : (
+            <div className="mt-2 text-xs text-secondary">{row.body}</div>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={note}
+              onChange={(event) => onNote(event.target.value)}
+              placeholder="Optional note / reason…"
+              className="h-8 min-w-[12rem] flex-1 rounded border border-border bg-canvas px-2 text-xs text-primary placeholder:text-tertiary"
+            />
+            <Button size="sm" variant="secondary" disabled={busy} onClick={onApprove}>
+              <CheckCircle2 className="size-4" /> {busy ? "…" : "Approve"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={onDeny}>
+              <X className="size-4" /> Deny
+            </Button>
+          </div>
+          {error ? (
+            <div className="mt-2 text-xs text-[var(--danger,#ff6b6b)]">{error}</div>
+          ) : null}
+        </div>
       </div>
-    </Section>
+    </div>
   );
 }
 
-function AnalyticsView({ state, agents, attentionCount, stale }: { state?: DashboardState; agents: AgentSummary[]; attentionCount: number; stale: boolean }) {
+// ---------------------------------------------------------------------------
+// Storage usage model (#927 follow-up): disk usage is measured in BYTES
+// (cf_sizes), never row counts. A column family with millions of tiny rows can
+// occupy less disk than one with a few large OCR/screenshot blobs, so the byte
+// footprint is the only honest answer to "what is using my disk".
+// ---------------------------------------------------------------------------
+
+type CfCategory = "recordings" | "audit" | "agents" | "intelligence" | "system";
+
+interface CfMeta {
+  label: string;
+  category: CfCategory;
+  description: string;
+  /** Which management lever applies: time-range timeline purge, row-cap GC, or none. */
+  manage: "timeline" | "gc" | null;
+}
+
+const CF_META: Record<string, CfMeta> = {
+  CF_TIMELINE: {
+    label: "Activity Recordings",
+    category: "recordings",
+    description: "Focus changes, browser navigation, window titles, clipboard and file activity captured as you work.",
+    manage: "timeline"
+  },
+  CF_ACTION_LOG: {
+    label: "Action & Command Audit",
+    category: "audit",
+    description: "Every tool / command invocation and its outcome.",
+    manage: "gc"
+  },
+  CF_REFLEX_AUDIT: {
+    label: "Reflex Audit",
+    category: "audit",
+    description: "Fired automation reflexes and the events that triggered them.",
+    manage: "gc"
+  },
+  CF_EVENTS: { label: "Event Stream", category: "audit", description: "Internal event-bus records.", manage: "gc" },
+  CF_AGENT_TRANSCRIPTS: {
+    label: "Agent Transcripts",
+    category: "agents",
+    description: "Captured stdout transcripts from spawned agents.",
+    manage: "gc"
+  },
+  CF_AGENT_EVENTS: {
+    label: "Agent Journal",
+    category: "agents",
+    description: "Lifecycle journal (OTel GenAI) for spawned agents.",
+    manage: "gc"
+  },
+  CF_EPISODES: {
+    label: "Activity Episodes",
+    category: "intelligence",
+    description: "Segmented work sessions derived from the timeline.",
+    manage: "gc"
+  },
+  CF_ROUTINES: { label: "Mined Routines", category: "intelligence", description: "Recurring patterns mined from episodes.", manage: null },
+  CF_ROUTINE_STATE: {
+    label: "Routine State",
+    category: "intelligence",
+    description: "Operator lifecycle state for mined routines.",
+    manage: null
+  },
+  CF_OBSERVATIONS: {
+    label: "Observations / OCR",
+    category: "intelligence",
+    description: "Screen observations and OCR snapshots — large blobs, few rows.",
+    manage: "gc"
+  },
+  CF_OCR_CACHE: { label: "OCR Cache", category: "system", description: "Cached OCR text keyed by image hash.", manage: "gc" },
+  CF_PROCESS_HISTORY: {
+    label: "Process History",
+    category: "system",
+    description: "Foreground process and window history.",
+    manage: "gc"
+  },
+  CF_KV: {
+    label: "Config & State",
+    category: "system",
+    description: "Dashboard auth, saved views, templates, control rows, encrypted secrets.",
+    manage: null
+  },
+  CF_MODEL_CACHE: { label: "Model Cache", category: "system", description: "Cached model metadata.", manage: null },
+  CF_SESSIONS: { label: "Sessions", category: "system", description: "Session lifecycle and ownership records.", manage: null },
+  CF_PROFILES: { label: "Profiles", category: "system", description: "Installed perception / automation profiles.", manage: null },
+  CF_TELEMETRY: { label: "Telemetry", category: "system", description: "Local telemetry counters.", manage: null }
+};
+
+const CATEGORY_ORDER: CfCategory[] = ["recordings", "audit", "agents", "intelligence", "system"];
+
+const CATEGORY_META: Record<CfCategory, { label: string; color: string }> = {
+  recordings: { label: "Activity Recordings", color: "var(--info)" },
+  audit: { label: "Audit & Logs", color: "var(--warning)" },
+  agents: { label: "Agent Data", color: "var(--success)" },
+  intelligence: { label: "Derived Intelligence", color: "var(--accent)" },
+  system: { label: "System & Cache", color: "var(--text-muted)" }
+};
+
+function cfMeta(cf: string): CfMeta {
+  return CF_META[cf] ?? { label: cf.replace(/^CF_/, ""), category: "system", description: "Uncategorized column family.", manage: null };
+}
+
+/** Epoch ms → epoch ns as a decimal string (ns exceed Number.MAX_SAFE_INTEGER). */
+function msToNsString(ms: number): string {
+  return (BigInt(Math.floor(ms)) * 1_000_000n).toString();
+}
+
+// Mirrors synapse-storage gc.rs `remove_count` (Rows unit): an explicit row cap
+// evicts EXACTLY the overage, landing the store precisely on the cap (no minimum
+// batch), so the dashboard's predicted count is the count GC will delete.
+function predictEviction(rows: number, cap: number): number {
+  if (rows <= cap || rows <= 0) return 0;
+  return rows - cap;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exp;
+  const text = value >= 100 || exp === 0 ? Math.round(value).toString() : value.toFixed(1);
+  return `${text} ${units[exp]}`;
+}
+
+interface StorageRow {
+  cf: string;
+  label: string;
+  category: CfCategory;
+  description: string;
+  manage: CfMeta["manage"];
+  bytes: number;
+  rows: number;
+  avgRow: number;
+  pct: number;
+}
+
+interface StorageModel {
+  rows: StorageRow[];
+  totalBytes: number;
+  totalRows: number;
+  maxBytes: number;
+  categoryTotals: Array<{ category: CfCategory; bytes: number; pct: number }>;
+}
+
+function buildStorageModel(state?: DashboardState): StorageModel {
+  const storage = asRecord(panelData(state?.storage));
+  const sizes = asRecord(storage.cf_sizes);
+  const counts = asRecord(storage.cf_row_counts);
+  const names = new Set<string>([...Object.keys(sizes), ...Object.keys(counts)]);
+  const rows: StorageRow[] = [...names].map((cf) => {
+    const meta = cfMeta(cf);
+    const bytes = Number(sizes[cf]) || 0;
+    const rowCount = Number(counts[cf]) || 0;
+    return {
+      cf,
+      label: meta.label,
+      category: meta.category,
+      description: meta.description,
+      manage: meta.manage,
+      bytes,
+      rows: rowCount,
+      avgRow: rowCount > 0 ? bytes / rowCount : 0,
+      pct: 0
+    };
+  });
+  const totalBytes = rows.reduce((sum, row) => sum + row.bytes, 0);
+  const totalRows = rows.reduce((sum, row) => sum + row.rows, 0);
+  for (const row of rows) row.pct = totalBytes > 0 ? (row.bytes / totalBytes) * 100 : 0;
+  rows.sort((a, b) => b.bytes - a.bytes);
+  const maxBytes = rows.reduce((max, row) => Math.max(max, row.bytes), 0);
+  const categoryTotals = CATEGORY_ORDER.map((category) => {
+    const bytes = rows.filter((row) => row.category === category).reduce((sum, row) => sum + row.bytes, 0);
+    return { category, bytes, pct: totalBytes > 0 ? (bytes / totalBytes) * 100 : 0 };
+  }).filter((entry) => entry.bytes > 0);
+  return { rows, totalBytes, totalRows, maxBytes, categoryTotals };
+}
+
+function StorageUsage({ state }: { state?: DashboardState }) {
+  const model = useMemo(() => buildStorageModel(state), [state]);
+  const storage = asRecord(panelData(state?.storage));
+  const pressureName = rawText(asRecord(storage.pressure_level).name || "unknown");
+  if (!model.rows.length || model.totalBytes <= 0) return <EmptyStateArt title="No storage rows" />;
   return (
-    <>
-      <OverviewBand state={state} agents={agents} attentionCount={attentionCount} stale={stale} />
-      <Section
-        title="Storage Distribution"
-        tier="triage"
-        questions={["Which store has the most rows?", "Is pressure elevated?", "Which counters changed since refresh?"]}
-      >
-        <SystemShape state={state} />
-      </Section>
-    </>
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard label="Total on disk" value={formatBytes(model.totalBytes)} status="working" delta={`${model.totalRows.toLocaleString()} rows`} />
+        <StatCard label="Stores" value={model.rows.filter((row) => row.bytes > 0).length} status="idle" delta={`${model.rows.length} column families`} />
+        <StatCard label="Pressure" value={pressureName} status={/level[34]|refus/i.test(pressureName) ? "stuck" : /level[12]/i.test(pressureName) ? "needs_input" : "done"} delta={state?.storage.source || "storage_inspect"} />
+      </div>
+
+      <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+        <div className="mb-2 text-label font-medium uppercase text-muted">Composition by category (bytes)</div>
+        <div className="flex h-4 w-full overflow-hidden rounded-md border border-border-subtle bg-surface-2" role="img" aria-label="Storage composition by category">
+          {model.categoryTotals.map((entry) => (
+            <div
+              key={entry.category}
+              style={{ width: `${Math.max(entry.pct, 0.5)}%`, background: CATEGORY_META[entry.category].color }}
+              title={`${CATEGORY_META[entry.category].label}: ${formatBytes(entry.bytes)} (${entry.pct.toFixed(1)}%)`}
+            />
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+          {model.categoryTotals.map((entry) => (
+            <span key={entry.category} className="inline-flex items-center gap-2 text-xs text-secondary">
+              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: CATEGORY_META[entry.category].color }} aria-hidden="true" />
+              {CATEGORY_META[entry.category].label}
+              <span className="font-mono text-muted">{formatBytes(entry.bytes)} · {entry.pct.toFixed(0)}%</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-border">
+        <table className="w-full min-w-[640px] border-collapse text-sm">
+          <thead className="bg-surface-2 text-label uppercase text-muted">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">Data store</th>
+              <th className="px-3 py-2 text-right font-medium">On disk</th>
+              <th className="px-3 py-2 text-left font-medium">Share</th>
+              <th className="px-3 py-2 text-right font-medium">Rows</th>
+              <th className="px-3 py-2 text-right font-medium">Avg / row</th>
+            </tr>
+          </thead>
+          <tbody>
+            {model.rows.map((row) => (
+              <tr key={row.cf} className="border-t border-border-subtle align-middle hover:bg-surface-2">
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: CATEGORY_META[row.category].color }} aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="block text-primary">{row.label}</span>
+                      <span className="block truncate text-xs text-muted" title={row.description}>{row.description}</span>
+                    </span>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-primary">{formatBytes(row.bytes)}</td>
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-24 overflow-hidden rounded-sm bg-surface-2" aria-hidden="true">
+                      <span className="block h-full rounded-sm" style={{ width: `${model.maxBytes > 0 ? (row.bytes / model.maxBytes) * 100 : 0}%`, background: CATEGORY_META[row.category].color }} />
+                    </span>
+                    <span className="font-mono text-xs text-muted">{row.pct.toFixed(1)}%</span>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-secondary">{row.rows.toLocaleString()}</td>
+                <td className="px-3 py-2 text-right font-mono text-secondary">{row.avgRow > 0 ? formatBytes(row.avgRow) : "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <RawValue value={{ cf_sizes: storage.cf_sizes, cf_row_counts: storage.cf_row_counts }} label="Raw storage byte + row counts" />
+    </div>
   );
 }
 
-function TimelineView({ state, toolCalls }: { state?: DashboardState; toolCalls: ReturnType<typeof buildToolCalls> }) {
+function RecordingsOverTime({ state }: { state?: DashboardState }) {
+  const timeline = asRecord(panelData(state?.timeline));
+  const byDay = asRecord(timeline.rows_by_day_utc);
+  const byKind = asRecord(timeline.rows_by_kind);
+  const dayData = Object.entries(byDay)
+    .map(([day, value]) => ({ day, rows: Number(value) || 0 }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+  const storageBytes = Number(timeline.storage_bytes) || 0;
+  const totalRows = Number(timeline.total_rows) || 0;
+  const oldest = timeline.oldest_ts_ns ? nsToTime(timeline.oldest_ts_ns as number) : "-";
+  const newest = timeline.newest_ts_ns ? nsToTime(timeline.newest_ts_ns as number) : "-";
+  const scanComplete = timeline.scan_complete !== false;
   return (
-    <>
-      <ToolActivity toolCalls={toolCalls} />
-      <TranscriptSamples state={state} />
-    </>
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard label="Recordings on disk" value={formatBytes(storageBytes)} status="working" delta={`${totalRows.toLocaleString()} rows`} />
+        <StatCard label="Oldest → newest" value={dayData.length} status="idle" delta={`${oldest} → ${newest}`} />
+        <StatCard label="Scan" value={scanComplete ? "complete" : "partial"} status={scanComplete ? "done" : "needs_input"} delta={state?.timeline.source || "timeline_stats"} />
+      </div>
+      {dayData.length ? (
+        <div className="h-56 rounded-lg border border-border bg-surface-1 p-3">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={dayData} margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <CartesianGrid stroke="var(--border-subtle)" vertical={false} />
+              <XAxis dataKey="day" stroke="var(--text-muted)" tickLine={false} axisLine={false} fontSize={12} />
+              <YAxis stroke="var(--text-muted)" tickLine={false} axisLine={false} fontSize={12} />
+              <ChartTooltip contentStyle={{ background: "var(--surface-3)", border: "1px solid var(--border)", color: "var(--text-primary)" }} />
+              <Bar dataKey="rows" fill="var(--info)" radius={[4, 4, 0, 0]} name="recordings" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <EmptyStateArt title="No timeline recordings in range" />
+      )}
+      <div className="grid gap-4 xl:grid-cols-2">
+        <RawValue value={byKind} label="Recordings by kind" />
+        <RawValue value={byDay} label="Recordings by day (UTC)" />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Storage management (#927 follow-up): give the operator direct control over
+// data that builds up on their disk. Recordings purge by time period
+// (timeline_purge — hard-delete + range compaction); other stores trim to their
+// newest N rows (storage_gc_once — oldest-row eviction). Both destructive
+// actions require an explicit confirm; the purge requires a dry-run preview
+// first so the operator sees exactly how many recordings will be deleted.
+// ---------------------------------------------------------------------------
+
+function StorageManagement({ state, onRefresh }: { state?: DashboardState; onRefresh: () => void | Promise<unknown> }) {
+  const timeline = asRecord(panelData(state?.timeline));
+  const byKind = asRecord(timeline.rows_by_kind);
+  const kindOptions = Object.keys(byKind)
+    .filter((kind) => kind !== "purge")
+    .sort();
+  const model = useMemo(() => buildStorageModel(state), [state]);
+  const gcCfs = model.rows.filter((row) => row.manage === "gc");
+
+  const [purgeMode, setPurgeMode] = useState<"older" | "range" | "all">("older");
+  const [olderDays, setOlderDays] = useState("30");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [purgeKind, setPurgeKind] = useState("");
+  const [purgePreview, setPurgePreview] = useState<TimelinePurgeReadback | null>(null);
+  const [purgeConfirmed, setPurgeConfirmed] = useState(false);
+  const [purgeBusy, setPurgeBusy] = useState<"preview" | "delete" | "">("");
+  const [purgeError, setPurgeError] = useState("");
+  const [purgeResult, setPurgeResult] = useState<TimelinePurgeReadback | null>(null);
+
+  // Any filter change invalidates a prior preview so a delete can never run
+  // against a count the operator did not just see.
+  useEffect(() => {
+    setPurgePreview(null);
+    setPurgeConfirmed(false);
+    setPurgeResult(null);
+    setPurgeError("");
+  }, [purgeMode, olderDays, startDate, endDate, purgeKind]);
+
+  const buildPurgeRequest = (): TimelinePurgeRequest | string => {
+    const base: TimelinePurgeRequest = {};
+    if (purgeKind) base.kinds = [purgeKind];
+    if (purgeMode === "all") {
+      if (purgeKind) return "Clearing a single kind uses a time period — turn the kind filter off to clear everything.";
+      base.all = true;
+      return base;
+    }
+    if (purgeMode === "older") {
+      const days = Number(olderDays.trim());
+      if (!Number.isFinite(days) || days < 0) return "Enter a non-negative number of days.";
+      base.end_ts_ns = msToNsString(Date.now() - days * 86400000);
+      return base;
+    }
+    if (!startDate || !endDate) return "Pick both a start and end date.";
+    const startMs = Date.parse(`${startDate}T00:00:00`);
+    const endMs = Date.parse(`${endDate}T23:59:59.999`);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return "Invalid date.";
+    if (startMs > endMs) return "Start date must be on or before end date.";
+    base.start_ts_ns = msToNsString(startMs);
+    base.end_ts_ns = msToNsString(endMs);
+    return base;
+  };
+
+  const runPurge = async (dryRun: boolean) => {
+    const built = buildPurgeRequest();
+    if (typeof built === "string") {
+      setPurgeError(built);
+      return;
+    }
+    setPurgeBusy(dryRun ? "preview" : "delete");
+    setPurgeError("");
+    try {
+      const readback = await purgeTimelineRecordings({ ...built, dry_run: dryRun });
+      if (dryRun) {
+        setPurgePreview(readback);
+        setPurgeConfirmed(false);
+      } else {
+        setPurgeResult(readback);
+        setPurgePreview(null);
+        setPurgeConfirmed(false);
+        await onRefresh();
+      }
+    } catch (error) {
+      setPurgeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPurgeBusy("");
+    }
+  };
+
+  const [gcCf, setGcCf] = useState("");
+  const [gcKeep, setGcKeep] = useState("1000");
+  const [gcConfirmed, setGcConfirmed] = useState(false);
+  const [gcBusy, setGcBusy] = useState(false);
+  const [gcError, setGcError] = useState("");
+  const [gcResult, setGcResult] = useState<StorageGcReadback | null>(null);
+
+  useEffect(() => {
+    if (!gcCf && gcCfs.length > 0) setGcCf(gcCfs[0].cf);
+  }, [gcCf, gcCfs]);
+  useEffect(() => {
+    setGcConfirmed(false);
+    setGcResult(null);
+    setGcError("");
+  }, [gcCf, gcKeep]);
+
+  const selectedGcRow = gcCfs.find((row) => row.cf === gcCf);
+  const runGc = async () => {
+    const keep = Number(gcKeep.trim());
+    if (!Number.isInteger(keep) || keep < 1 || keep > 1_000_000) {
+      setGcError("Keep newest rows must be an integer between 1 and 1,000,000.");
+      return;
+    }
+    if (!gcCf) {
+      setGcError("Pick a data store to trim.");
+      return;
+    }
+    setGcBusy(true);
+    setGcError("");
+    try {
+      const readback = await runStorageGc({ cf_name: gcCf, soft_cap_rows: keep, hard_cap_rows: keep });
+      setGcResult(readback);
+      setGcConfirmed(false);
+      await onRefresh();
+    } catch (error) {
+      setGcError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGcBusy(false);
+    }
+  };
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-2">
+      <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+        <div className="mb-3 flex items-center gap-2 text-primary">
+          <CalendarClock aria-hidden="true" className="h-4 w-4 text-info" />
+          <h3 className="text-md font-medium tracking-normal">Clear activity recordings</h3>
+        </div>
+        <p className="mb-3 text-xs text-muted">
+          Permanently delete recorded activity (CF_TIMELINE) to reclaim disk space. Preview first to see exactly how many recordings match, then confirm.
+        </p>
+        <div className="grid gap-3">
+          <label className="block text-sm text-secondary">
+            <span className="mb-1 block text-label font-medium uppercase text-muted">Period</span>
+            <select
+              className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              value={purgeMode}
+              onChange={(event) => setPurgeMode(event.target.value as "older" | "range" | "all")}
+            >
+              <option value="older">Older than…</option>
+              <option value="range">Date range</option>
+              <option value="all">Everything</option>
+            </select>
+          </label>
+          {purgeMode === "older" ? (
+            <label className="block text-sm text-secondary">
+              <span className="mb-1 block text-label font-medium uppercase text-muted">Delete recordings older than (days)</span>
+              <input
+                value={olderDays}
+                onChange={(event) => setOlderDays(event.target.value)}
+                inputMode="numeric"
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              />
+            </label>
+          ) : null}
+          {purgeMode === "range" ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block text-sm text-secondary">
+                <span className="mb-1 block text-label font-medium uppercase text-muted">From</span>
+                <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring" />
+              </label>
+              <label className="block text-sm text-secondary">
+                <span className="mb-1 block text-label font-medium uppercase text-muted">To</span>
+                <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring" />
+              </label>
+            </div>
+          ) : null}
+          <label className="block text-sm text-secondary">
+            <span className="mb-1 block text-label font-medium uppercase text-muted">Kind (optional)</span>
+            <select
+              className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
+              value={purgeKind}
+              disabled={purgeMode === "all"}
+              onChange={(event) => setPurgeKind(event.target.value)}
+            >
+              <option value="">All kinds</option>
+              {kindOptions.map((kind) => (
+                <option key={kind} value={kind}>{kind}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button type="button" variant="secondary" size="sm" disabled={Boolean(purgeBusy)} onClick={() => runPurge(true)}>
+            <Search aria-hidden="true" className="h-4 w-4" />
+            {purgeBusy === "preview" ? "Previewing" : "Preview"}
+          </Button>
+          {purgePreview ? (
+            <label className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-surface-2 px-3 text-sm text-primary">
+              <input type="checkbox" checked={purgeConfirmed} onChange={(event) => setPurgeConfirmed(event.target.checked)} className="h-4 w-4 accent-[rgb(var(--color-danger))]" />
+              Confirm delete
+            </label>
+          ) : null}
+          <Button type="button" variant="danger" size="sm" disabled={!purgePreview || !purgeConfirmed || Boolean(purgeBusy) || purgePreview.matched_rows === 0} onClick={() => runPurge(false)}>
+            <Eraser aria-hidden="true" className="h-4 w-4" />
+            {purgeBusy === "delete" ? "Deleting" : purgePreview ? `Delete ${purgePreview.matched_rows.toLocaleString()} recordings` : "Delete"}
+          </Button>
+        </div>
+        {purgePreview ? (
+          <div className="mt-3 rounded-md border border-warning-border bg-warning-bg p-3 text-sm text-warning-fg">
+            Preview: {purgePreview.matched_rows.toLocaleString()} recordings match and would be deleted ({purgePreview.scanned_rows.toLocaleString()} scanned
+            {purgePreview.stopped_because === "scan_budget_exhausted" ? "; scan budget paused — delete then preview again to continue" : ""}).
+          </div>
+        ) : null}
+        {purgeError ? <div className="mt-3 rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{purgeError}</div> : null}
+        {purgeResult ? (
+          <div className="mt-3 space-y-2">
+            <div className="rounded-md border border-success-border bg-success-bg p-3 text-sm text-success-fg">
+              Deleted {purgeResult.deleted_rows.toLocaleString()} recordings{purgeResult.compacted ? " and compacted the freed range" : ""}.
+              {purgeResult.next_cursor ? " Scan budget paused — run the same purge again to continue." : ""}
+            </div>
+            <RawValue value={purgeResult} label="Purge readback" />
+          </div>
+        ) : null}
+      </div>
+
+      <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+        <div className="mb-3 flex items-center gap-2 text-primary">
+          <Database aria-hidden="true" className="h-4 w-4 text-info" />
+          <h3 className="text-md font-medium tracking-normal">Cap a data store</h3>
+        </div>
+        <p className="mb-3 text-xs text-muted">
+          Cap a growing store (audit logs, transcripts, OCR, observations) at a row count. When it exceeds the cap, the oldest rows are permanently evicted down to exactly the cap to reclaim space.
+        </p>
+        <div className="grid gap-3">
+          <label className="block text-sm text-secondary">
+            <span className="mb-1 block text-label font-medium uppercase text-muted">Data store</span>
+            <select
+              className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              value={gcCf}
+              onChange={(event) => setGcCf(event.target.value)}
+            >
+              {gcCfs.map((row) => (
+                <option key={row.cf} value={row.cf}>{row.label} ({row.rows.toLocaleString()} rows · {formatBytes(row.bytes)})</option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm text-secondary">
+            <span className="mb-1 block text-label font-medium uppercase text-muted">Cap at rows</span>
+            <input
+              value={gcKeep}
+              onChange={(event) => setGcKeep(event.target.value)}
+              inputMode="numeric"
+              className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+            />
+          </label>
+          {selectedGcRow ? (
+            <p className="text-xs text-muted">
+              {selectedGcRow.label} currently holds {selectedGcRow.rows.toLocaleString()} rows. Capping at {gcKeep || "?"} evicts the oldest{" "}
+              {predictEviction(selectedGcRow.rows, Number(gcKeep) || 0).toLocaleString()} rows.
+            </p>
+          ) : null}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <label className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-surface-2 px-3 text-sm text-primary">
+            <input type="checkbox" checked={gcConfirmed} onChange={(event) => setGcConfirmed(event.target.checked)} className="h-4 w-4 accent-[rgb(var(--color-danger))]" />
+            Confirm trim
+          </label>
+          <Button type="button" variant="danger" size="sm" disabled={!gcConfirmed || gcBusy || !gcCf} onClick={runGc}>
+            <Trash2 aria-hidden="true" className="h-4 w-4" />
+            {gcBusy ? "Trimming" : "Trim"}
+          </Button>
+        </div>
+        {gcError ? <div className="mt-3 rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{gcError}</div> : null}
+        {gcResult ? (
+          <div className="mt-3 space-y-2">
+            <div className="rounded-md border border-success-border bg-success-bg p-3 text-sm text-success-fg">
+              {gcResult.cf_name}: {gcResult.before_rows.toLocaleString()} → {gcResult.after_rows.toLocaleString()} rows ({gcResult.total_evicted_rows.toLocaleString()} evicted).
+            </div>
+            <RawValue value={gcResult} label="Trim readback" />
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
 function SystemView({
   state,
+  agents,
+  attentionCount,
+  toolCalls,
   stale,
   onRefresh
 }: {
   state?: DashboardState;
+  agents: AgentSummary[];
+  attentionCount: number;
+  toolCalls: ReturnType<typeof buildToolCalls>;
   stale: boolean;
   onRefresh: () => void | Promise<unknown>;
 }) {
@@ -1134,6 +2006,8 @@ function SystemView({
 
   return (
     <>
+      <OverviewBand state={state} agents={agents} attentionCount={attentionCount} stale={stale} />
+
       <Section title="Substrate" tier="overview" questions={["Is the daemon healthy?", "Is storage refusing work?", "Is the recorder paused?"]}>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard label="Health" value={health.ok === true ? "ok" : "check"} status={health.ok === true && !stale ? "done" : "stuck"} delta={`pid ${rawText(health.pid || "unknown")}`} />
@@ -1141,6 +2015,30 @@ function SystemView({
           <StatCard label="Recorder" value={recorderPaused ? "paused" : "running"} status={recorderPaused ? "needs_input" : "working"} delta={state?.timeline.source || "timeline_stats"} />
           <StatCard label="Shell Jobs" value={rawText(shellJobsData.running_count || 0)} status={Number(shellJobsData.running_count || 0) ? "working" : "idle"} delta={`${rawText(shellJobsData.job_count || 0)} status files`} />
         </div>
+      </Section>
+
+      <Section
+        title="Storage Usage"
+        tier="triage"
+        questions={["What is actually using disk space (in bytes)?", "Which category dominates the footprint?", "How big is each store and its average row?"]}
+      >
+        <StorageUsage state={state} />
+      </Section>
+
+      <Section
+        title="Activity Recordings Over Time"
+        tier="triage"
+        questions={["How fast are recordings accumulating?", "Which days and kinds dominate?", "How much disk do recordings hold?"]}
+      >
+        <RecordingsOverTime state={state} />
+      </Section>
+
+      <Section
+        title="Storage Management"
+        tier="triage"
+        questions={["How do I reclaim disk space?", "Exactly how many recordings will a purge delete?", "How do I trim a store that keeps growing?"]}
+      >
+        <StorageManagement state={state} onRefresh={onRefresh} />
       </Section>
 
       <Section
@@ -1174,27 +2072,6 @@ function SystemView({
         </div>
         <div className="mt-3">
           <RawValue value={{ daemon: state?.daemon, chrome_bridge: chromeBridge }} label="Daemon readback" />
-        </div>
-      </Section>
-
-      <Section
-        title="Storage"
-        tier="triage"
-        questions={["Which store is largest?", "What pressure level is active?", "Which rows back the chart?"]}
-      >
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,360px)]">
-          <SystemShape state={state} />
-          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
-            <div className="mb-2 flex items-center gap-2 text-primary">
-              <HardDrive aria-hidden="true" className="h-4 w-4 text-info" />
-              <h3 className="text-md font-medium tracking-normal">Pressure</h3>
-            </div>
-            <MetricRow label="Level" value={pressureName || "unknown"} />
-            <MetricRow label="Transitions" value={asArray(storage.pressure_transition_codes).length} />
-            <MetricRow label="CF rows" value={Object.keys(asRecord(storage.cf_row_counts)).length} />
-            <MetricRow label="CF sizes" value={Object.keys(asRecord(storage.cf_sizes)).length} />
-            <MetricRow label="SoT" value={state?.storage.source || "storage_inspect"} />
-          </div>
         </div>
       </Section>
 
@@ -1236,11 +2113,10 @@ function SystemView({
             <RawValue value={lastRecorderControl} label="Recorder control readback" />
           </div>
         ) : null}
-        <div className="mt-3 grid gap-4 xl:grid-cols-2">
-          <RawValue value={timeline.rows_by_kind} label="Rows by kind" />
-          <RawValue value={timeline.rows_by_day_utc} label="Rows by day" />
-        </div>
       </Section>
+
+      <ToolActivity toolCalls={toolCalls} />
+      <TranscriptSamples state={state} />
 
       <Section
         title="Claims"
@@ -2640,30 +3516,44 @@ function ToolActivity({
   );
 }
 
+// Compact disk-usage summary for the Fleet aside: total on-disk bytes, a
+// category composition bar, and the top stores by BYTES (not row count). Deep
+// breakdown + management live on the System page (`StorageUsage`).
 function SystemShape({ state }: { state?: DashboardState }) {
+  const model = useMemo(() => buildStorageModel(state), [state]);
   const storage = asRecord(panelData(state?.storage));
-  const counts = asRecord(storage.cf_row_counts);
-  const chartData = Object.entries(counts)
-    .map(([name, value]) => ({ name: name.replace("CF_", ""), rows: Number(value) || 0 }))
-    .sort((a, b) => b.rows - a.rows)
-    .slice(0, 8);
-  if (!chartData.length) return <EmptyStateArt title="No storage rows" />;
+  if (!model.rows.length || model.totalBytes <= 0) return <EmptyStateArt title="No storage rows" />;
+  const top = model.rows.slice(0, 5);
   return (
     <div className="space-y-4">
-      <div className="h-64 rounded-lg border border-border bg-surface-1 p-3">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-            <CartesianGrid stroke="var(--border-subtle)" vertical={false} />
-            <XAxis dataKey="name" stroke="var(--text-muted)" tickLine={false} axisLine={false} />
-            <YAxis stroke="var(--text-muted)" tickLine={false} axisLine={false} />
-            <ChartTooltip contentStyle={{ background: "var(--surface-3)", border: "1px solid var(--border)", color: "var(--text-primary)" }} />
-            <Bar dataKey="rows" fill="var(--info)" radius={[4, 4, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
+      <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+        <div className="flex items-baseline justify-between">
+          <span className="text-label font-medium uppercase text-muted">On disk</span>
+          <span className="font-mono text-lg text-primary">{formatBytes(model.totalBytes)}</span>
+        </div>
+        <div className="mt-2 flex h-3 w-full overflow-hidden rounded-md border border-border-subtle bg-surface-2" role="img" aria-label="Storage composition by category">
+          {model.categoryTotals.map((entry) => (
+            <div
+              key={entry.category}
+              style={{ width: `${Math.max(entry.pct, 0.5)}%`, background: CATEGORY_META[entry.category].color }}
+              title={`${CATEGORY_META[entry.category].label}: ${formatBytes(entry.bytes)} (${entry.pct.toFixed(1)}%)`}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+        {top.map((row) => (
+          <div key={row.cf} className="flex items-center justify-between gap-2 border-b border-border-subtle py-1.5 last:border-b-0">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: CATEGORY_META[row.category].color }} aria-hidden="true" />
+              <span className="truncate text-sm text-secondary">{row.label}</span>
+            </span>
+            <span className="shrink-0 font-mono text-sm text-primary">{formatBytes(row.bytes)}</span>
+          </div>
+        ))}
       </div>
       <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
         <MetricRow label="Schema" value={rawText(storage.schema_version)} />
-        <MetricRow label="Policy count" value={rawText(storage.audit_retention_policy_count)} />
         <MetricRow label="Generated" value={unixMsToTime(state?.generated_at_unix_ms)} />
       </div>
     </div>

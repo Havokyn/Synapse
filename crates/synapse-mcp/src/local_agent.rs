@@ -454,24 +454,38 @@ impl Runner {
                 .await?;
             }
             if completion.tool_calls.is_empty() {
-                if used_any_tool {
-                    std::fs::write(self.log_dir.join("final-message.txt"), &completion.content)
-                        .with_context(|| {
-                            format!("write {}", self.log_dir.join("final-message.txt").display())
-                        })?;
-                    self.post_event(json!({
-                        "event": "exited",
-                        "session_id": self.mcp_session_id,
-                        "conversation_id": self.conversation_id,
-                        "model": self.registry.model_id,
-                        "registry_name": self.registry.name,
-                        "end_state": "success",
-                        "reason_code": "local_agent_completed",
-                    }))
-                    .await?;
-                    return Ok(());
+                // A plain assistant message with no tool call is a legitimate
+                // completion: the model answered directly. This is valid on the
+                // first turn (a prompt may not need tools) and after tool use
+                // alike. Models that are genuinely incapable of tool-calling are
+                // rejected at registration-probe time (MODEL_TOOLS_UNSUPPORTED),
+                // not here — bailing on a correct direct answer was a false
+                // failure that killed otherwise-successful agents. Only a turn
+                // that yields neither a tool call nor any content is degenerate.
+                let final_message = completion.content.trim();
+                if final_message.is_empty() {
+                    bail!(
+                        "MODEL_EMPTY_COMPLETION: model returned neither a tool call nor message content on turn {turn} (finish_reason={:?}); used_any_tool={used_any_tool}",
+                        completion.finish_reason
+                    );
                 }
-                bail!("MODEL_TOOLS_UNSUPPORTED: model returned no tool calls on the first turn");
+                std::fs::write(self.log_dir.join("final-message.txt"), &completion.content)
+                    .with_context(|| {
+                        format!("write {}", self.log_dir.join("final-message.txt").display())
+                    })?;
+                self.post_event(json!({
+                    "event": "exited",
+                    "session_id": self.mcp_session_id,
+                    "conversation_id": self.conversation_id,
+                    "model": self.registry.model_id,
+                    "registry_name": self.registry.name,
+                    "end_state": "success",
+                    "reason_code": "local_agent_completed",
+                    "used_any_tool": used_any_tool,
+                    "answered_without_tool_calls": !used_any_tool,
+                }))
+                .await?;
+                return Ok(());
             }
             used_any_tool = true;
             for call in completion.tool_calls {
@@ -1732,6 +1746,7 @@ fn error_code_from_detail(detail: &str) -> &str {
     for code in [
         "MODEL_ENDPOINT_UNREACHABLE",
         "MODEL_TOOLS_UNSUPPORTED",
+        "MODEL_EMPTY_COMPLETION",
         "LOCAL_AGENT_CONTEXT_OVERFLOW",
         "LOCAL_AGENT_INTERRUPTED",
         "LOCAL_AGENT_TURN_LIMIT",
