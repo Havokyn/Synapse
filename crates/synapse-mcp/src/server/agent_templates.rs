@@ -921,6 +921,14 @@ impl SynapseService {
         })
     }
 
+    pub(crate) fn dashboard_list_agent_templates(
+        &self,
+    ) -> Result<AgentTemplateListResponse, ErrorData> {
+        self.agent_template_list_impl(AgentTemplateListParams {
+            max: MAX_LIST_TEMPLATES,
+        })
+    }
+
     fn agent_template_delete_impl(
         &self,
         params: AgentTemplateDeleteParams,

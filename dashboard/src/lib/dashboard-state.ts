@@ -28,6 +28,9 @@ export interface DashboardState {
 
 export interface AgentSummary {
   id: string;
+  spawnId?: string;
+  killId?: string;
+  killable?: boolean;
   kind: string;
   lifecycle: string;
   status: FleetStatus;
@@ -202,6 +205,80 @@ export interface SpawnRequest {
   hold_open_ms?: number;
 }
 
+export interface AgentTemplateRow {
+  schema_version: number;
+  template_id: string;
+  version: number;
+  name: string;
+  agent_kind: "claude" | "codex" | "local_model" | string;
+  model?: string | null;
+  model_ref?: string | null;
+  prompt_template?: string | null;
+  required_params: string[];
+  working_dir?: string | null;
+  config_hash: string;
+  created_unix_ms: number;
+  updated_unix_ms: number;
+}
+
+export interface TemplateListResponse {
+  ok: boolean;
+  source_of_truth: string;
+  list: {
+    ok: boolean;
+    count: number;
+    templates: AgentTemplateRow[];
+  };
+}
+
+export interface SpawnAgentRequest {
+  fan_out?: number;
+  template_id?: string;
+  template_version?: number;
+  template_params?: Record<string, string>;
+  cli?: "codex" | "claude" | "local_model";
+  kind?: "codex" | "claude" | "local_model";
+  model?: string;
+  model_ref?: string;
+  prompt?: string;
+  target?: { kind: "window"; window_hwnd: number } | { kind: "cdp"; window_hwnd: number; cdp_target_id: string };
+  working_dir?: string;
+  wait_timeout_ms?: number;
+  hold_open_ms?: number;
+}
+
+export interface SpawnAgentAttempt {
+  index: number;
+  status: "ok" | "error";
+  spawn?: Record<string, unknown>;
+  error_code?: string;
+  message?: string;
+  data?: unknown;
+}
+
+export interface SpawnAgentResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  requested_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  attempts: SpawnAgentAttempt[];
+}
+
+export interface AgentKillRequest {
+  session_id: string;
+  grace_ms?: number;
+  interrupt_first?: boolean;
+}
+
+export interface AgentKillResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  kill: Record<string, unknown>;
+}
+
 export type DashboardRouteReadback = Record<string, unknown>;
 
 function csrfHeaders(): Record<string, string> {
@@ -233,6 +310,16 @@ export async function fetchModels(): Promise<ModelRow[]> {
   const body = await readJsonOrThrow(response);
   const list = (body.list ?? {}) as { rows?: ModelRow[] };
   return list.rows ?? [];
+}
+
+export async function fetchTemplates(): Promise<AgentTemplateRow[]> {
+  const response = await fetch("/dashboard/templates", {
+    cache: "no-store",
+    credentials: "same-origin"
+  });
+  const body = await readJsonOrThrow(response);
+  const list = (body.list ?? {}) as { templates?: AgentTemplateRow[] };
+  return list.templates ?? [];
 }
 
 export async function fetchSavedViews(): Promise<DashboardSavedViewsResponse> {
@@ -309,6 +396,28 @@ export async function spawnLocalModelAgent(
   return readJsonOrThrow(response);
 }
 
+export async function spawnAgent(request: SpawnAgentRequest): Promise<SpawnAgentResponse> {
+  const response = await fetch("/dashboard/spawn-agent", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as SpawnAgentResponse;
+}
+
+export async function killAgent(request: AgentKillRequest): Promise<AgentKillResponse> {
+  const response = await fetch("/dashboard/agent-kill", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as AgentKillResponse;
+}
+
 export async function fetchDashboardState(): Promise<DashboardState> {
   const response = await fetch("/dashboard/state.json", {
     cache: "no-store",
@@ -350,11 +459,15 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
   const live = sessionRows.map((row) => {
     const agentState = asRecord(row.agent_state);
     const sessionId = rawText(row.session_id);
+    const spawnId = rawText(row.spawn_id || agentState.spawn_id);
     const stateName = rawText(agentState.state || row.lifecycle);
     const lastSeenMs = Number(row.last_seen_ms_ago);
     const lastAction = rawText(row.last_action);
     return {
       id: sessionId,
+      spawnId: spawnId || undefined,
+      killId: spawnId || sessionId,
+      killable: true,
       kind: rawText(row.agent_kind || row.client_name || "agent"),
       lifecycle: rawText(row.lifecycle),
       status: statusFromLiveSession(stateName, lastSeenMs, lastAction),
@@ -374,10 +487,14 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
 
   const historical = unbound.map((row) => {
     const id = rawText(row.session_id || row.spawn_id || row.anchor);
+    const spawnId = rawText(row.spawn_id);
     const stateName = rawText(row.state);
     const reason = rawText(row.reason_code);
     return {
       id,
+      spawnId: spawnId || undefined,
+      killId: spawnId || id,
+      killable: false,
       kind: rawText(row.agent_kind || "agent"),
       lifecycle: stateName || "unbound",
       status: statusFromHistorical(stateName, reason),

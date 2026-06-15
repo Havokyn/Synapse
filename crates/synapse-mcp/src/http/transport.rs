@@ -49,6 +49,8 @@ const M2_EMITTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const DRAIN_RESPONSE_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 const DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES: usize = 64 * 1024;
+const DASHBOARD_SPAWN_FAN_OUT_MAX: u32 = 5;
+const DASHBOARD_AGENT_KILL_DEFAULT_GRACE_MS: u64 = 3_000;
 
 #[derive(Clone)]
 struct HttpState {
@@ -517,6 +519,18 @@ fn router(
                 DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES,
             )),
         )
+        .route(
+            "/dashboard/spawn-agent",
+            post(dashboard_spawn_agent).layer(DefaultBodyLimit::max(
+                DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/dashboard/agent-kill",
+            post(dashboard_agent_kill)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route("/dashboard/templates", get(dashboard_template_list))
         .route("/dashboard/models", get(dashboard_model_list))
         .route(
             "/dashboard/api-model/register",
@@ -1455,12 +1469,94 @@ struct DashboardLocalModelSpawnRequest {
     hold_open_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardSpawnAgentRequest {
+    #[serde(default)]
+    fan_out: Option<u32>,
+    #[serde(default)]
+    template_id: Option<String>,
+    #[serde(default)]
+    template_version: Option<u32>,
+    #[serde(default)]
+    template_params: BTreeMap<String, String>,
+    #[serde(default)]
+    cli: Option<crate::m4::ActSpawnAgentCli>,
+    #[serde(default)]
+    kind: Option<crate::m4::ActSpawnAgentCli>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    model_ref: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    target: Option<crate::m4::ActSpawnAgentTarget>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    wait_timeout_ms: Option<u64>,
+    #[serde(default)]
+    hold_open_ms: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct DashboardLocalModelSpawnResponse {
     ok: bool,
     trigger: &'static str,
     source_of_truth: &'static str,
     spawn: crate::m4::ActSpawnAgentResponse,
+}
+
+#[derive(Serialize)]
+struct DashboardSpawnAgentResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    requested_count: u32,
+    succeeded_count: usize,
+    failed_count: usize,
+    attempts: Vec<DashboardSpawnAgentAttempt>,
+}
+
+#[derive(Serialize)]
+struct DashboardSpawnAgentAttempt {
+    index: u32,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn: Option<crate::m4::ActSpawnAgentResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardAgentKillRequest {
+    session_id: String,
+    #[serde(default)]
+    grace_ms: Option<u64>,
+    #[serde(default)]
+    interrupt_first: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct DashboardAgentKillResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    kill: crate::server::agent_control::AgentKillResponse,
+}
+
+#[derive(Serialize)]
+struct DashboardTemplateListResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    list: crate::server::agent_templates::AgentTemplateListResponse,
 }
 
 /// Browser-facing request to register an OpenAI-compatible cloud API model
@@ -2143,6 +2239,141 @@ async fn dashboard_local_model_spawn(
     }
 }
 
+async fn dashboard_spawn_agent(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardSpawnAgentRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/spawn-agent",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let (fan_out, mut spawn_request) = match dashboard_spawn_agent_request_params(request) {
+        Ok(params) => params,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    // Anchor browser-triggered spawns to this daemon, just like the legacy
+    // local-model-only endpoint. The browser cannot override the MCP endpoint.
+    spawn_request.mcp_url = crate::m4::agent_spawn_mcp_url_for_bind(state.bind_addr);
+    let mut attempts = Vec::with_capacity(fan_out as usize);
+    for index in 1..=fan_out {
+        let attempt = match state
+            .health_service
+            .dashboard_spawn_agent_request(spawn_request.clone())
+            .await
+        {
+            Ok(spawn) => DashboardSpawnAgentAttempt {
+                index,
+                status: "ok",
+                spawn: Some(spawn),
+                error_code: None,
+                message: None,
+                data: None,
+            },
+            Err(error) => DashboardSpawnAgentAttempt {
+                index,
+                status: "error",
+                spawn: None,
+                error_code: Some(dashboard_error_code(&error)),
+                message: Some(error.message.to_string()),
+                data: error.data.clone(),
+            },
+        };
+        attempts.push(attempt);
+    }
+    let succeeded_count = attempts
+        .iter()
+        .filter(|attempt| attempt.status == "ok")
+        .count();
+    let failed_count = attempts.len().saturating_sub(succeeded_count);
+    with_dashboard_security_headers(
+        Json(DashboardSpawnAgentResponse {
+            ok: true,
+            trigger: "dashboard.spawn_agent",
+            source_of_truth:
+                "CF_AGENT_EVENTS, CF_PROCESS_HISTORY, session registry, agent spawn artifacts",
+            requested_count: fan_out,
+            succeeded_count,
+            failed_count,
+            attempts,
+        })
+        .into_response(),
+    )
+}
+
+async fn dashboard_agent_kill(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardAgentKillRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/agent-kill",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let params = match dashboard_agent_kill_params(request) {
+        Ok(params) => params,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    match state
+        .health_service
+        .dashboard_agent_kill_request(params)
+        .await
+    {
+        Ok(kill) => with_dashboard_security_headers(
+            Json(DashboardAgentKillResponse {
+                ok: true,
+                trigger: "dashboard.agent_kill",
+                source_of_truth:
+                    "OS process table, session registry, CF_AGENT_EVENTS, command audit rows, agent spawn artifacts",
+                kill,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_template_list(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "GET",
+        "/dashboard/templates",
+        CsrfPolicy::NotRequired,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    match state.health_service.dashboard_list_agent_templates() {
+        Ok(list) => with_dashboard_security_headers(
+            Json(DashboardTemplateListResponse {
+                ok: true,
+                trigger: "dashboard.template_list",
+                source_of_truth: "CF_KV agent-template/v1/current/",
+                list,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
 fn dashboard_local_model_spawn_params(
     request: DashboardLocalModelSpawnRequest,
 ) -> Result<crate::m4::ActSpawnAgentParams, Response> {
@@ -2184,6 +2415,73 @@ fn dashboard_local_model_spawn_params(
         template_id: None,
         template_version: None,
         template_config_hash: None,
+    })
+}
+
+fn dashboard_spawn_agent_request_params(
+    request: DashboardSpawnAgentRequest,
+) -> Result<(u32, crate::m4::ActSpawnAgentRequest), Response> {
+    let fan_out = request.fan_out.unwrap_or(1);
+    if fan_out == 0 || fan_out > DASHBOARD_SPAWN_FAN_OUT_MAX {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            &format!("dashboard spawn fan_out must be 1..={DASHBOARD_SPAWN_FAN_OUT_MAX}"),
+            None,
+        ));
+    }
+    Ok((
+        fan_out,
+        crate::m4::ActSpawnAgentRequest {
+            template_id: request
+                .template_id
+                .and_then(|value| trim_optional_non_empty(&value)),
+            template_version: request.template_version,
+            template_params: request.template_params,
+            cli: request.cli,
+            kind: request.kind,
+            model: request
+                .model
+                .and_then(|value| trim_optional_non_empty(&value)),
+            model_ref: request
+                .model_ref
+                .and_then(|value| trim_optional_non_empty(&value)),
+            prompt: request
+                .prompt
+                .and_then(|value| trim_optional_non_empty(&value)),
+            target: request.target,
+            working_dir: request
+                .working_dir
+                .and_then(|value| trim_optional_non_empty(&value)),
+            mcp_url: crate::m4::default_agent_spawn_mcp_url(),
+            wait_timeout_ms: request
+                .wait_timeout_ms
+                .unwrap_or_else(crate::m4::default_agent_spawn_wait_timeout_ms),
+            hold_open_ms: request
+                .hold_open_ms
+                .unwrap_or_else(crate::m4::default_agent_spawn_hold_open_ms),
+        },
+    ))
+}
+
+fn dashboard_agent_kill_params(
+    request: DashboardAgentKillRequest,
+) -> Result<crate::server::agent_control::AgentKillParams, Response> {
+    let session_id = request.session_id.trim();
+    if session_id.is_empty() {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard agent kill requires session_id or spawn_id",
+            None,
+        ));
+    }
+    Ok(crate::server::agent_control::AgentKillParams {
+        session_id: session_id.to_owned(),
+        grace_ms: request
+            .grace_ms
+            .unwrap_or(DASHBOARD_AGENT_KILL_DEFAULT_GRACE_MS),
+        interrupt_first: request.interrupt_first.unwrap_or(true),
     })
 }
 
@@ -2293,7 +2591,9 @@ fn dashboard_api_model_register_params(
         // Optional plaintext key entered in the dashboard form. When present it
         // is DPAPI-encrypted at rest by register_local_model; never persisted in
         // plaintext and never echoed back.
-        api_key: request.api_key.and_then(|value| trim_optional_non_empty(&value)),
+        api_key: request
+            .api_key
+            .and_then(|value| trim_optional_non_empty(&value)),
         probe_timeout_ms: request.probe_timeout_ms,
     })
 }
@@ -2606,12 +2906,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-BrDFDcar.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-ChJOpVXE.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-BfIu2hrX.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-Dnc83wda.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-BrDFDcar.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-ChJOpVXE.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-BfIu2hrX.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-Dnc83wda.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -3001,6 +3301,123 @@ mod tests {
         assert_eq!(params.working_dir.as_deref(), Some("C:\\code\\Synapse"));
         assert_eq!(params.wait_timeout_ms, 300_000);
         assert_eq!(params.hold_open_ms, 0);
+    }
+
+    fn empty_dashboard_spawn_agent_request() -> DashboardSpawnAgentRequest {
+        DashboardSpawnAgentRequest {
+            fan_out: None,
+            template_id: None,
+            template_version: None,
+            template_params: BTreeMap::new(),
+            cli: None,
+            kind: None,
+            model: None,
+            model_ref: None,
+            prompt: None,
+            target: None,
+            working_dir: None,
+            wait_timeout_ms: None,
+            hold_open_ms: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_spawn_agent_request_params_preserves_template_fanout() {
+        let mut request = empty_dashboard_spawn_agent_request();
+        request.fan_out = Some(5);
+        request.template_id = Some(" issue923-template ".to_owned());
+        request.template_version = Some(7);
+        request
+            .template_params
+            .insert("task".to_owned(), "write-known-row".to_owned());
+
+        let (fan_out, spawn) =
+            dashboard_spawn_agent_request_params(request).expect("valid template spawn params");
+
+        assert_eq!(fan_out, 5);
+        assert_eq!(spawn.template_id.as_deref(), Some("issue923-template"));
+        assert_eq!(spawn.template_version, Some(7));
+        assert_eq!(
+            spawn.template_params.get("task").map(String::as_str),
+            Some("write-known-row")
+        );
+        assert_eq!(spawn.kind, None);
+        assert_eq!(spawn.model_ref, None);
+        assert_eq!(
+            spawn.wait_timeout_ms,
+            crate::m4::default_agent_spawn_wait_timeout_ms()
+        );
+        assert_eq!(
+            spawn.hold_open_ms,
+            crate::m4::default_agent_spawn_hold_open_ms()
+        );
+    }
+
+    #[test]
+    fn dashboard_spawn_agent_request_params_trims_direct_spawn_and_target() {
+        let mut request = empty_dashboard_spawn_agent_request();
+        request.kind = Some(crate::m4::ActSpawnAgentCli::Codex);
+        request.model = Some(" gpt-5-codex ".to_owned());
+        request.prompt = Some(" write known row ".to_owned());
+        request.working_dir = Some(" C:\\code\\Synapse ".to_owned());
+        request.target = Some(crate::m4::ActSpawnAgentTarget::Window {
+            window_hwnd: 1116654,
+        });
+        request.wait_timeout_ms = Some(42_000);
+        request.hold_open_ms = Some(0);
+
+        let (fan_out, spawn) =
+            dashboard_spawn_agent_request_params(request).expect("valid direct spawn params");
+
+        assert_eq!(fan_out, 1);
+        assert_eq!(spawn.kind, Some(crate::m4::ActSpawnAgentCli::Codex));
+        assert_eq!(spawn.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(spawn.prompt.as_deref(), Some("write known row"));
+        assert_eq!(spawn.working_dir.as_deref(), Some("C:\\code\\Synapse"));
+        assert_eq!(
+            spawn.target,
+            Some(crate::m4::ActSpawnAgentTarget::Window {
+                window_hwnd: 1116654
+            })
+        );
+        assert_eq!(spawn.wait_timeout_ms, 42_000);
+        assert_eq!(spawn.hold_open_ms, 0);
+    }
+
+    #[test]
+    fn dashboard_spawn_agent_request_params_rejects_invalid_fanout() {
+        for fan_out in [0, DASHBOARD_SPAWN_FAN_OUT_MAX + 1] {
+            let mut request = empty_dashboard_spawn_agent_request();
+            request.fan_out = Some(fan_out);
+            let response = dashboard_spawn_agent_request_params(request)
+                .expect_err("invalid dashboard fan-out should fail closed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn dashboard_agent_kill_params_trim_id_and_keep_options() {
+        let params = dashboard_agent_kill_params(DashboardAgentKillRequest {
+            session_id: " agent-spawn-issue923 ".to_owned(),
+            grace_ms: Some(0),
+            interrupt_first: Some(false),
+        })
+        .expect("valid dashboard kill params");
+
+        assert_eq!(params.session_id, "agent-spawn-issue923");
+        assert_eq!(params.grace_ms, 0);
+        assert!(!params.interrupt_first);
+    }
+
+    #[test]
+    fn dashboard_agent_kill_params_reject_empty_id() {
+        let response = dashboard_agent_kill_params(DashboardAgentKillRequest {
+            session_id: "   ".to_owned(),
+            grace_ms: None,
+            interrupt_first: None,
+        })
+        .expect_err("empty dashboard kill id should fail closed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn test_session_state(name: &str) -> SessionState {

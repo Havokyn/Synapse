@@ -367,6 +367,19 @@ impl SynapseService {
 }
 
 impl SynapseService {
+    pub(crate) async fn dashboard_agent_kill_request(
+        &self,
+        params: AgentKillParams,
+    ) -> Result<AgentKillResponse, ErrorData> {
+        tracing::info!(
+            code = "DASHBOARD_AGENT_KILL_REQUESTED",
+            kind = TOOL_AGENT_KILL,
+            requested_id = %params.session_id,
+            "dashboard.invocation kind=agent_kill"
+        );
+        self.agent_kill_impl(params, None).await
+    }
+
     // ------------------------------------------------------------------
     // agent_interrupt
     // ------------------------------------------------------------------

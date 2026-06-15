@@ -50,23 +50,27 @@ import {
   buildAgents,
   buildToolCalls,
   deleteDashboardView,
+  fetchTemplates,
   fetchDashboardAuthStatus,
   fetchDashboardState,
   fetchModels,
   fetchSavedViews,
+  killAgent,
   loginDashboard,
   logoutDashboard,
   panelData,
   registerApiModel,
   saveDashboardView,
-  spawnLocalModelAgent,
+  spawnAgent,
   type AgentSummary,
   type DashboardAuthStatus,
   type DashboardRouteReadback,
   type DashboardSavedView,
   type DashboardState,
   type FleetStatus,
-  type ModelRow
+  type ModelRow,
+  type AgentKillResponse,
+  type SpawnAgentResponse
 } from "@/lib/dashboard-state";
 import { asArray, asRecord, cn, rawText, timeAgo, unixMsToTime } from "@/lib/utils";
 import { useUiStore, type DashboardRouteId, type Density, type Theme } from "@/store/ui-store";
@@ -712,6 +716,29 @@ function FleetView({
   advanceAttention: () => void;
   onSpawned: () => void;
 }) {
+  const [killingId, setKillingId] = useState("");
+  const [killError, setKillError] = useState("");
+  const [killReadback, setKillReadback] = useState<AgentKillResponse | null>(null);
+
+  const killFromFleet = async (agent: AgentSummary) => {
+    if (!agent.killable || !agent.killId || killingId) return;
+    setKillingId(agent.killId);
+    setKillError("");
+    try {
+      const readback = await killAgent({
+        session_id: agent.killId,
+        grace_ms: 0,
+        interrupt_first: false
+      });
+      setKillReadback(readback);
+      onSpawned();
+    } catch (error) {
+      setKillError(rawText(error) || "Agent kill failed");
+    } finally {
+      setKillingId("");
+    }
+  };
+
   return (
     <>
       <OverviewBand state={state} agents={agents} attentionCount={attentionCount} stale={stale} />
@@ -735,7 +762,13 @@ function FleetView({
               </Button>
             }
           >
-            <FleetList agents={attentionAgents.length ? attentionAgents : agents} selectedId={selectedAgent?.id} onSelect={setSelectedAgentId} />
+            <FleetList
+              agents={attentionAgents.length ? attentionAgents : agents}
+              selectedId={selectedAgent?.id}
+              onSelect={setSelectedAgentId}
+              onKill={killFromFleet}
+              killingId={killingId}
+            />
           </Section>
           <ToolActivity toolCalls={toolCalls} />
           <Section
@@ -743,7 +776,9 @@ function FleetView({
             tier="drill-down"
             questions={["Which sessions are live?", "Which rows are stale?", "Which row links to detail?"]}
           >
-            <FleetTable agents={agents} onSelect={setSelectedAgentId} />
+            <FleetTable agents={agents} onSelect={setSelectedAgentId} onKill={killFromFleet} killingId={killingId} />
+            {killError ? <div className="mt-3 rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{killError}</div> : null}
+            {killReadback ? <RawValue value={killReadback} label="Kill readback" /> : null}
           </Section>
         </div>
         <aside className="min-w-0">
@@ -961,20 +996,39 @@ const deepSeekPresets = {
   }
 };
 
+type SpawnMode = "template" | "local_model" | "codex" | "claude";
+type SpawnTargetMode = "none" | "window" | "cdp";
+
 function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
   const modelsQuery = useQuery({
     queryKey: ["dashboard-models"],
     queryFn: fetchModels
   });
+  const templatesQuery = useQuery({
+    queryKey: ["dashboard-templates"],
+    queryFn: fetchTemplates
+  });
   const models = modelsQuery.data ?? [];
+  const templates = templatesQuery.data ?? [];
+  const [spawnMode, setSpawnMode] = useState<SpawnMode>("template");
   const [selectedModel, setSelectedModel] = useState("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [templateVersion, setTemplateVersion] = useState("");
+  const [templateParams, setTemplateParams] = useState<Record<string, string>>({});
+  const [fanOut, setFanOut] = useState("1");
+  const [waitTimeoutMs, setWaitTimeoutMs] = useState("300000");
+  const [holdOpenMs, setHoldOpenMs] = useState("300000");
   const [prompt, setPrompt] = useState('Use workspace_put with key issue985-deepseek-smoke and value {"ok":true}.');
   const [workingDir, setWorkingDir] = useState("C:\\code\\Synapse");
+  const [directModel, setDirectModel] = useState("");
+  const [targetMode, setTargetMode] = useState<SpawnTargetMode>("none");
+  const [targetWindowHwnd, setTargetWindowHwnd] = useState("");
+  const [targetCdpId, setTargetCdpId] = useState("");
   const [registerForm, setRegisterForm] = useState(deepSeekPresets.flash);
   const [pendingAction, setPendingAction] = useState<"register" | "spawn" | "">("");
   const [error, setError] = useState("");
   const [lastRegister, setLastRegister] = useState<DashboardRouteReadback | null>(null);
-  const [lastSpawn, setLastSpawn] = useState<DashboardRouteReadback | null>(null);
+  const [lastSpawn, setLastSpawn] = useState<SpawnAgentResponse | null>(null);
 
   useEffect(() => {
     if (!selectedModel && models.length > 0) {
@@ -983,8 +1037,59 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
     }
   }, [models, selectedModel]);
 
+  useEffect(() => {
+    if (spawnMode === "template" && !selectedTemplateId && templates.length > 0) {
+      setSelectedTemplateId(templates[0].template_id);
+    }
+  }, [spawnMode, selectedTemplateId, templates]);
+
   const selected = models.find((model) => model.name === selectedModel);
-  const canSpawn = Boolean(selectedModel && prompt.trim() && !pendingAction);
+  const selectedTemplate = templates.find((template) => template.template_id === selectedTemplateId);
+  const requiredParamSignature = selectedTemplate?.required_params.join("\n") ?? "";
+
+  useEffect(() => {
+    if (!selectedTemplate) return;
+    setTemplateVersion(String(selectedTemplate.version));
+    setTemplateParams((existing) => {
+      const next: Record<string, string> = {};
+      for (const key of selectedTemplate.required_params) {
+        next[key] = existing[key] ?? "";
+      }
+      return next;
+    });
+  }, [selectedTemplate?.template_id, selectedTemplate?.version, requiredParamSignature]);
+
+  const fanOutNumber = Number(fanOut.trim() || "1");
+  const fanOutValid = Number.isInteger(fanOutNumber) && fanOutNumber >= 1 && fanOutNumber <= 5;
+  const templateParamsReady = (selectedTemplate?.required_params ?? []).every((param) => Boolean(templateParams[param]?.trim()));
+  const directReady =
+    spawnMode === "local_model"
+      ? Boolean(selectedModel && prompt.trim())
+      : spawnMode === "codex" || spawnMode === "claude"
+        ? Boolean(prompt.trim())
+        : false;
+  const canSpawn = Boolean(
+    !pendingAction &&
+      fanOutValid &&
+      ((spawnMode === "template" && selectedTemplateId && templateParamsReady) ||
+        (spawnMode !== "template" && directReady))
+  );
+
+  const buildTarget = () => {
+    if (targetMode === "none") return undefined;
+    const parsedWindow = Number(targetWindowHwnd.trim());
+    if (!Number.isInteger(parsedWindow) || parsedWindow <= 0) {
+      throw new Error("target window HWND must be a positive integer");
+    }
+    if (targetMode === "window") {
+      return { kind: "window" as const, window_hwnd: parsedWindow };
+    }
+    const cdpTargetId = targetCdpId.trim();
+    if (!cdpTargetId) {
+      throw new Error("target CDP id is required");
+    }
+    return { kind: "cdp" as const, window_hwnd: parsedWindow, cdp_target_id: cdpTargetId };
+  };
 
   const submitRegister = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1019,25 +1124,50 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
     setError("");
     setPendingAction("spawn");
     try {
-      const readback = await spawnLocalModelAgent({
-        model_ref: selectedModel,
-        prompt,
-        working_dir: workingDir.trim() || undefined,
-        wait_timeout_ms: 300000,
-        hold_open_ms: 0
-      });
+      const fanOutValue = parsePositiveInteger(fanOut, "fan_out") ?? 1;
+      if (fanOutValue > 5) {
+        throw new Error("fan_out must be 1..=5");
+      }
+      const request = {
+        fan_out: fanOutValue,
+        wait_timeout_ms: parsePositiveInteger(waitTimeoutMs, "wait_timeout_ms") ?? 300000,
+        hold_open_ms: parseNonNegativeInteger(holdOpenMs, "hold_open_ms") ?? 0
+      };
+      if (spawnMode === "template") {
+        Object.assign(request, {
+          template_id: selectedTemplateId,
+          template_version: parsePositiveInteger(templateVersion, "template_version"),
+          template_params: Object.fromEntries(
+            (selectedTemplate?.required_params ?? []).map((param) => [param, templateParams[param]?.trim() ?? ""])
+          )
+        });
+      } else {
+        Object.assign(request, {
+          kind: spawnMode,
+          model: spawnMode === "local_model" ? undefined : directModel.trim() || undefined,
+          model_ref: spawnMode === "local_model" ? selectedModel : undefined,
+          prompt,
+          target: buildTarget(),
+          working_dir: workingDir.trim() || undefined
+        });
+      }
+      const readback = await spawnAgent(request);
       setLastSpawn(readback);
       await modelsQuery.refetch();
+      await templatesQuery.refetch();
       onSpawned();
+      if (readback.failed_count > 0) {
+        setError(`${readback.failed_count} spawn attempt failed; inspect readback rows.`);
+      }
     } catch (spawnError) {
-      setError(rawText(spawnError) || "Local-model spawn failed");
+      setError(rawText(spawnError) || "Spawn failed");
     } finally {
       setPendingAction("");
     }
   };
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(24rem,1.1fr)]">
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(26rem,1fr)]">
       <div className="min-w-0 space-y-4">
         <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -1096,45 +1226,144 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
         </div>
 
         <form className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]" onSubmit={submitSpawn}>
-          <div className="mb-3 flex items-center gap-2">
-            <Rocket aria-hidden="true" className="h-4 w-4 text-info" />
-            <h3 className="text-md font-semibold tracking-normal text-primary">Spawn</h3>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Rocket aria-hidden="true" className="h-4 w-4 text-info" />
+              <h3 className="text-md font-semibold tracking-normal text-primary">Spawn</h3>
+            </div>
+            <div className="inline-flex rounded-md border border-border bg-surface-2 p-1">
+              {(["template", "local_model", "codex", "claude"] as SpawnMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={cn("h-8 rounded px-3 text-sm text-secondary", spawnMode === mode && "bg-accent text-accent-fg")}
+                  onClick={() => setSpawnMode(mode)}
+                >
+                  {mode === "local_model" ? "Local" : mode[0].toUpperCase() + mode.slice(1)}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <label className="block text-sm text-secondary">
-              <span className="mb-1 block text-label font-medium uppercase text-muted">Model</span>
-              <select
-                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
-                value={selectedModel}
-                onChange={(event) => setSelectedModel(event.target.value)}
-              >
-                {models.map((model) => (
-                  <option key={model.name} value={model.name}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
+              <span className="mb-1 block text-label font-medium uppercase text-muted">Fan-out</span>
+              <input
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                min={1}
+                max={5}
+                type="number"
+                value={fanOut}
+                onChange={(event) => setFanOut(event.target.value)}
+              />
             </label>
+            <TextField label="Wait timeout ms" value={waitTimeoutMs} onChange={setWaitTimeoutMs} mono type="number" />
+            <TextField label="Hold open ms" value={holdOpenMs} onChange={setHoldOpenMs} mono type="number" />
             <label className="block text-sm text-secondary">
               <span className="mb-1 block text-label font-medium uppercase text-muted">Working dir</span>
               <input
-                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-60"
                 value={workingDir}
                 onChange={(event) => setWorkingDir(event.target.value)}
+                disabled={spawnMode === "template"}
               />
             </label>
           </div>
-          <label className="mt-3 block text-sm text-secondary">
-            <span className="mb-1 block text-label font-medium uppercase text-muted">Prompt</span>
-            <textarea
-              className="min-h-28 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-            />
-          </label>
+          {spawnMode === "template" ? (
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <label className="block text-sm text-secondary">
+                <span className="mb-1 block text-label font-medium uppercase text-muted">Template</span>
+                <select
+                  className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                  value={selectedTemplateId}
+                  onChange={(event) => setSelectedTemplateId(event.target.value)}
+                >
+                  {templates.map((template) => (
+                    <option key={`${template.template_id}:${template.version}`} value={template.template_id}>
+                      {template.name || template.template_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <TextField label="Version" value={templateVersion} onChange={setTemplateVersion} mono />
+              {(selectedTemplate?.required_params ?? []).map((param) => (
+                <TextField
+                  key={param}
+                  label={param}
+                  value={templateParams[param] ?? ""}
+                  onChange={(value) => setTemplateParams((params) => ({ ...params, [param]: value }))}
+                  mono
+                />
+              ))}
+              {selectedTemplate ? (
+                <div className="md:col-span-2 rounded-md border border-border bg-surface-2 p-3 text-sm text-secondary">
+                  <div className="grid gap-2 md:grid-cols-3">
+                    <span className="font-mono text-primary">{selectedTemplate.template_id}</span>
+                    <span>{selectedTemplate.agent_kind}</span>
+                    <span className="font-mono">{selectedTemplate.model_ref || selectedTemplate.model || "default model"}</span>
+                  </div>
+                  <RawValue value={selectedTemplate} label="Template row" />
+                </div>
+              ) : (
+                <div className="md:col-span-2">
+                  <EmptyStateArt title={templatesQuery.isError ? rawText(templatesQuery.error) || "Templates unavailable" : "No template rows"} />
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                {spawnMode === "local_model" ? (
+                  <label className="block text-sm text-secondary">
+                    <span className="mb-1 block text-label font-medium uppercase text-muted">Model</span>
+                    <select
+                      className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                      value={selectedModel}
+                      onChange={(event) => setSelectedModel(event.target.value)}
+                    >
+                      {models.map((model) => (
+                        <option key={model.name} value={model.name}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <TextField label="Model" value={directModel} onChange={setDirectModel} mono />
+                )}
+                <label className="block text-sm text-secondary">
+                  <span className="mb-1 block text-label font-medium uppercase text-muted">Target</span>
+                  <select
+                    className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                    value={targetMode}
+                    onChange={(event) => setTargetMode(event.target.value as SpawnTargetMode)}
+                  >
+                    <option value="none">None</option>
+                    <option value="window">Window</option>
+                    <option value="cdp">CDP tab</option>
+                  </select>
+                </label>
+                {targetMode !== "none" ? <TextField label="Window HWND" value={targetWindowHwnd} onChange={setTargetWindowHwnd} mono /> : null}
+                {targetMode === "cdp" ? <TextField label="CDP target" value={targetCdpId} onChange={setTargetCdpId} mono /> : null}
+              </div>
+              <label className="mt-3 block text-sm text-secondary">
+                <span className="mb-1 block text-label font-medium uppercase text-muted">Prompt</span>
+                <textarea
+                  className="min-h-28 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                />
+              </label>
+            </>
+          )}
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0 text-sm text-secondary">
-              {selected ? `${selected.model_id} / ${selected.last_probe?.status || "unprobed"}` : "No model selected"}
+              {spawnMode === "template"
+                ? selectedTemplate
+                  ? `${selectedTemplate.agent_kind} template v${selectedTemplate.version}`
+                  : `${templates.length} templates`
+                : selected
+                  ? `${selected.model_id} / ${selected.last_probe?.status || "unprobed"}`
+                  : "No model selected"}
             </div>
             <Button type="submit" variant="primary" disabled={!canSpawn}>
               <Rocket aria-hidden="true" className="h-4 w-4" />
@@ -1142,6 +1371,46 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
             </Button>
           </div>
         </form>
+
+        <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="text-md font-semibold tracking-normal text-primary">Templates</h3>
+              <p className="mt-1 text-sm text-secondary">{templatesQuery.isFetching ? "Refreshing templates" : `${templates.length} current rows`}</p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => templatesQuery.refetch()} disabled={templatesQuery.isFetching}>
+              <RefreshCw aria-hidden="true" className="h-4 w-4" />
+              Refresh
+            </Button>
+          </div>
+          {templates.length ? (
+            <DataTable
+              data={templates}
+              getRowId={(template) => `${template.template_id}:${template.version}`}
+              columns={[
+                {
+                  accessorKey: "template_id",
+                  header: "Template",
+                  cell: ({ row }) => <span className="font-mono text-primary">{row.original.template_id}</span>
+                },
+                { accessorKey: "name", header: "Name" },
+                { accessorKey: "agent_kind", header: "Kind" },
+                {
+                  id: "version",
+                  header: "Version",
+                  cell: ({ row }) => <span className="font-mono">{row.original.version}</span>
+                },
+                {
+                  id: "params",
+                  header: "Params",
+                  cell: ({ row }) => <span className="font-mono">{row.original.required_params.join(", ") || "none"}</span>
+                }
+              ]}
+            />
+          ) : (
+            <EmptyStateArt title={templatesQuery.isError ? rawText(templatesQuery.error) || "Templates unavailable" : "No template rows"} />
+          )}
+        </div>
       </div>
 
       <div className="min-w-0 space-y-4">
@@ -1158,7 +1427,7 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
                 value={registerForm.runtime_preset}
                 onChange={(event) => {
                   const preset = Object.values(deepSeekPresets).find((item) => item.runtime_preset === event.target.value);
-                  if (preset) setRegisterForm(preset);
+                  if (preset) setRegisterForm({ ...preset });
                 }}
               >
                 {Object.values(deepSeekPresets).map((preset) => (
@@ -1194,8 +1463,73 @@ function SpawnConsole({ onSpawned }: { onSpawned: () => void }) {
         </form>
         {error ? <div className="rounded-lg border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{error}</div> : null}
         {lastRegister ? <RawValue value={lastRegister} label="Register readback" /> : null}
-        {lastSpawn ? <RawValue value={lastSpawn} label="Spawn readback" /> : null}
+        <SpawnReadbackStrip readback={lastSpawn} />
       </div>
+    </div>
+  );
+}
+
+function SpawnReadbackStrip({ readback }: { readback: SpawnAgentResponse | null }) {
+  if (!readback) return null;
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-md font-semibold tracking-normal text-primary">Spawn Readbacks</h3>
+          <p className="mt-1 text-sm text-secondary">
+            {readback.succeeded_count} ok / {readback.failed_count} error / {readback.requested_count} requested
+          </p>
+        </div>
+        <span className="font-mono text-xs text-muted">{readback.source_of_truth}</span>
+      </div>
+      <div className="space-y-3">
+        {readback.attempts.map((attempt) => {
+          const spawn = asRecord(attempt.spawn);
+          const logPaths = asRecord(spawn.log_paths);
+          const rows = ([
+            ["Spawn", spawn.spawn_id],
+            ["Session", spawn.session_id],
+            ["Launcher PID", spawn.launcher_process_id],
+            ["Agent PID", spawn.agent_process_id],
+            ["Kind", spawn.kind],
+            ["Template", spawn.template_id],
+            ["Template version", spawn.template_version],
+            ["Launch target", spawn.launch_target],
+            ["Log dir", logPaths.log_dir],
+            ["Prompt", logPaths.prompt_path],
+            ["Task started", logPaths.task_started_path],
+            ["Completion", logPaths.completion_status_path]
+          ] as Array<[string, unknown]>).filter((row) => rawText(row[1]));
+          return (
+            <article key={attempt.index} className="rounded-md border border-border bg-surface-2 p-3">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={attempt.status === "ok" ? "done" : "stuck"} />
+                  <span className="font-mono text-sm text-primary">attempt {attempt.index}</span>
+                </div>
+                {attempt.error_code ? <span className="font-mono text-xs text-danger-fg">{attempt.error_code}</span> : null}
+              </div>
+              {attempt.status === "ok" ? (
+                <div className="grid gap-2 text-sm md:grid-cols-2">
+                  {rows.map(([label, value]) => (
+                    <div key={String(label)} className="min-w-0">
+                      <div className="text-label font-medium uppercase text-muted">{label}</div>
+                      <div className="truncate font-mono text-primary">{rawText(value)}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-2 text-sm text-danger-fg">
+                  <div>{attempt.message || "spawn failed"}</div>
+                  {attempt.data ? <RawValue value={attempt.data} label="Error data" /> : null}
+                </div>
+              )}
+              <RawValue value={attempt} label="Attempt raw" />
+            </article>
+          );
+        })}
+      </div>
+      <RawValue value={readback} label="Response raw" />
     </div>
   );
 }
@@ -1213,7 +1547,7 @@ function TextField({
   value: string;
   onChange: (value: string) => void;
   mono?: boolean;
-  type?: "text" | "password";
+  type?: "text" | "password" | "number";
   placeholder?: string;
   autoComplete?: string;
 }) {
@@ -1242,6 +1576,16 @@ function parsePositiveInteger(value: string, field: string): number | undefined 
   return parsed;
 }
 
+function parseNonNegativeInteger(value: string, field: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
 function modelFleetStatus(model: ModelRow): FleetStatus {
   if (!model.enabled) return "idle";
   if (model.last_probe?.healthy) return "done";
@@ -1252,23 +1596,55 @@ function modelFleetStatus(model: ModelRow): FleetStatus {
 function FleetList({
   agents,
   selectedId,
-  onSelect
+  onSelect,
+  onKill,
+  killingId
 }: {
   agents: AgentSummary[];
   selectedId?: string;
   onSelect: (id: string) => void;
+  onKill: (agent: AgentSummary) => void;
+  killingId: string;
 }) {
   if (agents.length === 0) return <EmptyStateArt title="No agent rows" />;
   return (
     <div className="rounded-lg border border-border bg-surface-1">
-      {agents.map((agent) => (
-        <FleetRow key={agent.id} agent={agent} selected={agent.id === selectedId} onSelect={() => onSelect(agent.id)} />
-      ))}
+      {agents.map((agent) => {
+        const pending = killingId === agent.killId;
+        return (
+          <div key={agent.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-stretch border-b border-border-subtle last:border-b-0">
+            <FleetRow agent={agent} selected={agent.id === selectedId} onSelect={() => onSelect(agent.id)} />
+            <div className="flex items-center px-3">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={!agent.killable || pending}
+                onClick={() => onKill(agent)}
+                aria-label={`Kill ${agent.killId || agent.id} from fleet list`}
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+                {pending ? "Killing" : "Kill"}
+              </Button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function FleetTable({ agents, onSelect }: { agents: AgentSummary[]; onSelect: (id: string) => void }) {
+function FleetTable({
+  agents,
+  onSelect,
+  onKill,
+  killingId
+}: {
+  agents: AgentSummary[];
+  onSelect: (id: string) => void;
+  onKill: (agent: AgentSummary) => void;
+  killingId: string;
+}) {
   if (agents.length === 0) return <EmptyStateArt title="No fleet rows" />;
   return (
     <DataTable
@@ -1300,6 +1676,32 @@ function FleetTable({ agents, onSelect }: { agents: AgentSummary[]; onSelect: (i
           id: "diff",
           header: "Diff",
           cell: ({ row }) => `${row.original.diffStats.actions}/${row.original.diffStats.transcripts}`
+        },
+        {
+          id: "actions",
+          header: "Actions",
+          cell: ({ row }) => {
+            const agent = row.original;
+            const pending = killingId === agent.killId;
+            return (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!agent.killable || pending}
+                    onClick={() => onKill(agent)}
+                    aria-label={`Kill ${agent.killId || agent.id}`}
+                  >
+                    <X aria-hidden="true" className="h-4 w-4" />
+                    {pending ? "Killing" : "Kill"}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{agent.killable ? `Kill ${agent.killId}` : "Historical row"}</TooltipContent>
+              </Tooltip>
+            );
+          }
         }
       ]}
     />

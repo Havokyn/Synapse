@@ -928,6 +928,156 @@ impl SynapseService {
         result
     }
 
+    pub(crate) async fn dashboard_spawn_agent_request(
+        &self,
+        request: ActSpawnAgentRequest,
+    ) -> Result<ActSpawnAgentResponse, ErrorData> {
+        tracing::info!(
+            code = "DASHBOARD_AGENT_SPAWN_REQUESTED",
+            kind = ACT_SPAWN_AGENT,
+            template_id = request.template_id.as_deref().unwrap_or(""),
+            "dashboard.invocation kind=act_spawn_agent"
+        );
+        if let Err(error) = self.ensure_supported_use_allows_action("act_launch") {
+            self.audit_action_denied_with_details(
+                ACT_SPAWN_AGENT,
+                &error,
+                &json!({
+                    "channel": "dashboard",
+                    "source": "dashboard_spawn_agent",
+                }),
+            );
+            return Err(error);
+        }
+        let params = match self.resolve_spawn_request(request) {
+            Ok(params) => params,
+            Err(error) => {
+                self.audit_action_denied_with_details(
+                    ACT_SPAWN_AGENT,
+                    &error,
+                    &json!({
+                        "channel": "dashboard",
+                        "source": "dashboard_spawn_agent",
+                    }),
+                );
+                return Err(error);
+            }
+        };
+        let agent_kind = params.effective_cli()?;
+        tracing::info!(
+            code = "DASHBOARD_AGENT_SPAWN_RESOLVED",
+            cli = agent_kind.as_str(),
+            model_ref = params.local_model_ref().unwrap_or(""),
+            template_id = params.template_id.as_deref().unwrap_or(""),
+            template_version = params.template_version.unwrap_or(0),
+            "dashboard.invocation kind=act_spawn_agent resolved"
+        );
+
+        let command_payload = agent_spawn_request_details(&params, None);
+        self.audit_action_started_with_details(ACT_SPAWN_AGENT, &command_payload)?;
+        let spawn_id = format!("agent-spawn-{}", new_reflex_id());
+        let command_before = json!({
+            "source_of_truth": "CF_AGENT_EVENTS, CF_PROCESS_HISTORY, session registry, agent spawn artifacts",
+            "spawn_id": &spawn_id,
+            "before_session_ids": self.current_session_ids()?,
+            "dashboard_channel": true,
+        });
+        self.command_audit_intent(
+            super::command_audit::CommandAuditInput::mcp(
+                ACT_SPAWN_AGENT,
+                "spawn",
+                None,
+                None,
+                command_payload.clone(),
+                command_before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_channel("dashboard"),
+        )?;
+        self.journal_spawn_requested(&spawn_id, &params, None)?;
+        let result = self
+            .act_spawn_agent_impl(params, None, spawn_id.clone())
+            .await;
+        match &result {
+            Ok(response) => {
+                if let Err(journal_error) = self.journal_spawn_ready(response) {
+                    self.command_audit_final(
+                        super::command_audit::CommandAuditInput::mcp(
+                            ACT_SPAWN_AGENT,
+                            "spawn",
+                            None,
+                            Some(response.session_id.clone()),
+                            command_payload.clone(),
+                            command_before.clone(),
+                            json!({
+                                "source_of_truth": "CF_AGENT_EVENTS, CF_PROCESS_HISTORY, session registry, agent spawn artifacts",
+                                "spawn_id": &spawn_id,
+                                "response": response,
+                                "after_session_ids": self.current_session_ids().unwrap_or_default(),
+                            }),
+                            "error",
+                        )
+                        .with_channel("dashboard")
+                        .with_error(super::command_audit::command_audit_error_from_error_data(
+                            &journal_error,
+                        )),
+                    )?;
+                    self.audit_action_result::<ActSpawnAgentResponse>(
+                        ACT_SPAWN_AGENT,
+                        &Err(journal_error.clone()),
+                    )?;
+                    return Err(journal_error);
+                }
+            }
+            Err(error) => {
+                self.journal_spawn_failed(&spawn_id, error);
+            }
+        }
+        match &result {
+            Ok(response) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    ACT_SPAWN_AGENT,
+                    "spawn",
+                    None,
+                    Some(response.session_id.clone()),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "CF_AGENT_EVENTS, CF_PROCESS_HISTORY, session registry, agent spawn artifacts",
+                        "spawn_id": &spawn_id,
+                        "response": response,
+                        "after_session_ids": self.current_session_ids().unwrap_or_default(),
+                    }),
+                    "ok",
+                )
+                .with_channel("dashboard"),
+            )?,
+            Err(error) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    ACT_SPAWN_AGENT,
+                    "spawn",
+                    None,
+                    None,
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "CF_AGENT_EVENTS, CF_PROCESS_HISTORY, session registry, agent spawn artifacts",
+                        "spawn_id": &spawn_id,
+                        "after_session_ids": self.current_session_ids().unwrap_or_default(),
+                    }),
+                    "error",
+                )
+                .with_channel("dashboard")
+                .with_error(super::command_audit::command_audit_error_from_error_data(
+                    error,
+                )),
+            )?,
+        };
+        self.audit_action_result(ACT_SPAWN_AGENT, &result)?;
+        result
+    }
+
     /// Registers an OpenAI-compatible API model (e.g. DeepSeek) from the
     /// dashboard channel. This is the same registry the MCP `local_model_register`
     /// tool writes to (CF_KV `local_model_registry/v1/...`); registration runs
@@ -974,7 +1124,7 @@ impl SynapseService {
     /// renders the params atomically from the durable template and stamps the
     /// `(id, version, config_hash)` provenance. The two modes are mutually
     /// exclusive and conflicts are rejected loudly — never silently merged.
-    fn resolve_spawn_request(
+    pub(crate) fn resolve_spawn_request(
         &self,
         request: ActSpawnAgentRequest,
     ) -> Result<ActSpawnAgentParams, ErrorData> {
