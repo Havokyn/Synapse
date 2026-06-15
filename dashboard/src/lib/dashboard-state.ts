@@ -756,9 +756,8 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     const stateName = rawText(row.state);
     const reason = rawText(row.reason_code);
     // Ambient agents (discovered from ~/.claude/projects, not spawned by
-    // Synapse) are LIVE, not historical: render their real lifecycle state and
-    // current tool. We still cannot kill them — Synapse does not own the
-    // process — so killable stays false.
+    // Synapse) may be live or terminal. Render their server-authoritative
+    // lifecycle directly, but keep terminal history out of attention counts.
     const isAmbient = spawnId.startsWith("agent-spawn-ambient-");
     if (isAmbient) {
       const lastTool = rawText(row.last_tool_name);
@@ -770,7 +769,7 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
         killable: false,
         kind: `${rawText(row.agent_kind || "claude")} · ambient`,
         lifecycle: stateName || "ambient",
-        status: statusFromAgentState(stateName),
+        status: statusFromAgentState(stateName, reason),
         summary: lastTool ? `tool: ${lastTool}` : stateName || "observed",
         lastSeenMs: Number.isFinite(silentMs) ? silentMs : undefined,
         lastAction: lastTool,
@@ -852,7 +851,9 @@ function statusFromLiveSession(stateName: string, lastSeenMs: number, lastAction
 // Maps the server-authoritative #898 lifecycle state straight onto a fleet
 // status. The backend already folds heartbeat-silence and process-liveness into
 // this state, so the UI trusts it verbatim rather than re-deriving from idle ms.
-function statusFromAgentState(stateName: string): FleetStatus {
+function statusFromAgentState(stateName: string, reason = ""): FleetStatus {
+  const terminal = terminalStatus(stateName, reason);
+  if (terminal) return terminal;
   switch (stateName) {
     case "working":
     case "spawning":
@@ -866,7 +867,6 @@ function statusFromAgentState(stateName: string): FleetStatus {
     case "ready_for_review":
       return "ready_for_review";
     case "stuck":
-    case "dead":
       return "stuck";
     default:
       return "idle";
