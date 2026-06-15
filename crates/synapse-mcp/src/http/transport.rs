@@ -541,6 +541,21 @@ fn router(
             post(dashboard_timeline_resume)
                 .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
         )
+        .route(
+            "/dashboard/control-lease/force-release",
+            post(dashboard_control_lease_force_release)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/control-lease/handoff",
+            post(dashboard_control_lease_handoff)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/target-claims/prune",
+            post(dashboard_target_claims_prune)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
         .route("/dashboard/templates", get(dashboard_template_list))
         .route("/dashboard/models", get(dashboard_model_list))
         .route(
@@ -1483,6 +1498,33 @@ struct DashboardTimelinePauseRequest {
 
 #[derive(Serialize)]
 struct DashboardTimelineControlResponse<T>
+where
+    T: Serialize,
+{
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    readback: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardControlLeaseForceReleaseRequest {
+    owner_session_id: String,
+    confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardControlLeaseHandoffRequest {
+    from_session_id: String,
+    to_session_id: String,
+    #[serde(default)]
+    ttl_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DashboardControlResponse<T>
 where
     T: Serialize,
 {
@@ -2555,6 +2597,119 @@ async fn dashboard_timeline_resume(State(state): State<HttpState>, headers: Head
     }
 }
 
+async fn dashboard_control_lease_force_release(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardControlLeaseForceReleaseRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/control-lease/force-release",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let (owner_session_id, confirmed) = match dashboard_control_lease_force_release_params(request)
+    {
+        Ok(params) => params,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    match state
+        .health_service
+        .dashboard_control_lease_force_release(owner_session_id, confirmed)
+    {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardControlResponse {
+                ok: true,
+                trigger: "dashboard.control_lease_force_release",
+                source_of_truth:
+                    "synapse_action::lease + CF_KV MCP session lease rows + CF_AGENT_EVENTS + CF_ACTION_LOG",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_control_lease_handoff(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardControlLeaseHandoffRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/control-lease/handoff",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let (from_session_id, to_session_id, ttl_ms) =
+        match dashboard_control_lease_handoff_params(request) {
+            Ok(params) => params,
+            Err(response) => return with_dashboard_security_headers(response),
+        };
+    match state
+        .health_service
+        .dashboard_control_lease_handoff(from_session_id, to_session_id, ttl_ms)
+    {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardControlResponse {
+                ok: true,
+                trigger: "dashboard.control_lease_handoff",
+                source_of_truth:
+                    "synapse_action::lease + CF_KV MCP session lease rows + CF_AGENT_EVENTS + CF_ACTION_LOG",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_target_claims_prune(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/target-claims/prune",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    match state.health_service.dashboard_target_claim_prune() {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardControlResponse {
+                ok: true,
+                trigger: "dashboard.target_claims_prune",
+                source_of_truth: "daemon target claim registry + CF_ACTION_LOG",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
 async fn dashboard_template_list(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = state.dashboard_auth.authenticate(
         &headers,
@@ -2692,6 +2847,64 @@ fn dashboard_agent_kill_params(
             .unwrap_or(DASHBOARD_AGENT_KILL_DEFAULT_GRACE_MS),
         interrupt_first: request.interrupt_first.unwrap_or(true),
     })
+}
+
+fn dashboard_control_lease_force_release_params(
+    request: DashboardControlLeaseForceReleaseRequest,
+) -> Result<(String, bool), Response> {
+    let owner_session_id = request.owner_session_id.trim();
+    if owner_session_id.is_empty() {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard lease force-release requires owner_session_id",
+            None,
+        ));
+    }
+    if !request.confirmed {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard lease force-release requires confirmation",
+            None,
+        ));
+    }
+    Ok((owner_session_id.to_owned(), request.confirmed))
+}
+
+fn dashboard_control_lease_handoff_params(
+    request: DashboardControlLeaseHandoffRequest,
+) -> Result<(String, String, u64), Response> {
+    let from_session_id = request.from_session_id.trim();
+    let to_session_id = request.to_session_id.trim();
+    if from_session_id.is_empty() || to_session_id.is_empty() {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard lease handoff requires from_session_id and to_session_id",
+            None,
+        ));
+    }
+    if from_session_id == to_session_id {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard lease handoff requires distinct sessions",
+            None,
+        ));
+    }
+    let ttl_ms = request
+        .ttl_ms
+        .unwrap_or(synapse_action::DEFAULT_LEASE_TTL_MS);
+    if !(synapse_action::MIN_LEASE_TTL_MS..=synapse_action::MAX_LEASE_TTL_MS).contains(&ttl_ms) {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            synapse_core::error_codes::TOOL_PARAMS_INVALID,
+            "dashboard lease handoff ttl_ms is outside the allowed lease range",
+            None,
+        ));
+    }
+    Ok((from_session_id.to_owned(), to_session_id.to_owned(), ttl_ms))
 }
 
 async fn dashboard_api_model_register(
@@ -3178,12 +3391,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-Dx04S9D0.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-gEWBuoIw.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-C715IKfj.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-D-XGGNl5.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-Dx04S9D0.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-gEWBuoIw.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-C715IKfj.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-D-XGGNl5.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -3690,6 +3903,67 @@ mod tests {
         })
         .expect_err("empty dashboard kill id should fail closed");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn dashboard_control_lease_force_release_params_trim_owner() {
+        let (owner_session_id, confirmed) = dashboard_control_lease_force_release_params(
+            DashboardControlLeaseForceReleaseRequest {
+                owner_session_id: " lease-owner-session ".to_owned(),
+                confirmed: true,
+            },
+        )
+        .expect("valid dashboard force-release params");
+
+        assert_eq!(owner_session_id, "lease-owner-session");
+        assert!(confirmed);
+    }
+
+    #[test]
+    fn dashboard_control_lease_force_release_params_require_confirmation() {
+        let response = dashboard_control_lease_force_release_params(
+            DashboardControlLeaseForceReleaseRequest {
+                owner_session_id: "lease-owner-session".to_owned(),
+                confirmed: false,
+            },
+        )
+        .expect_err("unconfirmed dashboard force-release should fail closed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn dashboard_control_lease_handoff_params_trim_sessions_and_default_ttl() {
+        let (from_session_id, to_session_id, ttl_ms) =
+            dashboard_control_lease_handoff_params(DashboardControlLeaseHandoffRequest {
+                from_session_id: " from-session ".to_owned(),
+                to_session_id: " to-session ".to_owned(),
+                ttl_ms: None,
+            })
+            .expect("valid dashboard handoff params");
+
+        assert_eq!(from_session_id, "from-session");
+        assert_eq!(to_session_id, "to-session");
+        assert_eq!(ttl_ms, synapse_action::DEFAULT_LEASE_TTL_MS);
+    }
+
+    #[test]
+    fn dashboard_control_lease_handoff_params_reject_bad_sessions_and_ttl() {
+        let same_session =
+            dashboard_control_lease_handoff_params(DashboardControlLeaseHandoffRequest {
+                from_session_id: "same".to_owned(),
+                to_session_id: " same ".to_owned(),
+                ttl_ms: Some(synapse_action::DEFAULT_LEASE_TTL_MS),
+            })
+            .expect_err("same session handoff should fail closed");
+        assert_eq!(same_session.status(), StatusCode::BAD_REQUEST);
+
+        let bad_ttl = dashboard_control_lease_handoff_params(DashboardControlLeaseHandoffRequest {
+            from_session_id: "from".to_owned(),
+            to_session_id: "to".to_owned(),
+            ttl_ms: Some(synapse_action::MIN_LEASE_TTL_MS - 1),
+        })
+        .expect_err("out-of-range dashboard handoff ttl should fail closed");
+        assert_eq!(bad_ttl.status(), StatusCode::BAD_REQUEST);
     }
 
     fn test_session_state(name: &str) -> SessionState {

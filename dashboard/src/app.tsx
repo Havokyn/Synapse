@@ -66,11 +66,14 @@ import {
   fetchDashboardState,
   fetchModels,
   fetchSavedViews,
+  forceReleaseLease,
+  handoffLease,
   killAgent,
   loginDashboard,
   logoutDashboard,
   panelData,
   pauseTimeline,
+  pruneTargetClaims,
   registerApiModel,
   resumeTimeline,
   saveDashboardView,
@@ -80,6 +83,7 @@ import {
   type AuditQueryResponse,
   type AuditQueryRow,
   type DashboardAuthStatus,
+  type DashboardControlResponse,
   type DashboardRouteReadback,
   type DashboardSavedView,
   type DashboardState,
@@ -999,6 +1003,7 @@ function SystemView({
   const targetClaims = asRecord(panelData(state?.target_claims));
   const claims = asArray<Record<string, unknown>>(targetClaims.claims);
   const sessions = asArray<Record<string, unknown>>(asRecord(panelData(state?.sessions)).sessions);
+  const commandAuditRows = asArray<Record<string, unknown>>(asRecord(panelData(state?.command_audit)).rows);
   const hiddenDesktops = asArray<Record<string, unknown>>(asRecord(panelData(state?.hidden_desktops)).rows);
   const cdpAttachments = asArray<Record<string, unknown>>(asRecord(panelData(state?.cdp_attachments)).rows);
   const shellJobsData = asRecord(panelData(state?.shell_jobs));
@@ -1010,6 +1015,45 @@ function SystemView({
   const [recorderBusy, setRecorderBusy] = useState<"pause" | "resume" | "">("");
   const [recorderError, setRecorderError] = useState("");
   const [lastRecorderControl, setLastRecorderControl] = useState<TimelineControlResponse | null>(null);
+  const ownerSessionId = rawText(lease.owner_session_id);
+  const [leaseBusy, setLeaseBusy] = useState<"force" | "handoff" | "prune" | "">("");
+  const [leaseError, setLeaseError] = useState("");
+  const [lastLeaseControl, setLastLeaseControl] = useState<DashboardControlResponse | null>(null);
+  const [forceReleaseOwner, setForceReleaseOwner] = useState("");
+  const [forceReleaseConfirmed, setForceReleaseConfirmed] = useState(false);
+  const [handoffToSession, setHandoffToSession] = useState("");
+  const [handoffTtlMs, setHandoffTtlMs] = useState("5000");
+  const forceReleaseTarget = forceReleaseOwner.trim() || ownerSessionId;
+  const contentionRows = commandAuditRows.filter((row) => {
+    const errorCode = rawText(row.error_code);
+    return errorCode === "ACTION_FOREGROUND_LEASE_BUSY" || rawText(row).includes("ACTION_FOREGROUND_LEASE_BUSY");
+  });
+  const contentionGroups: Record<string, unknown>[] = Object.values(
+    contentionRows.reduce<Record<string, { session_id: string; count: number; last_ts_ns: number; tools: string[] }>>((groups, row) => {
+      const payload = asRecord(row.payload_bounded);
+      const sessionId =
+        rawText(row.actor_session_id || payload.session_id || payload.requesting_session_id || row.target_session_id) || "unknown";
+      const group = groups[sessionId] ?? {
+        session_id: sessionId,
+        count: 0,
+        last_ts_ns: 0,
+        tools: []
+      };
+      group.count += 1;
+      group.last_ts_ns = Math.max(group.last_ts_ns, Number(row.ts_ns || 0));
+      const tool = rawText(row.tool || row.verb || "unknown");
+      if (tool && !group.tools.includes(tool)) group.tools.push(tool);
+      groups[sessionId] = group;
+      return groups;
+    }, {})
+  )
+    .sort((a, b) => b.last_ts_ns - a.last_ts_ns)
+    .map((group) => ({
+      session_id: group.session_id,
+      count: group.count,
+      last_ts_ns: group.last_ts_ns,
+      tools: group.tools
+    }));
 
   const submitRecorderControl = async (mode: "pause" | "resume") => {
     setRecorderBusy(mode);
@@ -1022,6 +1066,64 @@ function SystemView({
       setRecorderError(error instanceof Error ? error.message : String(error));
     } finally {
       setRecorderBusy("");
+    }
+  };
+
+  const submitForceRelease = async () => {
+    if (!forceReleaseTarget) return;
+    setLeaseBusy("force");
+    setLeaseError("");
+    try {
+      const response = await forceReleaseLease({
+        owner_session_id: forceReleaseTarget,
+        confirmed: forceReleaseConfirmed
+      });
+      setLastLeaseControl(response);
+      setForceReleaseConfirmed(false);
+      await onRefresh();
+    } catch (error) {
+      setLeaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLeaseBusy("");
+    }
+  };
+
+  const submitHandoff = async () => {
+    const toSession = handoffToSession.trim();
+    if (!ownerSessionId || !toSession) return;
+    const ttl = handoffTtlMs.trim() ? Number(handoffTtlMs.trim()) : undefined;
+    if (ttl !== undefined && !Number.isFinite(ttl)) {
+      setLeaseError("TOOL_PARAMS_INVALID: ttl_ms must be numeric");
+      return;
+    }
+    setLeaseBusy("handoff");
+    setLeaseError("");
+    try {
+      const response = await handoffLease({
+        from_session_id: ownerSessionId,
+        to_session_id: toSession,
+        ttl_ms: ttl
+      });
+      setLastLeaseControl(response);
+      await onRefresh();
+    } catch (error) {
+      setLeaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLeaseBusy("");
+    }
+  };
+
+  const submitPruneClaims = async () => {
+    setLeaseBusy("prune");
+    setLeaseError("");
+    try {
+      const response = await pruneTargetClaims();
+      setLastLeaseControl(response);
+      await onRefresh();
+    } catch (error) {
+      setLeaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLeaseBusy("");
     }
   };
 
@@ -1140,11 +1242,129 @@ function SystemView({
         </div>
       </Section>
 
-      <Section title="Claims" tier="drill-down" questions={["Who holds the input lease?", "Which targets are claimed?", "Are claims stale?"]}>
+      <Section
+        title="Claims"
+        tier="drill-down"
+        questions={["Who holds the input lease?", "Which sessions are waiting?", "Which targets are stale?"]}
+        actions={
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="ghost" size="sm" disabled={leaseBusy === "prune"} onClick={submitPruneClaims}>
+                <RefreshCw aria-hidden="true" className="h-4 w-4" />
+                {leaseBusy === "prune" ? "Pruning" : "Prune"}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Prune expired target claims</TooltipContent>
+          </Tooltip>
+        }
+      >
         <div className="mb-3 grid gap-4 md:grid-cols-3">
-          <StatCard label="Lease" value={lease.held === true ? "held" : "free"} status={lease.held === true ? "needs_input" : "done"} delta={rawText(lease.owner_session_id || "no owner")} />
+          <StatCard label="Lease" value={lease.held === true ? "held" : "free"} status={lease.held === true ? "needs_input" : "done"} delta={ownerSessionId || "no owner"} />
           <StatCard label="Claims" value={rawText(targetClaims.claim_count || claims.length)} status={claims.length ? "working" : "idle"} delta={state?.target_claims.source || "target_claim_status"} />
-          <StatCard label="Sessions" value={sessions.length} status={sessions.length ? "working" : "idle"} delta={state?.sessions.source || "session_list"} />
+          <StatCard label="Contention" value={contentionRows.length} status={contentionRows.length ? "needs_input" : "done"} delta={state?.command_audit.source || "CF_ACTION_LOG"} />
+        </div>
+        <div className="mb-3 grid gap-3 xl:grid-cols-2">
+          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+            <div className="mb-3 flex items-center gap-2 text-primary">
+              <X aria-hidden="true" className="h-4 w-4 text-warning" />
+              <h3 className="text-md font-medium tracking-normal">Force Release</h3>
+            </div>
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+              <input
+                value={forceReleaseOwner}
+                onChange={(event) => setForceReleaseOwner(event.target.value)}
+                placeholder={ownerSessionId || "owner session id"}
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              />
+              <label className="inline-flex h-10 items-center gap-2 rounded-md border border-border bg-surface-2 px-3 text-sm text-primary">
+                <input
+                  type="checkbox"
+                  checked={forceReleaseConfirmed}
+                  onChange={(event) => setForceReleaseConfirmed(event.target.checked)}
+                  className="h-4 w-4 accent-[rgb(var(--color-info))]"
+                />
+                Confirm
+              </label>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={!forceReleaseTarget || !forceReleaseConfirmed || Boolean(leaseBusy)}
+                onClick={submitForceRelease}
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+                {leaseBusy === "force" ? "Releasing" : "Release"}
+              </Button>
+              <span className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap font-mono text-xs text-secondary">
+                {forceReleaseTarget || "no target"}
+              </span>
+            </div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+            <div className="mb-3 flex items-center gap-2 text-primary">
+              <SkipForward aria-hidden="true" className="h-4 w-4 text-info" />
+              <h3 className="text-md font-medium tracking-normal">Handoff</h3>
+            </div>
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_7rem]">
+              <input
+                value={handoffToSession}
+                onChange={(event) => setHandoffToSession(event.target.value)}
+                placeholder="recipient session id"
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              />
+              <input
+                value={handoffTtlMs}
+                onChange={(event) => setHandoffTtlMs(event.target.value)}
+                inputMode="numeric"
+                aria-label="Lease TTL ms"
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+              />
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={!ownerSessionId || !handoffToSession.trim() || Boolean(leaseBusy)}
+                onClick={submitHandoff}
+              >
+                <SkipForward aria-hidden="true" className="h-4 w-4" />
+                {leaseBusy === "handoff" ? "Handing off" : "Handoff"}
+              </Button>
+              <span className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap font-mono text-xs text-secondary">
+                {ownerSessionId || "no holder"}
+              </span>
+            </div>
+          </div>
+        </div>
+        {leaseError ? <div className="mb-3 rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{leaseError}</div> : null}
+        <div className="mb-3 grid gap-4 xl:grid-cols-2">
+          <SystemTable
+            title="Contention"
+            icon={Gauge}
+            rows={contentionGroups}
+            empty="No lease denials"
+            columns={[
+              { id: "session", header: "Waiting Session", cell: ({ row }) => rawText(row.original.session_id) },
+              { id: "count", header: "Denials", cell: ({ row }) => rawText(row.original.count) },
+              { id: "last", header: "Last", cell: ({ row }) => nsToTime(Number(row.original.last_ts_ns || 0)) || rawText(row.original.last_ts_ns) },
+              { id: "tools", header: "Tools", cell: ({ row }) => asArray<string>(row.original.tools).join(", ") || "unknown" }
+            ]}
+          />
+          <SystemTable
+            title="Sessions"
+            icon={MonitorUp}
+            rows={sessions}
+            empty="No session rows"
+            columns={[
+              { id: "session", header: "Session", cell: ({ row }) => rawText(row.original.session_id) },
+              { id: "lifecycle", header: "Lifecycle", cell: ({ row }) => rawText(row.original.lifecycle) },
+              { id: "lease", header: "Lease", cell: ({ row }) => rawText(asRecord(row.original.lease).held) },
+              { id: "last", header: "Last Action", cell: ({ row }) => rawText(row.original.last_action) }
+            ]}
+          />
         </div>
         {claims.length ? (
           <DataTable
@@ -1161,7 +1381,7 @@ function SystemView({
           <EmptyState title="No target claims" />
         )}
         <div className="mt-3">
-          <RawValue value={{ lease: state?.lease, target_claims: state?.target_claims }} label="Lease and claims readback" />
+          <RawValue value={{ lease: state?.lease, target_claims: state?.target_claims, last_control: lastLeaseControl }} label="Lease and claims readback" />
         </div>
       </Section>
 

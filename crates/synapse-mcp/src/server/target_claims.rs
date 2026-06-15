@@ -165,6 +165,17 @@ pub struct TargetClaimStatusResponse {
     pub source_of_truth: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DashboardTargetClaimPruneResponse {
+    pub before_count: usize,
+    pub after_count: usize,
+    pub pruned_count: usize,
+    pub before_claims: Vec<TargetClaimRead>,
+    pub after: TargetClaimStatusResponse,
+    pub source_of_truth: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TargetClaimCleanupReport {
@@ -698,6 +709,85 @@ impl SynapseService {
             claims,
             source_of_truth: source_of_truth(),
         })
+    }
+
+    pub(crate) fn dashboard_target_claim_prune(
+        &self,
+    ) -> Result<DashboardTargetClaimPruneResponse, ErrorData> {
+        let now = unix_time_ms_now();
+        let live_sessions = self.live_target_claim_sessions(now, None)?;
+        let before_claims = {
+            let guard = self.lock_target_claims()?;
+            guard.reads(now)
+        };
+        let command_payload = json!({
+            "live_session_count": live_sessions.len(),
+        });
+        let command_before = json!({
+            "source_of_truth": source_of_truth(),
+            "claim_count": before_claims.len(),
+            "claims": &before_claims,
+        });
+        self.command_audit_intent(
+            super::command_audit::CommandAuditInput::mcp(
+                "target_claim_status",
+                "target_claim_prune",
+                None,
+                None,
+                command_payload.clone(),
+                command_before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_channel("dashboard"),
+        )?;
+        let after_claims = {
+            let mut guard = self.lock_target_claims()?;
+            guard.prune_inactive(now, &live_sessions);
+            guard.reads(now)
+        };
+        let after_keys = after_claims
+            .iter()
+            .map(|claim| claim.target_key.clone())
+            .collect::<BTreeSet<_>>();
+        let pruned_count = before_claims
+            .iter()
+            .filter(|claim| !after_keys.contains(&claim.target_key))
+            .count();
+        let after = TargetClaimStatusResponse {
+            session_id: "dashboard".to_owned(),
+            now_unix_ms: now,
+            claim_count: after_claims.len(),
+            target_key: None,
+            target_claim: None,
+            claims: after_claims,
+            source_of_truth: source_of_truth(),
+        };
+        let response = DashboardTargetClaimPruneResponse {
+            before_count: before_claims.len(),
+            after_count: after.claim_count,
+            pruned_count,
+            before_claims,
+            after,
+            source_of_truth: source_of_truth(),
+        };
+        self.command_audit_final(
+            super::command_audit::CommandAuditInput::mcp(
+                "target_claim_status",
+                "target_claim_prune",
+                None,
+                None,
+                command_payload,
+                command_before,
+                json!({
+                    "source_of_truth": source_of_truth(),
+                    "response": &response,
+                }),
+                "ok",
+            )
+            .with_channel("dashboard"),
+        )?;
+        Ok(response)
     }
 
     pub(crate) fn ensure_target_claim_allows_action(

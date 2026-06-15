@@ -426,6 +426,30 @@ pub fn force_clear(reason: &str) -> Option<LeaseStatus> {
     prior
 }
 
+/// Clears the lease only when the named session is still the live owner.
+///
+/// This operator-control primitive is race-safe against clearing a lease that
+/// moved to a different session after the UI read its before state.
+pub fn force_clear_if_owner(session_id: &str, reason: &str) -> Option<LeaseStatus> {
+    let now = Instant::now();
+    let mut guard = lock();
+    let _expired = expire_if_lapsed(&mut guard, now);
+    let prior = guard
+        .as_ref()
+        .filter(|lease| lease.owner_session_id == session_id)
+        .map(|lease| lease.status(now));
+    if let Some(prior) = &prior {
+        tracing::warn!(
+            reason,
+            prior_owner = ?prior.owner_session_id,
+            "input lease force-cleared by owner-guarded operator override"
+        );
+        *guard = None;
+        lock_expired_cleanup().clear();
+    }
+    prior
+}
+
 /// Reads the current lease snapshot, lazily expiring a lapsed lease first.
 ///
 /// Never blocks beyond the O(1) critical section; safe for `/health`.
@@ -611,6 +635,28 @@ mod tests {
         assert!(!release_if_owner(other));
         assert!(status().held);
         assert!(release_if_owner(owner));
+        assert!(!status().held);
+        reset();
+    }
+
+    #[test]
+    fn force_clear_if_owner_is_owner_guarded() {
+        let _serial = serial();
+        let owner = "force-clear-owner";
+        let other = "force-clear-other";
+        let _held = try_acquire(owner, ttl_from_ms(5_000));
+
+        let denied = force_clear_if_owner(other, "test_other_owner");
+        assert!(denied.is_none());
+        assert_eq!(status().owner_session_id.as_deref(), Some(owner));
+
+        let cleared = force_clear_if_owner(owner, "test_current_owner");
+        assert_eq!(
+            cleared
+                .as_ref()
+                .and_then(|status| status.owner_session_id.as_deref()),
+            Some(owner)
+        );
         assert!(!status().held);
         reset();
     }

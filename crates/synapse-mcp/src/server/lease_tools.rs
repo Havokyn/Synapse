@@ -74,6 +74,32 @@ pub struct ControlLeaseResponse {
     pub expires_in_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DashboardControlLeaseForceReleaseResponse {
+    pub requested_owner_session_id: String,
+    pub confirmed: bool,
+    pub released: bool,
+    pub before: ControlLeaseResponse,
+    pub after: ControlLeaseResponse,
+    pub persisted_row_deleted: bool,
+    pub source_of_truth: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DashboardControlLeaseHandoffResponse {
+    pub from_session_id: String,
+    pub to_session_id: String,
+    pub ttl_ms: u64,
+    pub before_from: ControlLeaseResponse,
+    pub before_to: ControlLeaseResponse,
+    pub response: ControlLeaseResponse,
+    pub after_from: ControlLeaseResponse,
+    pub after_to: ControlLeaseResponse,
+    pub source_of_truth: &'static str,
+}
+
 impl ControlLeaseResponse {
     fn from_status(outcome: &str, this_session_id: String, status: &LeaseStatus) -> Self {
         let is_owner = status.owner_session_id.as_deref() == Some(this_session_id.as_str());
@@ -90,6 +116,9 @@ impl ControlLeaseResponse {
         }
     }
 }
+
+const DASHBOARD_LEASE_SOURCE_OF_TRUTH: &str =
+    "synapse_action::lease + CF_KV MCP session lease rows + CF_AGENT_EVENTS + CF_ACTION_LOG";
 
 #[tool_router(router = lease_tool_router, vis = "pub(super)")]
 impl SynapseService {
@@ -798,6 +827,320 @@ impl SynapseService {
                 );
             }
         }
+    }
+
+    pub(crate) fn dashboard_control_lease_force_release(
+        &self,
+        owner_session_id: String,
+        confirmed: bool,
+    ) -> Result<DashboardControlLeaseForceReleaseResponse, ErrorData> {
+        validate_session_id(&owner_session_id)?;
+        let before = lease_status_for_session(&owner_session_id);
+        let command_payload = json!({
+            "owner_session_id": &owner_session_id,
+            "confirmed": confirmed,
+        });
+        let command_before = json!({
+            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+            "owner": &before,
+        });
+        self.command_audit_intent(
+            super::command_audit::CommandAuditInput::mcp(
+                "control_lease_force_release",
+                "lease_force_release",
+                None,
+                Some(owner_session_id.clone()),
+                command_payload.clone(),
+                command_before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_channel("dashboard"),
+        )?;
+        if !confirmed {
+            let error = mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "dashboard lease force-release requires confirmation",
+            );
+            self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "control_lease_force_release",
+                    "lease_force_release",
+                    None,
+                    Some(owner_session_id.clone()),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                        "owner": lease_status_for_session(&owner_session_id),
+                    }),
+                    "error",
+                )
+                .with_channel("dashboard")
+                .with_error(
+                    super::command_audit::command_audit_error_from_error_data(&error),
+                ),
+            )?;
+            return Err(error);
+        }
+        let released_prior =
+            lease::force_clear_if_owner(&owner_session_id, "dashboard_force_release");
+        let released = released_prior.is_some();
+        let mut persisted_row_deleted = false;
+        if released {
+            if let Err(error) = self.delete_persisted_session_lease(&owner_session_id) {
+                self.command_audit_final(
+                    super::command_audit::CommandAuditInput::mcp(
+                        "control_lease_force_release",
+                        "lease_force_release",
+                        None,
+                        Some(owner_session_id.clone()),
+                        command_payload,
+                        command_before,
+                        json!({
+                            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                            "released": true,
+                            "owner": lease_status_for_session(&owner_session_id),
+                        }),
+                        "error",
+                    )
+                    .with_channel("dashboard")
+                    .with_error(
+                        super::command_audit::command_audit_error_from_error_data(&error),
+                    ),
+                )?;
+                return Err(error);
+            }
+            persisted_row_deleted = true;
+            if let Err(error) = self.journal_lease_event(
+                synapse_core::AgentEventKind::LeaseReleased,
+                &owner_session_id,
+                Some("dashboard_force_release"),
+                None,
+            ) {
+                let tool_error = super::agent_events::agent_event_tool_error(
+                    "control_lease_force_release",
+                    &error,
+                    true,
+                );
+                self.command_audit_final(
+                    super::command_audit::CommandAuditInput::mcp(
+                        "control_lease_force_release",
+                        "lease_force_release",
+                        None,
+                        Some(owner_session_id.clone()),
+                        command_payload,
+                        command_before,
+                        json!({
+                            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                            "released": true,
+                            "owner": lease_status_for_session(&owner_session_id),
+                        }),
+                        "error",
+                    )
+                    .with_channel("dashboard")
+                    .with_error(
+                        super::command_audit::command_audit_error_from_error_data(&tool_error),
+                    ),
+                )?;
+                return Err(tool_error);
+            }
+        }
+        let response = DashboardControlLeaseForceReleaseResponse {
+            requested_owner_session_id: owner_session_id.clone(),
+            confirmed,
+            released,
+            before,
+            after: lease_status_for_session(&owner_session_id),
+            persisted_row_deleted,
+            source_of_truth: DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+        };
+        self.command_audit_final(
+            super::command_audit::CommandAuditInput::mcp(
+                "control_lease_force_release",
+                "lease_force_release",
+                None,
+                Some(owner_session_id),
+                command_payload,
+                command_before,
+                json!({
+                    "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                    "response": &response,
+                }),
+                "ok",
+            )
+            .with_channel("dashboard"),
+        )?;
+        Ok(response)
+    }
+
+    pub(crate) fn dashboard_control_lease_handoff(
+        &self,
+        from_session_id: String,
+        to_session_id: String,
+        ttl_ms: u64,
+    ) -> Result<DashboardControlLeaseHandoffResponse, ErrorData> {
+        validate_session_id(&from_session_id)?;
+        self.ensure_handoff_recipient_live(&from_session_id, &to_session_id)?;
+        self.restore_session_lease_if_needed(&from_session_id)?;
+        let before_from = lease_status_for_session(&from_session_id);
+        let before_to = lease_status_for_session(&to_session_id);
+        let command_payload = json!({
+            "from_session_id": &from_session_id,
+            "to_session_id": &to_session_id,
+            "ttl_ms": ttl_ms,
+        });
+        let command_before = json!({
+            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+            "from": &before_from,
+            "to": &before_to,
+        });
+        self.command_audit_intent(
+            super::command_audit::CommandAuditInput::mcp(
+                "control_lease_handoff",
+                "lease_handoff",
+                Some(from_session_id.clone()),
+                Some(to_session_id.clone()),
+                command_payload.clone(),
+                command_before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_channel("dashboard"),
+        )?;
+        let handoff = match handoff_lease_for_session(&from_session_id, &to_session_id, ttl_ms) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                self.command_audit_final(
+                    super::command_audit::CommandAuditInput::mcp(
+                        "control_lease_handoff",
+                        "lease_handoff",
+                        Some(from_session_id.clone()),
+                        Some(to_session_id.clone()),
+                        command_payload,
+                        command_before,
+                        json!({
+                            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                            "from": lease_status_for_session(&from_session_id),
+                            "to": lease_status_for_session(&to_session_id),
+                        }),
+                        "error",
+                    )
+                    .with_channel("dashboard")
+                    .with_error(
+                        super::command_audit::command_audit_error_from_error_data(&error),
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
+        let response = ControlLeaseResponse::from_status(
+            "handed_off",
+            from_session_id.clone(),
+            &handoff.current,
+        );
+        let persist_readback = match self.persist_session_lease_handoff(
+            &from_session_id,
+            &to_session_id,
+            &handoff.current,
+        ) {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.rollback_handoff_after_persist_failure(
+                    &from_session_id,
+                    &to_session_id,
+                    &handoff.prior,
+                    &error,
+                );
+                self.command_audit_final(
+                    super::command_audit::CommandAuditInput::mcp(
+                        "control_lease_handoff",
+                        "lease_handoff",
+                        Some(from_session_id.clone()),
+                        Some(to_session_id.clone()),
+                        command_payload,
+                        command_before,
+                        json!({
+                            "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                            "from": lease_status_for_session(&from_session_id),
+                            "to": lease_status_for_session(&to_session_id),
+                        }),
+                        "error",
+                    )
+                    .with_channel("dashboard")
+                    .with_error(
+                        super::command_audit::command_audit_error_from_error_data(&error),
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
+        tracing::info!(
+            code = "DASHBOARD_INPUT_LEASE_HANDOFF_COMMITTED",
+            from_session_id,
+            to_session_id,
+            from_row_existed_before = persist_readback.from_row_existed_before,
+            from_row_exists_after = persist_readback.from_row_exists_after,
+            to_row_exists_after = persist_readback.to_row_exists_after,
+            "readback=input_lease edge=dashboard_handoff_committed"
+        );
+        if let Err(error) = self.journal_lease_handoff_events(
+            &from_session_id,
+            &to_session_id,
+            handoff.current.ttl_ms,
+        ) {
+            let tool_error =
+                super::agent_events::agent_event_tool_error("control_lease_handoff", &error, true);
+            self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "control_lease_handoff",
+                    "lease_handoff",
+                    Some(from_session_id.clone()),
+                    Some(to_session_id.clone()),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                        "from": lease_status_for_session(&from_session_id),
+                        "to": lease_status_for_session(&to_session_id),
+                    }),
+                    "error",
+                )
+                .with_channel("dashboard")
+                .with_error(
+                    super::command_audit::command_audit_error_from_error_data(&tool_error),
+                ),
+            )?;
+            return Err(tool_error);
+        }
+        let dashboard_response = DashboardControlLeaseHandoffResponse {
+            from_session_id: from_session_id.clone(),
+            to_session_id: to_session_id.clone(),
+            ttl_ms,
+            before_from,
+            before_to,
+            response,
+            after_from: lease_status_for_session(&from_session_id),
+            after_to: lease_status_for_session(&to_session_id),
+            source_of_truth: DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+        };
+        self.command_audit_final(
+            super::command_audit::CommandAuditInput::mcp(
+                "control_lease_handoff",
+                "lease_handoff",
+                Some(from_session_id),
+                Some(to_session_id),
+                command_payload,
+                command_before,
+                json!({
+                    "source_of_truth": DASHBOARD_LEASE_SOURCE_OF_TRUTH,
+                    "response": &dashboard_response,
+                }),
+                "ok",
+            )
+            .with_channel("dashboard"),
+        )?;
+        Ok(dashboard_response)
     }
 }
 

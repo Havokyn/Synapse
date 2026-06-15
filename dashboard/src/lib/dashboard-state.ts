@@ -346,6 +346,24 @@ export interface TimelineControlResponse {
   readback: Record<string, unknown>;
 }
 
+export interface LeaseForceReleaseRequest {
+  owner_session_id: string;
+  confirmed: boolean;
+}
+
+export interface LeaseHandoffRequest {
+  from_session_id: string;
+  to_session_id: string;
+  ttl_ms?: number;
+}
+
+export interface DashboardControlResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  readback: Record<string, unknown>;
+}
+
 export type DashboardRouteReadback = Record<string, unknown>;
 
 function csrfHeaders(): Record<string, string> {
@@ -523,6 +541,40 @@ export async function resumeTimeline(): Promise<TimelineControlResponse> {
     headers: csrfHeaders()
   });
   return (await readJsonOrThrow(response)) as unknown as TimelineControlResponse;
+}
+
+export async function forceReleaseLease(
+  request: LeaseForceReleaseRequest
+): Promise<DashboardControlResponse> {
+  const response = await fetch("/dashboard/control-lease/force-release", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as DashboardControlResponse;
+}
+
+export async function handoffLease(request: LeaseHandoffRequest): Promise<DashboardControlResponse> {
+  const response = await fetch("/dashboard/control-lease/handoff", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as DashboardControlResponse;
+}
+
+export async function pruneTargetClaims(): Promise<DashboardControlResponse> {
+  const response = await fetch("/dashboard/target-claims/prune", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders()
+  });
+  return (await readJsonOrThrow(response)) as unknown as DashboardControlResponse;
 }
 
 export async function fetchDashboardState(): Promise<DashboardState> {
