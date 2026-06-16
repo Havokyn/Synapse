@@ -722,15 +722,19 @@ mod tests {
             GateOutcome::Surface
         );
         // Global cap: 3 created within the window -> next is blocked.
-        let mut agg = SuggestionAggregates::default();
-        agg.created_ts = vec![T - 1, T - 2, T - 3];
+        let agg = SuggestionAggregates {
+            created_ts: vec![T - 1, T - 2, T - 3],
+            ..Default::default()
+        };
         assert_eq!(
             gate_decision("rt1-b", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
             GateOutcome::GlobalCap
         );
         // Old creations fall out of the window -> allowed again.
-        let mut agg = SuggestionAggregates::default();
-        agg.created_ts = vec![T - 5_000 * 1_000_000_000; 3];
+        let agg = SuggestionAggregates {
+            created_ts: vec![T - 5_000 * 1_000_000_000; 3],
+            ..Default::default()
+        };
         assert_eq!(
             gate_decision("rt1-b", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
             GateOutcome::Surface
