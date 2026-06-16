@@ -2,8 +2,27 @@ use std::sync::Arc;
 
 use synapse_action::{ActionBackend, ActionEmitter, ActionError, ActionHandle, RecordingBackend};
 use synapse_core::{Action, Backend, GamepadController, GamepadReport, Key, KeyCode, PadButton};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio_util::sync::CancellationToken;
+
+// The input lease (`synapse_action::lease`) is process-global. The two tests
+// below acquire it directly and then read it back, so if they run concurrently
+// one observes the other's holder — the #883 lease race that made
+// `failed_session_input_cleanup_keeps_lease_for_retry` flaky. Serialize every
+// lease-touching test on a module-local async mutex held for the whole test,
+// resetting the lease on entry so neither observes a stale holder. This mirrors
+// the `static SERIAL` guard the `lease` module's own unit tests already use; an
+// async (tokio) mutex is required here because these are `#[tokio::test]` bodies
+// that hold the guard across `.await` points (a `std::sync::Mutex` guard there
+// would trip the denied `clippy::await_holding_lock` lint).
+static LEASE_SERIAL: Mutex<()> = Mutex::const_new(());
+
+async fn lease_serial() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = LEASE_SERIAL.lock().await;
+    let _prior = synapse_action::lease::force_clear("session_input_lease_test_reset");
+    guard
+}
 
 #[tokio::test]
 async fn session_release_keeps_other_session_inputs_held() {
@@ -337,6 +356,7 @@ async fn session_release_serializes_new_owner_until_release_action_ack() {
 
 #[tokio::test]
 async fn session_input_lease_cleanup_releases_lease_after_ledger_empty() {
+    let _serial = lease_serial().await;
     let cancel = CancellationToken::new();
     let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
     let (handle, snapshot_handle, join) =
@@ -394,6 +414,7 @@ async fn session_input_lease_cleanup_releases_lease_after_ledger_empty() {
 
 #[tokio::test]
 async fn failed_session_input_cleanup_keeps_lease_for_retry() {
+    let _serial = lease_serial().await;
     let (handle, mut action_rx) = ActionHandle::channel();
     let session_id = "session-lease-retry";
     let session = handle.with_session_id(Some(session_id.to_owned()));
