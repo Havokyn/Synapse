@@ -40,9 +40,18 @@ async fn agent_templates_crud_round_trips_against_physical_cf_rows() -> anyhow::
     let db_path = db_path_under(db_dir.path());
     let db_path_str = db_path.to_string_lossy().into_owned();
 
-    let mut client =
-        StdioMcpClient::launch_and_init_with_env(None, &[("SYNAPSE_DB", db_path_str.as_str())])
-            .await?;
+    // Synthetic notepad foreground: act_spawn_agent runs the supported-use scope
+    // gate, which reads the real GetForegroundWindow() and fails A11Y_NO_FOREGROUND
+    // when the host has no focused window — masking the template-state error this
+    // test actually asserts. The fixture makes the foreground a controlled input.
+    let mut client = StdioMcpClient::launch_and_init_with_env(
+        None,
+        &[
+            ("SYNAPSE_DB", db_path_str.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+        ],
+    )
+    .await?;
 
     // ---- BEFORE state: the store is empty --------------------------------
     let empty = client.tools_call("agent_template_list", json!({})).await?;

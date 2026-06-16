@@ -13,7 +13,12 @@ async fn reflex_list_schema_default_and_cancelled_merge() -> anyhow::Result<()> 
     let db_path_string = db_path.to_string_lossy().into_owned();
     let mut client = StdioMcpClient::launch_and_init_with_env(
         Some(logs.path()),
-        &[("SYNAPSE_DB", db_path_string.as_str())],
+        // Synthetic notepad foreground so the reflex_register supported-use gate
+        // does not depend on a real focused window (A11Y_NO_FOREGROUND otherwise).
+        &[
+            ("SYNAPSE_DB", db_path_string.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+        ],
     )
     .await?;
     activate_notepad_profile(&mut client).await?;
@@ -79,7 +84,12 @@ async fn reflex_list_schema_default_and_cancelled_merge() -> anyhow::Result<()> 
 
     let mut restarted = StdioMcpClient::launch_and_init_with_env(
         Some(logs.path()),
-        &[("SYNAPSE_DB", db_path_string.as_str())],
+        // Synthetic notepad foreground so the reflex_register supported-use gate
+        // does not depend on a real focused window (A11Y_NO_FOREGROUND otherwise).
+        &[
+            ("SYNAPSE_DB", db_path_string.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+        ],
     )
     .await?;
     let restored = restarted

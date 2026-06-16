@@ -14,7 +14,12 @@ async fn reflex_history_schema_defaults_and_audit_boundaries() -> anyhow::Result
     let db_path_string = db_path.to_string_lossy().into_owned();
     let mut client = StdioMcpClient::launch_and_init_with_env(
         Some(logs.path()),
-        &[("SYNAPSE_DB", db_path_string.as_str())],
+        // Synthetic notepad foreground so the reflex_register supported-use gate
+        // does not depend on a real focused window (A11Y_NO_FOREGROUND otherwise).
+        &[
+            ("SYNAPSE_DB", db_path_string.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+        ],
     )
     .await?;
     activate_notepad_profile(&mut client).await?;

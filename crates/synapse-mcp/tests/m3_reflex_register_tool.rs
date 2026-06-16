@@ -11,7 +11,15 @@ async fn reflex_register_schema_defaults_and_edges() -> anyhow::Result<()> {
     let db_path = db_path.to_string_lossy().into_owned();
     let mut client = StdioMcpClient::launch_and_init_with_env(
         Some(logs.path()),
-        &[("SYNAPSE_DB", db_path.as_str())],
+        // Deterministic synthetic notepad foreground: reflex_register runs the
+        // supported-use scope gate, which reads the real GetForegroundWindow() and
+        // fails A11Y_NO_FOREGROUND when the host has no focused window. The fixture
+        // (matching the activated notepad profile) makes the foreground a
+        // controlled input instead of an ambient-host-state dependency.
+        &[
+            ("SYNAPSE_DB", db_path.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+        ],
     )
     .await?;
     activate_notepad_profile(&mut client).await?;

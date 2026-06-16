@@ -189,6 +189,17 @@ async fn intent_detect_tick_drives_transitions_and_fires_on_event_reflex() -> an
         &[
             ("SYNAPSE_DEBUG_TOOLS", "1"),
             ("SYNAPSE_DB", db_path_string.as_str()),
+            // Inject a deterministic synthetic notepad foreground (matches the
+            // notepad profile activated below). reflex_register runs the
+            // supported-use scope gate, which reads the current foreground via
+            // current_audit_foreground(); without a synthetic fixture it calls the
+            // real GetForegroundWindow() and fails with A11Y_NO_FOREGROUND whenever
+            // the host has no focused window (locked screen, focus elsewhere,
+            // unattended run) — an ambient-state dependency that has nothing to do
+            // with what this test verifies. The fixture makes the foreground a
+            // controlled input. See also the product follow-up issue on
+            // registration-time foreground coupling.
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
         ],
     )
     .await?;
