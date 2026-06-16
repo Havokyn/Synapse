@@ -146,6 +146,8 @@ struct Runner {
     parse_error_count: u32,
     tool_call_error_count: u32,
     truncated_context_count: u32,
+    completed_after_tool: bool,
+    successful_workspace_puts: Vec<JsonObject>,
     http: reqwest::Client,
 }
 
@@ -370,6 +372,8 @@ impl Runner {
             parse_error_count: 0,
             tool_call_error_count: 0,
             truncated_context_count: 0,
+            completed_after_tool: false,
+            successful_workspace_puts: Vec::new(),
             http,
         };
         runner.write_line(json!({
@@ -498,6 +502,9 @@ impl Runner {
             used_any_tool = true;
             for call in completion.tool_calls {
                 self.execute_tool_call(call).await?;
+                if self.completed_after_tool {
+                    return Ok(());
+                }
                 self.drain_steering_inbox().await?;
             }
         }
@@ -594,6 +601,12 @@ impl Runner {
                 }
             }
         };
+
+        if self.is_duplicate_successful_workspace_put(&tool_name, &args) {
+            self.record_duplicate_workspace_put_completion(&call, &tool_name, routed, &args)
+                .await?;
+            return Ok(());
+        }
 
         // #1028: gate hazardous tool calls through the shared approval queue
         // before dispatch. Safe (read-only/low-consequence) calls pass through
@@ -692,6 +705,7 @@ impl Runner {
                 .await
                 .context("workspace_put post-write readback")?;
             result_value = attach_workspace_put_readback(result_value, readback);
+            self.successful_workspace_puts.push(args.clone());
         }
         let result_text = bounded_result_text(&result_value);
         self.messages.push(json!({
@@ -726,6 +740,89 @@ impl Runner {
             "tool_exposure": self.tool_exposure.as_str(),
         }))
         .await?;
+        Ok(())
+    }
+
+    fn is_duplicate_successful_workspace_put(&self, tool_name: &str, args: &JsonObject) -> bool {
+        tool_name == "workspace_put"
+            && self
+                .successful_workspace_puts
+                .iter()
+                .any(|successful| workspace_put_args_match(successful, args))
+    }
+
+    async fn record_duplicate_workspace_put_completion(
+        &mut self,
+        call: &OpenAiToolCall,
+        tool_name: &str,
+        routed: bool,
+        args: &JsonObject,
+    ) -> anyhow::Result<()> {
+        let result_value = json!({
+            "ok": true,
+            "duplicate_suppressed": true,
+            "reason": "workspace_put already succeeded and read back in this run",
+            "arguments": args,
+        });
+        let result_text = bounded_result_text(&result_value);
+        self.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": result_text,
+        }));
+        self.write_line(json!({
+            "type": "local.tool_call.finished",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "routed_tool_name": if routed { Some(tool_name) } else { None },
+            "tool_call_id": call.id,
+            "status": "ok",
+            "result": result_value,
+            "tool_exposure": self.tool_exposure.as_str(),
+        }))?;
+        self.post_event(json!({
+            "event": "tool_call_finished",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "routed_tool_name": if routed { Some(tool_name) } else { None },
+            "tool_call_id": call.id,
+            "tool_response": result_value,
+            "error_code": "",
+            "tool_exposure": self.tool_exposure.as_str(),
+        }))
+        .await?;
+        let final_message =
+            "workspace_put already succeeded and was read back; duplicate suppressed.";
+        std::fs::write(self.log_dir.join("final-message.txt"), final_message).with_context(
+            || format!("write {}", self.log_dir.join("final-message.txt").display()),
+        )?;
+        self.write_line(json!({
+            "type": "local.agent.completed",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "reason_code": "duplicate_workspace_put_suppressed",
+            "final_message": final_message,
+        }))?;
+        self.post_event(json!({
+            "event": "exited",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "end_state": "success",
+            "reason_code": "local_agent_completed",
+            "used_any_tool": true,
+            "answered_without_tool_calls": false,
+            "completion_reason": "duplicate_workspace_put_suppressed",
+        }))
+        .await?;
+        self.completed_after_tool = true;
         Ok(())
     }
 
@@ -1355,6 +1452,10 @@ fn workspace_put_readback_plan(put_args: &JsonObject) -> anyhow::Result<Workspac
         arguments,
         expected_value,
     })
+}
+
+fn workspace_put_args_match(left: &JsonObject, right: &JsonObject) -> bool {
+    left == right
 }
 
 fn workspace_put_readback_record(
@@ -2002,8 +2103,8 @@ fn local_agent_spawn_root_dir() -> anyhow::Result<PathBuf> {
 /// full tool schemas from the MCP attachment (Direct exposure). The manifest
 /// approach is therefore retired; this prompt only governs behavior.
 fn system_prompt(tool_exposure: ToolExposure, tools: &[Tool]) -> String {
-    const BASE: &str = "Synapse agent. Use the attached MCP tools to inspect and change state.\nRules:\n- Never invent tool results.\n- After a tool stores an artifact, read it back to confirm before reporting success.\n- Summarize only after the required tool calls succeed.";
-    const INTERNALIZED_BASE: &str = "Synapse agent. Return no prose when a tool call is needed.\nRules:\n- Emit exactly one tool call.\n- Use exact argument keys.\n- Never invent tool results.\n- After a tool stores an artifact, read it back before reporting success.";
+    const BASE: &str = "Synapse agent. Use attached MCP tools to inspect/change state.\nRules:\n- Never invent tool results.\n- Stored artifact -> read back before success.\n- post_write_readback.matched=true => success; do not repeat write.\n- Summarize after required tools succeed.";
+    const INTERNALIZED_BASE: &str = "Synapse agent. Return one tool call and no prose when a tool is needed.\nRules:\n- Use exact argument keys.\n- Never invent tool results.\n- Stored artifact -> read back before success.\n- post_write_readback.matched=true => success; do not repeat write.";
     match tool_exposure {
         // Direct: the model holds every tool schema natively, so it just needs
         // to know they are there and callable by name.
@@ -2323,6 +2424,28 @@ mod tests {
     }
 
     #[test]
+    fn workspace_put_args_match_only_exact_duplicates() -> anyhow::Result<()> {
+        let first: JsonObject = serde_json::from_value(json!({
+            "run_id": "issue1054",
+            "key": "known-key",
+            "value": {"expected": "done", "actual": "done"},
+        }))?;
+        let same: JsonObject = serde_json::from_value(json!({
+            "key": "known-key",
+            "value": {"actual": "done", "expected": "done"},
+            "run_id": "issue1054",
+        }))?;
+        let different: JsonObject = serde_json::from_value(json!({
+            "run_id": "issue1054",
+            "key": "known-key",
+            "value": {"expected": "done", "actual": "changed"},
+        }))?;
+        assert!(workspace_put_args_match(&first, &same));
+        assert!(!workspace_put_args_match(&first, &different));
+        Ok(())
+    }
+
+    #[test]
     fn tool_exposure_routes_when_provider_tool_cap_is_lower_than_synapse_surface() {
         let mut row = test_local_agent_row();
         row.max_tools = Some(128);
@@ -2344,9 +2467,9 @@ mod tests {
         assert!(!prompt.contains(SYNAPSE_TOOL_CATALOG));
         assert!(!prompt.contains("attached MCP tools"));
         assert!(!prompt.contains("attached directly"));
-        assert!(prompt.contains("Return no prose when a tool call is needed"));
-        assert!(prompt.contains("Emit exactly one tool call"));
+        assert!(prompt.contains("one tool call and no prose"));
         assert!(prompt.contains("exact argument keys"));
+        assert!(prompt.contains("post_write_readback.matched=true"));
         // Internalized serving endpoints are validated through non-streaming
         // probes and may return JSON even when asked to stream; keep the runner
         // on the same non-streaming path so tool_calls are parsed.
@@ -2415,14 +2538,18 @@ mod tests {
         // Load-bearing behavioral constraints survive verbatim in both modes.
         for prompt in [&direct, &routed] {
             assert!(prompt.contains("Synapse agent"), "identity");
-            assert!(prompt.contains("inspect and change state"), "capability");
+            assert!(prompt.contains("inspect/change state"), "capability");
             assert!(
                 prompt.contains("Never invent tool results"),
                 "no-fabrication"
             );
-            assert!(prompt.contains("read it back"), "read-back verification");
+            assert!(prompt.contains("read back"), "read-back verification");
             assert!(
-                prompt.contains("Summarize only after the required tool calls succeed"),
+                prompt.contains("post_write_readback.matched=true"),
+                "driver-readback terminal success"
+            );
+            assert!(
+                prompt.contains("Summarize after required tools succeed"),
                 "summary-gating"
             );
         }
