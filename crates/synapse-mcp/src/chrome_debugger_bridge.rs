@@ -1754,9 +1754,9 @@ pub(crate) fn health_subsystem() -> SubsystemHealth {
         Err(_poisoned) => {
             return SubsystemHealth {
                 status: "error".to_owned(),
-                detail: Some(
-                    "chrome_bridge_state_lock_poisoned tab_control_available=false".to_owned(),
-                ),
+                detail: Some(format!(
+                    "chrome_bridge_state_lock_poisoned tab_control_available=false expected_extension_id={EXTENSION_ID}"
+                )),
                 ..SubsystemHealth::default()
             };
         }
@@ -1782,12 +1782,13 @@ fn chrome_bridge_health_from_snapshot(
         return SubsystemHealth {
             status: "unsafe_profile".to_owned(),
             detail: Some(format!(
-                "tab_control_available=false reason=external_chrome_popup_risk risk_count={} external_chrome_popup_risk={} host_count={} queued_count={} pending_count={} install_guidance={}",
+                "tab_control_available=false reason=external_chrome_popup_risk risk_count={} external_chrome_popup_risk={} host_count={} queued_count={} pending_count={} expected_extension_id={} install_guidance={}",
                 popup_risks.len(),
                 risk_summary,
                 host_count,
                 queued_count,
                 pending_count,
+                EXTENSION_ID,
                 INSTALL_GUIDANCE
             )),
             ..SubsystemHealth::default()
