@@ -225,6 +225,7 @@ pub(crate) mod session_registry;
 mod session_tools;
 mod target_claims;
 mod target_policy;
+pub(crate) mod terminal_capture;
 #[cfg(test)]
 mod tests;
 mod timeline_digest;
