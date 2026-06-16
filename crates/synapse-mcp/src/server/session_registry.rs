@@ -276,6 +276,17 @@ impl SessionRegistry {
         entry.spawned_agent = Some(spawned_agent);
     }
 
+    /// Returns the inferred agent kind for a live session (`"local-model"`,
+    /// `"codex"`, `"claude"`, or `"unknown"`), or `None` if the session has no
+    /// registry entry yet. Used by the MCP tool-profile resolver to grant the
+    /// Synapse-spawned local-model harness the full-capability tool surface
+    /// while leaving other agents on the least-privilege default (#1031).
+    pub(crate) fn agent_kind_for(&self, session_id: &str) -> Option<String> {
+        self.entries
+            .get(session_id)
+            .map(|entry| entry.agent_kind.clone())
+    }
+
     pub(crate) fn reads(&self, now_unix_ms: u64) -> Vec<SessionRegistryRead> {
         self.entries
             .values()

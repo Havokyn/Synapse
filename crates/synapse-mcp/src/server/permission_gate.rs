@@ -225,7 +225,21 @@ impl SynapseService {
                 })?;
             match item.status {
                 ApprovalStatus::Accepted => {
-                    break Ok(allow_result(input));
+                    // Approve-with-edits (#1030): when the operator replaced the
+                    // proposed args, the agent must run the EDITED input — Claude
+                    // honors it via the permission verdict's `updatedInput`. The
+                    // approvals layer already validated this is a JSON object, so
+                    // a parse failure here is a real integrity error, not user
+                    // input — fail loud rather than silently run the wrong args.
+                    let effective = match item.edited_args_json.as_deref() {
+                        Some(edited) => serde_json::from_str::<Value>(edited).map_err(|error| {
+                            mcp_internal(format!(
+                                "approval_gate edited_args for {approval_id} is not valid JSON despite validation: {error}"
+                            ))
+                        })?,
+                        None => input.clone(),
+                    };
+                    break Ok(allow_result(&effective));
                 }
                 ApprovalStatus::Declined | ApprovalStatus::Ignored => {
                     let message = item
@@ -250,6 +264,8 @@ impl SynapseService {
                     decision: ApprovalDecision::Decline,
                     note: Some(message.clone()),
                     snooze_ms: None,
+                    edited_args: None,
+                    response: None,
                 };
                 if let Err(error) = approvals::decide_approval(db, &decline, "approval_gate_timeout")
                 {
@@ -314,6 +330,10 @@ fn build_request(
         destructive: decision.destructive(),
         notify: true,
         suppress_popup: false,
+        // Default affordances for a tool-permission pause: accept / approve-with-
+        // edits / deny-with-note (#1030). `None` resolves to
+        // `ApprovalAllow::for_kind(AgentPermission)` in `request_approval`.
+        allow: None,
     })
 }
 
@@ -520,7 +540,14 @@ mod tests {
             assert_eq!(item.kind, ApprovalKind::AgentPermission);
             assert!(item.destructive, "git push must be flagged destructive");
             service
-                .approval_decide_from_dashboard(&id, ApprovalDecision::Accept, None, "tester")
+                .approval_decide_from_dashboard(
+                    &id,
+                    ApprovalDecision::Accept,
+                    None,
+                    None,
+                    None,
+                    "tester",
+                )
                 .expect("decide");
             id
         };
@@ -551,6 +578,8 @@ mod tests {
                     &id,
                     ApprovalDecision::Decline,
                     Some("not safe right now"),
+                    None,
+                    None,
                     "tester",
                 )
                 .expect("decide");

@@ -54,7 +54,8 @@ use super::notify_tools::{
 use super::session_registry::unix_time_ms_now;
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
 use crate::m3::approvals::{
-    ApprovalAuditRecord, ApprovalItemRecord, ApprovalKind, ApprovalStatus, ApprovalTimeoutDecision,
+    ApprovalAllow, ApprovalAuditRecord, ApprovalItemRecord, ApprovalKind, ApprovalStatus,
+    ApprovalTimeoutDecision,
     ApprovalToastState,
 };
 
@@ -703,6 +704,9 @@ fn approval_rows_for_opened_escalation(
         decided_by_session: None,
         decided_at_unix_ms: None,
         decision_note: None,
+        allow: ApprovalAllow::for_kind(ApprovalKind::AgentEscalation),
+        edited_args_json: None,
+        operator_response: None,
         toast: ApprovalToastState {
             requested: false,
             suppress_popup: item.tier0_quiet_digest,

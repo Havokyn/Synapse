@@ -60,6 +60,23 @@ pub enum ApprovalKind {
     /// `approval_gate` permission-prompt tool; the deciding human's verdict is
     /// returned to the still-blocked agent as the gate's `{behavior}` result.
     AgentPermission,
+    /// A spawned agent paused to ask the operator a clarifying question / needs
+    /// input before it can continue (#1028). The operator's `respond` text is
+    /// delivered back to the agent as the next turn; no tool is executed.
+    AgentQuestion,
+}
+
+impl ApprovalKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Suggestion => "suggestion",
+            Self::AgentEscalation => "agent_escalation",
+            Self::ArmedRunReview => "armed_run_review",
+            Self::AgentPermission => "agent_permission",
+            Self::AgentQuestion => "agent_question",
+        }
+    }
 }
 
 #[derive(
@@ -119,6 +136,69 @@ impl ApprovalDecision {
     }
 }
 
+/// Per-item affordance flags driving which decision controls the operator
+/// surface offers, mirroring the Agent-Inbox `HumanInterruptConfig`
+/// (allow_accept / allow_edit / allow_respond / allow_ignore). Stored on the
+/// item at request time and never widened by a decision. (#1030)
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalAllow {
+    /// Approve and run the proposed action unchanged.
+    pub accept: bool,
+    /// Approve after replacing the proposed tool input with operator-edited
+    /// args (full replacement, not a merge — per AG-UI / Agent-Inbox).
+    pub edit: bool,
+    /// Answer the agent's question; the operator's text becomes the tool/turn
+    /// result and the underlying tool is NOT executed.
+    pub respond: bool,
+    /// Skip the action and let the agent try something else.
+    pub ignore: bool,
+}
+
+impl Default for ApprovalAllow {
+    fn default() -> Self {
+        // Conservative default: a plain one-tap accept/deny item, matching the
+        // pre-#1030 binary behaviour for rows that predate the `allow` field.
+        Self {
+            accept: true,
+            edit: false,
+            respond: false,
+            ignore: true,
+        }
+    }
+}
+
+impl ApprovalAllow {
+    /// Default affordances for a freshly-requested item of the given kind when
+    /// the requester does not specify them. Agent-facing items (tool-permission
+    /// pauses, armed runs) allow editing the proposed args; questions allow a
+    /// textual response. The taxonomy stays in one place so the dashboard,
+    /// harness, and Codex bridge agree.
+    #[must_use]
+    pub const fn for_kind(kind: ApprovalKind) -> Self {
+        match kind {
+            ApprovalKind::AgentPermission | ApprovalKind::ArmedRunReview => Self {
+                accept: true,
+                edit: true,
+                respond: false,
+                ignore: true,
+            },
+            ApprovalKind::AgentQuestion => Self {
+                accept: false,
+                edit: false,
+                respond: true,
+                ignore: true,
+            },
+            ApprovalKind::Suggestion | ApprovalKind::AgentEscalation => Self {
+                accept: true,
+                edit: false,
+                respond: false,
+                ignore: true,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalTimeoutDecision {
@@ -171,6 +251,12 @@ pub struct ApprovalRequestParams {
     pub notify: bool,
     #[serde(default)]
     pub suppress_popup: bool,
+    /// Affordances the operator surface should offer for this item (#1030).
+    /// Defaults to [`ApprovalAllow::for_kind`] when omitted, so existing callers
+    /// (escalation engine, suggestions) keep their accept/deny behaviour and
+    /// agent-permission / agent-question requesters opt into edit / respond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<ApprovalAllow>,
 }
 
 const fn default_notify() -> bool {
@@ -216,6 +302,18 @@ pub struct ApprovalDecideParams {
     /// Required for `decision=snooze`; defaults to 15 minutes when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snooze_ms: Option<u64>,
+    /// Approve-with-edits (#1030): a full-replacement JSON object (string-encoded
+    /// to keep the input schema closed) for the agent's tool input. Honored only
+    /// with `decision=accept` on an item whose `allow.edit` is set. Replaces, not
+    /// merges, the proposed args.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_args: Option<String>,
+    /// Respond (#1030): the operator's textual answer to a needs-input /
+    /// `agent_question` item. Honored only with `decision=accept` on an item
+    /// whose `allow.respond` is set. Delivered to the agent as the tool/turn
+    /// result; the underlying tool is NOT executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -325,6 +423,19 @@ pub struct ApprovalItemRecord {
     pub decided_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_note: Option<String>,
+    /// Affordances the operator surface may offer for this item (#1030). Rows
+    /// written before #1030 deserialize to [`ApprovalAllow::default`].
+    #[serde(default)]
+    pub allow: ApprovalAllow,
+    /// Operator-edited, full-replacement tool input recorded when the item was
+    /// approved-with-edits (#1030). The blocked agent runs THIS, not its
+    /// proposed args. JSON object, string-encoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_args_json: Option<String>,
+    /// Operator's textual answer recorded when a needs-input item was resolved
+    /// via `respond` (#1030). Delivered to the agent instead of running a tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_response: Option<String>,
     pub toast: ApprovalToastState,
 }
 
@@ -483,6 +594,9 @@ pub fn request_approval(
         decided_by_session: None,
         decided_at_unix_ms: None,
         decision_note: None,
+        allow: params.allow.unwrap_or_else(|| ApprovalAllow::for_kind(params.kind)),
+        edited_args_json: None,
+        operator_response: None,
         toast: ApprovalToastState {
             requested: params.notify,
             suppress_popup: params.suppress_popup,
@@ -682,6 +796,10 @@ pub fn decide_approval_from_activation(
                 params.activation_id
             )),
             snooze_ms: params.snooze_ms,
+            // Toast activations are one-tap accept/decline/snooze — no inline
+            // edit/respond surface (#1030).
+            edited_args: None,
+            response: None,
         },
         by_session,
     )?;
@@ -788,7 +906,49 @@ pub fn decide_approval(
             before_status.as_str()
         )));
     }
+    // Item-aware affordance gating (#1030): a decision may only use an
+    // affordance the item actually advertises. Advertise-then-deny would let an
+    // operator edit args on an item the agent never agreed to have edited.
+    if params.edited_args.is_some() && !item.allow.edit {
+        return Err(invalid(format!(
+            "approval_decide approval {} does not allow approve-with-edits (allow.edit=false)",
+            item.approval_id
+        )));
+    }
+    if params.response.is_some() && !item.allow.respond {
+        return Err(invalid(format!(
+            "approval_decide approval {} does not allow a respond answer (allow.respond=false)",
+            item.approval_id
+        )));
+    }
+    // Respond items resolve via the operator's answer, so accepting one without
+    // a response is a no-op that would strand the agent — require it.
+    if params.decision == ApprovalDecision::Accept
+        && item.kind == ApprovalKind::AgentQuestion
+        && params.response.is_none()
+    {
+        return Err(invalid(format!(
+            "approval_decide accepting agent_question {} requires a `response` answer",
+            item.approval_id
+        )));
+    }
     let note = normalized_optional(params.note.as_deref());
+    // Reject-requires-note for agent-facing items (#1030): the note is the
+    // feedback fed back into the blocked agent's context. A bare denial leaves
+    // the agent guessing.
+    if params.decision == ApprovalDecision::Decline
+        && matches!(
+            item.kind,
+            ApprovalKind::AgentPermission | ApprovalKind::AgentQuestion
+        )
+        && note.is_none()
+    {
+        return Err(invalid(format!(
+            "approval_decide declining {} {} requires a `note` explaining why (it is fed back to the agent)",
+            item.kind.as_str(),
+            item.approval_id
+        )));
+    }
     let after_status = match params.decision {
         ApprovalDecision::Accept => ApprovalStatus::Accepted,
         ApprovalDecision::Decline => ApprovalStatus::Declined,
@@ -799,6 +959,10 @@ pub fn decide_approval(
     item.decided_by_session = Some(by_session.to_owned());
     item.decided_at_unix_ms = Some(now);
     item.decision_note = note.clone();
+    // Persist the approve-with-edits / respond payloads so the blocked agent
+    // (and the audit trail) can read exactly what the operator authorized.
+    item.edited_args_json = params.edited_args.clone();
+    item.operator_response = normalized_optional(params.response.as_deref());
     item.expires_at_unix_ms = match params.decision {
         ApprovalDecision::Snooze => {
             Some(now.saturating_add(params.snooze_ms.unwrap_or(DEFAULT_SNOOZE_MS)))
@@ -922,6 +1086,48 @@ fn validate_decide(params: &ApprovalDecideParams) -> Result<(), ErrorData> {
         return Err(invalid(
             "approval_decide snooze_ms is valid only when decision=\"snooze\"",
         ));
+    }
+    // Approve-with-edits / respond are accept-only modifiers (#1030). They make
+    // no sense on decline/snooze and must fail loudly rather than be silently
+    // dropped.
+    if params.decision != ApprovalDecision::Accept {
+        if params.edited_args.is_some() {
+            return Err(invalid(
+                "approval_decide edited_args is valid only when decision=\"accept\"",
+            ));
+        }
+        if params.response.is_some() {
+            return Err(invalid(
+                "approval_decide response is valid only when decision=\"accept\"",
+            ));
+        }
+    }
+    if let Some(edited_args) = params.edited_args.as_deref() {
+        if edited_args.len() > MAX_PAYLOAD_JSON_BYTES {
+            return Err(invalid(format!(
+                "approval_decide edited_args is {} bytes; max {MAX_PAYLOAD_JSON_BYTES}",
+                edited_args.len()
+            )));
+        }
+        // Full-replacement tool input must be a JSON OBJECT (a tool's argument
+        // map). Reject scalars/arrays/garbage here so a malformed edit never
+        // reaches the agent as a dispatched call.
+        match serde_json::from_str::<serde_json::Value>(edited_args) {
+            Ok(serde_json::Value::Object(_)) => {}
+            Ok(_) => {
+                return Err(invalid(
+                    "approval_decide edited_args must be a JSON object (the tool's argument map)",
+                ));
+            }
+            Err(error) => {
+                return Err(invalid(format!(
+                    "approval_decide edited_args must be valid JSON object text: {error}"
+                )));
+            }
+        }
+    }
+    if let Some(response) = params.response.as_deref() {
+        validate_nonblank(response, "approval_decide response", MAX_BODY_CHARS)?;
     }
     Ok(())
 }
@@ -1544,6 +1750,7 @@ mod tests {
             destructive: false,
             notify: false,
             suppress_popup: false,
+            allow: None,
         }
     }
 
@@ -1585,6 +1792,8 @@ mod tests {
                 decision: ApprovalDecision::Accept,
                 note: Some("accepted by test".to_owned()),
                 snooze_ms: None,
+                edited_args: None,
+                response: None,
             },
             "test-session",
         )
@@ -1648,6 +1857,8 @@ mod tests {
                 decision: ApprovalDecision::Snooze,
                 note: None,
                 snooze_ms: Some(1_000),
+                edited_args: None,
+                response: None,
             },
             "test-session",
         )

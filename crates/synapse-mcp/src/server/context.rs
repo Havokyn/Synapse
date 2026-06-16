@@ -547,6 +547,8 @@ impl SynapseService {
         approval_id: &str,
         decision: crate::m3::approvals::ApprovalDecision,
         note: Option<&str>,
+        edited_args: Option<&str>,
+        response: Option<&str>,
         by_session: &str,
     ) -> Result<crate::m3::approvals::ApprovalDecideResponse, ErrorData> {
         let db = self.m3_storage()?;
@@ -554,6 +556,10 @@ impl SynapseService {
             "approval_id": approval_id,
             "decision": decision.as_str(),
             "note": note,
+            // #1030: record approve-with-edits / respond in the command audit so
+            // the operator's exact edit/answer is part of the durable trail.
+            "edited_args": edited_args,
+            "response": response,
         });
         let command_before = json!({
             "source_of_truth": "CF_KV approval queue rows plus approval audit rows",
@@ -577,6 +583,8 @@ impl SynapseService {
             decision,
             note: note.map(str::to_owned),
             snooze_ms: None,
+            edited_args: edited_args.map(str::to_owned),
+            response: response.map(str::to_owned),
         };
         let result = match crate::m3::approvals::decide_approval(&db, &params, by_session) {
             Ok(response) => {

@@ -18,6 +18,7 @@ import {
   Moon,
   Network,
   Pause,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -881,6 +882,13 @@ function TasksView({ agents, attentionCount }: { agents: AgentSummary[]; attenti
   );
 }
 
+interface ApprovalAllow {
+  accept: boolean;
+  edit: boolean;
+  respond: boolean;
+  ignore: boolean;
+}
+
 interface ApprovalRow {
   approvalId: string;
   kind: string;
@@ -895,6 +903,10 @@ interface ApprovalRow {
   spawnId?: string;
   command?: string;
   inputPretty?: string;
+  // #1030: per-item affordances + the proposed input the operator may edit.
+  allow: ApprovalAllow;
+  // The proposed tool input (object) the operator edits in approve-with-edits.
+  proposedArgs?: Record<string, unknown>;
   raw: Record<string, unknown>;
 }
 
@@ -924,6 +936,23 @@ function parseApprovalRows(panel?: DashboardState["approvals"]): ApprovalRow[] {
         input === undefined || input === null
           ? undefined
           : JSON.stringify(input, null, 2);
+      // #1030: affordances drive which decision controls the card shows. Rows
+      // from a pre-#1030 daemon omit `allow`; fall back to a one-tap accept/deny
+      // item so the card never silently loses its buttons.
+      const allowRaw = asRecord(item.allow);
+      const allow: ApprovalAllow =
+        item.allow == null
+          ? { accept: true, edit: false, respond: false, ignore: true }
+          : {
+              accept: allowRaw.accept === true,
+              edit: allowRaw.edit === true,
+              respond: allowRaw.respond === true,
+              ignore: allowRaw.ignore === true
+            };
+      const proposedArgs =
+        input !== undefined && input !== null && typeof input === "object"
+          ? (input as Record<string, unknown>)
+          : undefined;
       return {
         approvalId,
         kind: rawText(item.kind) || "unknown",
@@ -939,6 +968,8 @@ function parseApprovalRows(panel?: DashboardState["approvals"]): ApprovalRow[] {
         spawnId: rawText(payload.spawn_id) || undefined,
         command,
         inputPretty,
+        allow,
+        proposedArgs,
         raw: item
       };
     })
@@ -948,18 +979,23 @@ function parseApprovalRows(panel?: DashboardState["approvals"]): ApprovalRow[] {
 const APPROVAL_KIND_LABEL: Record<string, string> = {
   agent_permission: "Agent permission",
   agent_escalation: "Agent escalation",
+  agent_question: "Agent question",
   suggestion: "Suggestion",
   armed_run_review: "Armed run"
 };
 
+// Kinds that represent an agent stopped waiting on a human (#1027/#1028): they
+// belong in the fleet "Agents awaiting your decision" attention section.
+const AGENT_ATTENTION_KINDS = ["agent_permission", "agent_escalation", "agent_question"];
+
 function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided?: () => void }) {
   const rows = useMemo(() => parseApprovalRows(state?.approvals), [state]);
   const agentRows = useMemo(
-    () => rows.filter((row) => row.kind === "agent_permission" || row.kind === "agent_escalation"),
+    () => rows.filter((row) => AGENT_ATTENTION_KINDS.includes(row.kind)),
     [rows]
   );
   const otherRows = useMemo(
-    () => rows.filter((row) => row.kind !== "agent_permission" && row.kind !== "agent_escalation"),
+    () => rows.filter((row) => !AGENT_ATTENTION_KINDS.includes(row.kind)),
     [rows]
   );
 
@@ -968,7 +1004,11 @@ function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  async function decide(approvalId: string, decision: "approve" | "deny") {
+  async function decide(
+    approvalId: string,
+    decision: "approve" | "deny",
+    opts?: { editedArgs?: string; response?: string }
+  ) {
     setBusy((prev) => ({ ...prev, [approvalId]: true }));
     setErrors((prev) => {
       const next = { ...prev };
@@ -977,7 +1017,13 @@ function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided
     });
     try {
       const note = notes[approvalId]?.trim();
-      await decideApproval({ approval_id: approvalId, decision, note: note || undefined });
+      await decideApproval({
+        approval_id: approvalId,
+        decision,
+        note: note || undefined,
+        edited_args: opts?.editedArgs,
+        response: opts?.response
+      });
       setSelected((prev) => {
         const next = new Set(prev);
         next.delete(approvalId);
@@ -1058,7 +1104,7 @@ function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided
                 selected={selected.has(row.approvalId)}
                 onToggleSelected={() => toggleSelected(row.approvalId)}
                 onNote={(value) => setNotes((prev) => ({ ...prev, [row.approvalId]: value }))}
-                onApprove={() => void decide(row.approvalId, "approve")}
+                onApprove={(opts) => void decide(row.approvalId, "approve", opts)}
                 onDeny={() => void decide(row.approvalId, "deny")}
               />
             ))}
@@ -1085,7 +1131,7 @@ function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided
                 selected={selected.has(row.approvalId)}
                 onToggleSelected={() => toggleSelected(row.approvalId)}
                 onNote={(value) => setNotes((prev) => ({ ...prev, [row.approvalId]: value }))}
-                onApprove={() => void decide(row.approvalId, "approve")}
+                onApprove={(opts) => void decide(row.approvalId, "approve", opts)}
                 onDeny={() => void decide(row.approvalId, "deny")}
               />
             ))}
@@ -1114,7 +1160,7 @@ function ApprovalCard({
   selected: boolean;
   onToggleSelected: () => void;
   onNote: (value: string) => void;
-  onApprove: () => void;
+  onApprove: (opts: { editedArgs?: string; response?: string }) => void;
   onDeny: () => void;
 }) {
   const kindLabel = APPROVAL_KIND_LABEL[row.kind] ?? row.kind;
@@ -1125,6 +1171,44 @@ function ApprovalCard({
       : expiresInMs <= 0
         ? "expired"
         : `expires in ${Math.max(1, Math.round(expiresInMs / 60000))}m`;
+
+  // #1030 affordances. `respond` items are questions answered by the operator;
+  // `edit` items let the operator replace the proposed tool args before it runs.
+  const isQuestion = row.allow.respond;
+  // Reject must carry a reason for agent-facing items — it is fed back to the
+  // agent's context so it knows why and can adapt. Mirrors the backend rule.
+  const requireNoteToDeny = row.kind === "agent_permission" || row.kind === "agent_question";
+
+  const proposedArgsText = row.proposedArgs ? JSON.stringify(row.proposedArgs, null, 2) : "";
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(proposedArgsText);
+  const [editError, setEditError] = useState("");
+  const [responseText, setResponseText] = useState("");
+
+  const denyDisabled = busy || (requireNoteToDeny && !note.trim());
+
+  function submitApprove() {
+    if (isQuestion) {
+      onApprove({ response: responseText.trim() });
+      return;
+    }
+    if (editing) {
+      try {
+        const parsed = JSON.parse(editText);
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          setEditError("Edited args must be a JSON object (the tool's argument map).");
+          return;
+        }
+      } catch (err) {
+        setEditError(err instanceof Error ? err.message : "Edited args are not valid JSON.");
+        return;
+      }
+      setEditError("");
+      onApprove({ editedArgs: editText });
+      return;
+    }
+    onApprove({});
+  }
 
   return (
     <div className="rounded-lg border border-border bg-surface p-[var(--density-card-padding)]">
@@ -1160,7 +1244,18 @@ function ApprovalCard({
             <div className="mt-0.5 font-mono text-[11px] text-tertiary">agent: {row.spawnId}</div>
           ) : null}
 
-          {row.command ? (
+          {/* Question body (the agent asked the operator something). */}
+          {isQuestion ? (
+            <div className="mt-2 text-xs text-secondary whitespace-pre-wrap">{row.body}</div>
+          ) : editing ? (
+            <textarea
+              aria-label="Edit tool args"
+              value={editText}
+              onChange={(event) => setEditText(event.target.value)}
+              rows={Math.min(12, Math.max(3, editText.split("\n").length))}
+              className="mt-2 w-full rounded bg-canvas p-2 font-mono text-[11px] text-primary"
+            />
+          ) : row.command ? (
             <pre className="mt-2 overflow-x-auto rounded bg-canvas p-2 font-mono text-xs text-primary">
               {row.command}
             </pre>
@@ -1171,19 +1266,63 @@ function ApprovalCard({
           ) : (
             <div className="mt-2 text-xs text-secondary">{row.body}</div>
           )}
+          {editError ? (
+            <div className="mt-1 text-[11px] text-[var(--danger,#ff6b6b)]">{editError}</div>
+          ) : null}
+
+          {/* Respond affordance: the operator's answer IS the tool result. */}
+          {isQuestion ? (
+            <textarea
+              aria-label="Answer the agent"
+              value={responseText}
+              onChange={(event) => setResponseText(event.target.value)}
+              placeholder="Type your answer to the agent…"
+              rows={3}
+              className="mt-2 w-full rounded border border-border bg-canvas p-2 text-xs text-primary placeholder:text-tertiary"
+            />
+          ) : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <input
               type="text"
               value={note}
               onChange={(event) => onNote(event.target.value)}
-              placeholder="Optional note / reason…"
+              placeholder={requireNoteToDeny ? "Reason (required to deny)…" : "Optional note / reason…"}
               className="h-8 min-w-[12rem] flex-1 rounded border border-border bg-canvas px-2 text-xs text-primary placeholder:text-tertiary"
             />
-            <Button size="sm" variant="secondary" disabled={busy} onClick={onApprove}>
-              <CheckCircle2 className="size-4" /> {busy ? "…" : "Approve"}
-            </Button>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={onDeny}>
+            {/* Edit-args toggle for items that allow it. */}
+            {row.allow.edit ? (
+              <Button
+                size="sm"
+                variant={editing ? "secondary" : "ghost"}
+                disabled={busy}
+                onClick={() => {
+                  setEditError("");
+                  setEditing((value) => !value);
+                  setEditText(proposedArgsText);
+                }}
+              >
+                <Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit args"}
+              </Button>
+            ) : null}
+            {/* Primary accept / respond action. */}
+            {isQuestion ? (
+              <Button size="sm" variant="secondary" disabled={busy || !responseText.trim()} onClick={submitApprove}>
+                <CheckCircle2 className="size-4" /> {busy ? "…" : "Send answer"}
+              </Button>
+            ) : row.allow.accept ? (
+              <Button size="sm" variant="secondary" disabled={busy} onClick={submitApprove}>
+                <CheckCircle2 className="size-4" />{" "}
+                {busy ? "…" : editing ? "Approve with edits" : "Approve"}
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={denyDisabled}
+              title={requireNoteToDeny && !note.trim() ? "A reason is required to deny" : undefined}
+              onClick={onDeny}
+            >
               <X className="size-4" /> Deny
             </Button>
           </div>

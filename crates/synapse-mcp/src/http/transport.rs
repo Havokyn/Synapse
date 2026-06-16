@@ -1518,6 +1518,14 @@ struct DashboardApprovalDecideRequest {
     decision: String,
     #[serde(default)]
     note: Option<String>,
+    /// Approve-with-edits (#1030): full-replacement tool input, JSON object as a
+    /// string. Honored only with an approve decision on an `allow.edit` item.
+    #[serde(default)]
+    edited_args: Option<String>,
+    /// Respond (#1030): the operator's answer to a needs-input / agent_question
+    /// item. Honored only with an approve decision on an `allow.respond` item.
+    #[serde(default)]
+    response: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2544,10 +2552,23 @@ async fn dashboard_approval_decide(
         .as_deref()
         .map(str::trim)
         .filter(|note| !note.is_empty());
+    // edited_args is JSON object text — must NOT be trimmed of internal content;
+    // only drop an entirely-empty field. The approvals layer validates the JSON.
+    let edited_args = request
+        .edited_args
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let response = request
+        .response
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     match state.health_service.approval_decide_from_dashboard(
         approval_id,
         decision,
         note,
+        edited_args,
+        response,
         "dashboard_inbox",
     ) {
         Ok(decision) => with_dashboard_security_headers(

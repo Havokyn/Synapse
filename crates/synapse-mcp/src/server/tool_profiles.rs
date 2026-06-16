@@ -161,6 +161,15 @@ pub(crate) enum ToolProfileKind {
     NormalAgent,
     BrowserControl,
     BreakGlass,
+    /// Full Synapse tool surface for Synapse-spawned local-model agents
+    /// (gemma/DeepSeek/etc., #1031). Identical visibility to `BreakGlass` (every
+    /// real tool, including the foreground input primitives) but assigned
+    /// automatically to the trusted local-model harness instead of requiring an
+    /// explicit operator-held foreground lease. Local models operate the machine
+    /// and must never be missing a tool; foreground contention is handled at
+    /// action time by the per-action lease/target guards (#717/#999), not by
+    /// hiding the tools from discovery.
+    FullCapability,
 }
 
 impl ToolProfileKind {
@@ -169,6 +178,7 @@ impl ToolProfileKind {
             Self::NormalAgent => "normal_agent",
             Self::BrowserControl => "browser_control",
             Self::BreakGlass => "break_glass",
+            Self::FullCapability => "full_capability",
         }
     }
 
@@ -177,12 +187,13 @@ impl ToolProfileKind {
             Self::NormalAgent => "normal_agent",
             Self::BrowserControl => "dashboard/browser-control task",
             Self::BreakGlass => "break-glass/admin",
+            Self::FullCapability => "full-capability local-model agent",
         }
     }
 
     fn is_visible(self, tool_name: &str) -> bool {
         match self {
-            Self::BreakGlass => true,
+            Self::BreakGlass | Self::FullCapability => true,
             Self::NormalAgent => {
                 NORMAL_ALLOWED_EXACT.contains(&tool_name)
                     || NORMAL_ALLOWED_PREFIXES
@@ -589,16 +600,56 @@ impl SynapseService {
         &self,
         session_id: &str,
     ) -> Result<ToolProfileRowReadback, ErrorData> {
+        let is_local_agent = self.session_is_local_model_agent(session_id);
         match self.read_tool_profile_assignment(session_id)? {
-            Some(row) => Ok(row),
-            None => self.write_tool_profile_assignment(
-                session_id,
-                ToolProfileKind::NormalAgent,
-                "default_normal_agent",
-                None,
-                None,
-            ),
+            Some(row) => {
+                // Self-heal: if a session was first seen before its MCP
+                // initialize client identity landed in the registry, it may have
+                // been written the least-privilege `default_normal_agent` row.
+                // Once the registry classifies it as the trusted local-model
+                // harness, upgrade it to the full-capability surface so the
+                // local model is never left without the input primitives (#1031).
+                // Only the *default* normal-agent row self-heals; an explicit
+                // operator profile choice is never silently widened.
+                if is_local_agent && row.record.source == "default_normal_agent" {
+                    return self.write_tool_profile_assignment(
+                        session_id,
+                        ToolProfileKind::FullCapability,
+                        "default_full_capability_local_agent",
+                        None,
+                        None,
+                    );
+                }
+                Ok(row)
+            }
+            None => {
+                let (profile, source) = if is_local_agent {
+                    (
+                        ToolProfileKind::FullCapability,
+                        "default_full_capability_local_agent",
+                    )
+                } else {
+                    (ToolProfileKind::NormalAgent, "default_normal_agent")
+                };
+                self.write_tool_profile_assignment(session_id, profile, source, None, None)
+            }
         }
+    }
+
+    /// True when `session_id` belongs to a Synapse-spawned local-model agent
+    /// (the `synapse-local-model-agent` MCP client, classified `"local-model"`
+    /// by [`super::session_registry::infer_agent_kind`]). Trust basis: Synapse is
+    /// loopback-only + bearer-token + single-user, so the MCP client identity is
+    /// a sound affordance signal here (it is NOT a cross-tenant security boundary;
+    /// `clientInfo` is self-reported per MCP). Unknown / unclassified sessions
+    /// return false and get the least-privilege default.
+    fn session_is_local_model_agent(&self, session_id: &str) -> bool {
+        self.session_registry_ref()
+            .lock()
+            .ok()
+            .and_then(|registry| registry.agent_kind_for(session_id))
+            .as_deref()
+            == Some("local-model")
     }
 
     fn read_tool_profile_assignment(
@@ -735,26 +786,36 @@ fn validate_profile_set_policy(
     confirm_break_glass: bool,
     lease_proof: &ToolProfileLeaseProof,
 ) -> Result<(), ErrorData> {
-    if profile != ToolProfileKind::BreakGlass {
+    // Both the full raw surface (break_glass) and the local-agent full-capability
+    // surface, when requested *explicitly* via tool_profile_set, require the same
+    // operator-intent proof. This stops any agent from self-escalating to the
+    // foreground primitives by hand. The frictionless path to full_capability is
+    // the automatic, client-identity-keyed default for the trusted local-model
+    // harness (see `ensure_tool_profile_assignment`), never this tool.
+    if !matches!(
+        profile,
+        ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability
+    ) {
         return Ok(());
     }
+    let profile_label = profile.as_str();
     if !confirm_break_glass {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            "profile=break_glass requires confirm_break_glass=true",
+            format!("explicit profile={profile_label} requires confirm_break_glass=true"),
         ));
     }
     if reason.is_none_or(str::is_empty) {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            "profile=break_glass requires a non-empty reason",
+            format!("explicit profile={profile_label} requires a non-empty reason"),
         ));
     }
     if !lease_proof.caller_is_owner {
         return Err(ErrorData::new(
             ErrorCode(-32099),
             format!(
-                "profile=break_glass requires this MCP session to own the foreground input lease; current owner={:?}",
+                "explicit profile={profile_label} requires this MCP session to own the foreground input lease; current owner={:?}",
                 lease_proof.owner_session_id
             ),
             Some(json!({
@@ -773,6 +834,10 @@ fn break_glass_lease_proof(session_id: &str, profile: ToolProfileKind) -> ToolPr
     let status = lease::status();
     ToolProfileLeaseProof {
         required: profile == ToolProfileKind::BreakGlass,
+        // FullCapability is auto-assigned to the trusted local-model harness and
+        // does not gate on the foreground lease; only an *explicit*
+        // tool_profile_set escalation (handled in validate_profile_set_policy)
+        // is lease-gated. See [`validate_profile_set_policy`].
         held: status.held,
         owner_session_id: status.owner_session_id.clone(),
         caller_is_owner: status.owner_session_id.as_deref() == Some(session_id),
@@ -844,7 +909,7 @@ fn tool_rank(profile: ToolProfileKind, tool_name: &str) -> usize {
             .iter()
             .position(|name| *name == tool_name)
             .unwrap_or(usize::MAX),
-        ToolProfileKind::BreakGlass => usize::MAX,
+        ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability => usize::MAX,
     }
 }
 
@@ -1138,5 +1203,326 @@ mod tests {
             })
             .count();
         assert_eq!(matching, 1);
+    }
+
+    /// Seeds the cross-session registry with a real `record_initialized` entry
+    /// carrying `client_name`, exactly as the HTTP initialize path does
+    /// (`transport.rs` -> `record_registry_initialized`).
+    fn seed_session_client(service: &SynapseService, session_id: &str, client_name: &str) {
+        use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
+        use rmcp::transport::streamable_http_server::session::SessionState;
+        let state = SessionState::new(InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new(client_name, "0.0.0-test"),
+        ));
+        service
+            .session_registry_handle()
+            .lock()
+            .expect("session registry lock")
+            .record_initialized(session_id, &state, "http", 1_000);
+    }
+
+    // The four foreground input primitives that #1031 must restore for local
+    // models. They are in BREAK_GLASS_HAZARDOUS_TOOLS and hidden from
+    // normal_agent — the exact tools gemma/DeepSeek lacked when they "opened
+    // Notepad and typed nothing".
+    const LOCAL_AGENT_REQUIRED_TOOLS: [&str; 4] = [
+        "act_type",
+        "act_set_field_text",
+        "act_click",
+        "act_focus_window",
+    ];
+
+    #[test]
+    fn local_model_agent_session_gets_full_capability_surface() {
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "issue1031-local-session";
+        seed_session_client(&service, session_id, "synapse-local-model-agent");
+
+        // tools/list surface SoT: the input primitives are present.
+        let tools = tool_names(
+            service
+                .tools_for_session_profile(Some(session_id))
+                .expect("local-agent profile tools"),
+        );
+        for required in LOCAL_AGENT_REQUIRED_TOOLS {
+            assert!(
+                tools.contains(&required.to_owned()),
+                "local-model agent must see {required}; visible tool count = {}",
+                tools.len()
+            );
+        }
+
+        // Durable policy row SoT: full_capability, auto-assigned source.
+        let row = service
+            .read_tool_profile_assignment(session_id)
+            .expect("read profile row")
+            .expect("row exists after resolution");
+        assert_eq!(row.record.profile, ToolProfileKind::FullCapability);
+        assert_eq!(row.record.source, "default_full_capability_local_agent");
+        assert!(row.record.denied_break_glass_tools.is_empty());
+
+        // Physical CF_SESSIONS readback proves the row is on disk.
+        let db = service.m3_storage().expect("storage");
+        let stored = db
+            .scan_cf_prefix(cf::CF_SESSIONS, &tool_profile_key(session_id))
+            .expect("scan policy rows");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(sha256_hex(&stored[0].1), row.value_sha256);
+
+        // Call-admission gate SoT: a hidden-for-normal foreground tool is admitted.
+        service
+            .admit_tool_call_for_profile("act_type", Some(session_id))
+            .expect("full_capability must admit act_type for the local-model agent");
+    }
+
+    #[test]
+    fn non_local_agent_session_stays_least_privilege() {
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "issue1031-codex-session";
+        seed_session_client(&service, session_id, "codex-cli");
+
+        let tools = tool_names(
+            service
+                .tools_for_session_profile(Some(session_id))
+                .expect("codex profile tools"),
+        );
+        assert!(tools.contains(&"health".to_owned()));
+        for hidden in LOCAL_AGENT_REQUIRED_TOOLS {
+            assert!(
+                !tools.contains(&hidden.to_owned()),
+                "non-local agent must NOT see foreground primitive {hidden}"
+            );
+        }
+        let row = service
+            .read_tool_profile_assignment(session_id)
+            .expect("read profile row")
+            .expect("row exists after resolution");
+        assert_eq!(row.record.profile, ToolProfileKind::NormalAgent);
+        assert_eq!(row.record.source, "default_normal_agent");
+        service
+            .admit_tool_call_for_profile("act_type", Some(session_id))
+            .expect_err("normal_agent must deny act_type");
+    }
+
+    #[test]
+    fn local_model_session_self_heals_stale_normal_default() {
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "issue1031-selfheal-session";
+
+        // Simulate a least-privilege row written before the MCP client identity
+        // was known to the registry.
+        service
+            .write_tool_profile_assignment(
+                session_id,
+                ToolProfileKind::NormalAgent,
+                "default_normal_agent",
+                None,
+                None,
+            )
+            .expect("seed stale normal-agent row");
+        let before = service
+            .read_tool_profile_assignment(session_id)
+            .expect("read before")
+            .expect("row before");
+        assert_eq!(before.record.profile, ToolProfileKind::NormalAgent);
+
+        // Identity now classifies the session as the local-model harness.
+        seed_session_client(&service, session_id, "synapse-local-model-agent");
+
+        // Resolving the surface upgrades the durable row in place.
+        let tools = tool_names(
+            service
+                .tools_for_session_profile(Some(session_id))
+                .expect("post-heal tools"),
+        );
+        assert!(tools.contains(&"act_type".to_owned()));
+        let after = service
+            .read_tool_profile_assignment(session_id)
+            .expect("read after")
+            .expect("row after");
+        assert_eq!(after.record.profile, ToolProfileKind::FullCapability);
+        assert_eq!(after.record.source, "default_full_capability_local_agent");
+    }
+
+    #[test]
+    fn explicit_tool_profile_set_to_full_capability_requires_lease_proof() {
+        // The frictionless path to full_capability is the auto default; an
+        // explicit escalation by hand must carry the same proof as break_glass
+        // so no agent can self-escalate to the foreground primitives.
+        let proof = ToolProfileLeaseProof {
+            required: true,
+            held: false,
+            owner_session_id: None,
+            caller_is_owner: false,
+            expires_in_ms: None,
+        };
+        assert!(
+            validate_profile_set_policy(
+                "s1",
+                ToolProfileKind::FullCapability,
+                Some("need full surface"),
+                true,
+                &proof,
+            )
+            .is_err()
+        );
+    }
+
+    /// Measurement probe (not a regression gate): emit the EXACT FullCapability
+    /// tool surface a Synapse-spawned local-model agent (gemma/DeepSeek) receives,
+    /// as physical source of truth, plus the real byte size + token estimate of
+    /// the OpenAI `tools` array that the local-agent harness puts on the
+    /// chat-completion request body.
+    ///
+    /// Faithful reproduction of the production path:
+    ///   1. a session whose MCP client identity is the local-model harness
+    ///      (`synapse-local-model-agent`) resolves to `ToolProfileKind::FullCapability`,
+    ///   2. `tools_for_session_profile` returns `full_sanitized_tools()` (=
+    ///      `sanitize_tools(tool_router.list_all())`) sorted exactly as the
+    ///      handler emits them — the same `Vec<Tool>` the agent's `tools/list`
+    ///      receives,
+    ///   3. each `Tool` is mapped through the SAME JSON shape as
+    ///      `local_agent::openai_tool_from_mcp` (kept in sync below) to build the
+    ///      `tools[]` field of the request body.
+    ///
+    /// Skipped unless `SYNAPSE_TOOL_SURFACE_OUT` is set to the absolute output
+    /// path, so it never writes during a normal `cargo test` run.
+    ///
+    /// ```text
+    /// SYNAPSE_TOOL_SURFACE_OUT=C:/code/synapse-subconscious/artifacts/tool_surface.json \
+    ///   cargo test -p synapse-mcp --lib -- --ignored --exact \
+    ///   server::tool_profiles::tests::emit_full_capability_tool_surface_artifact --nocapture
+    /// ```
+    #[test]
+    #[ignore = "measurement probe; set SYNAPSE_TOOL_SURFACE_OUT to run"]
+    fn emit_full_capability_tool_surface_artifact() {
+        let Ok(out_path) = std::env::var("SYNAPSE_TOOL_SURFACE_OUT") else {
+            eprintln!("SYNAPSE_TOOL_SURFACE_OUT not set; skipping artifact emission");
+            return;
+        };
+
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "tool-surface-probe-local-session";
+        // Production identity for the Synapse local-model harness; this is what
+        // makes the session resolve to FullCapability automatically.
+        seed_session_client(&service, session_id, "synapse-local-model-agent");
+
+        // The exact Vec<Tool> the agent's tools/list receives for this session.
+        let tools = service
+            .tools_for_session_profile(Some(session_id))
+            .expect("full-capability tool surface");
+
+        // Hard SoT assertion: this session really is FullCapability.
+        let row = service
+            .read_tool_profile_assignment(session_id)
+            .expect("read profile row")
+            .expect("row exists");
+        assert_eq!(row.record.profile, ToolProfileKind::FullCapability);
+
+        // Map each Tool exactly as local_agent::openai_tool_from_mcp does.
+        // (That fn lives in the binary's local_agent module; its body is a pure
+        // JSON wrapper with no schema logic — the schema work already happened in
+        // sanitize_tools above. Kept byte-identical here.)
+        let openai_tool_from_mcp = |tool: &Tool| -> serde_json::Value {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name.as_ref(),
+                    "description": tool
+                        .description
+                        .as_ref()
+                        .map(|desc| desc.as_ref())
+                        .unwrap_or("Synapse MCP tool"),
+                    "parameters": serde_json::Value::Object((*tool.input_schema).clone()),
+                }
+            })
+        };
+
+        let openai_tools: Vec<serde_json::Value> =
+            tools.iter().map(openai_tool_from_mcp).collect();
+
+        // The actual `tools` field of the chat-completion request body.
+        let openai_tools_json =
+            serde_json::to_string(&openai_tools).expect("serialize openai tools array");
+        let openai_tools_bytes = openai_tools_json.len();
+        let openai_tools_chars = openai_tools_json.chars().count();
+
+        // Per-tool detail (sanitized schema, exactly as emitted to the model) and
+        // the longest descriptions by byte size.
+        let mut tool_entries: Vec<serde_json::Value> = Vec::with_capacity(tools.len());
+        let mut desc_sizes: Vec<(String, usize)> = Vec::with_capacity(tools.len());
+        for tool in &tools {
+            let name = tool.name.to_string();
+            let description = tool
+                .description
+                .as_ref()
+                .map(|desc| desc.as_ref())
+                .unwrap_or("Synapse MCP tool")
+                .to_owned();
+            desc_sizes.push((name.clone(), description.len()));
+            tool_entries.push(serde_json::json!({
+                "name": name,
+                "description": description,
+                "input_schema": serde_json::Value::Object((*tool.input_schema).clone()),
+            }));
+        }
+        desc_sizes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let longest_descriptions: Vec<serde_json::Value> = desc_sizes
+            .iter()
+            .take(10)
+            .map(|(name, bytes)| serde_json::json!({ "name": name, "description_bytes": bytes }))
+            .collect();
+
+        // Token estimates over the actual openai_tools payload. No real
+        // tokenizer crate is in the workspace, so report both common heuristics,
+        // clearly labeled as estimates.
+        let approx_tokens_chars_div_4 = (openai_tools_chars as f64 / 4.0).ceil() as u64;
+        let approx_tokens_chars_div_3_5 = (openai_tools_chars as f64 / 3.5).ceil() as u64;
+
+        let artifact = serde_json::json!({
+            "_meta": {
+                "description": "Exact FullCapability MCP tool surface a Synapse-spawned local-model agent (e.g. gemma4) receives, with the real openai tools[] payload size and token estimate.",
+                "profile": row.record.profile.as_str(),
+                "profile_source": row.record.source,
+                "client_identity": "synapse-local-model-agent",
+                "produced_by": "server::tool_profiles::tests::emit_full_capability_tool_surface_artifact",
+                "env_gates": {
+                    "SYNAPSE_DEBUG_TOOLS": std::env::var("SYNAPSE_DEBUG_TOOLS").ok(),
+                    "SYNAPSE_ENABLE_EVERQUEST": std::env::var("SYNAPSE_ENABLE_EVERQUEST").ok(),
+                },
+            },
+            "tool_count": tools.len(),
+            "openai_tools_bytes": openai_tools_bytes,
+            "openai_tools_chars": openai_tools_chars,
+            "approx_tokens": {
+                "note": "No real tokenizer crate is vendored in this workspace; both values are heuristic estimates over the openai_tools payload.",
+                "chars_div_4": approx_tokens_chars_div_4,
+                "chars_div_3_5": approx_tokens_chars_div_3_5,
+            },
+            "longest_descriptions_by_bytes": longest_descriptions,
+            "tools": tool_entries,
+        });
+
+        let out = std::path::Path::new(&out_path);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact parent dir");
+        }
+        let serialized = serde_json::to_string_pretty(&artifact).expect("serialize artifact");
+        std::fs::write(out, serialized).expect("write artifact");
+
+        eprintln!("TOOL_SURFACE tool_count={}", tools.len());
+        eprintln!("TOOL_SURFACE openai_tools_bytes={openai_tools_bytes}");
+        eprintln!("TOOL_SURFACE openai_tools_chars={openai_tools_chars}");
+        eprintln!("TOOL_SURFACE approx_tokens_chars_div_4={approx_tokens_chars_div_4}");
+        eprintln!("TOOL_SURFACE approx_tokens_chars_div_3_5={approx_tokens_chars_div_3_5}");
+        for (name, bytes) in desc_sizes.iter().take(10) {
+            eprintln!("TOOL_SURFACE longest_desc {name} {bytes}");
+        }
+        eprintln!("TOOL_SURFACE written_to={out_path}");
     }
 }

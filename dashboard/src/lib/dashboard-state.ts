@@ -504,6 +504,12 @@ export interface ApprovalDecideRequest {
   approval_id: string;
   decision: ApprovalDecisionVerb;
   note?: string;
+  // #1030 approve-with-edits: full-replacement tool input as a JSON object
+  // string. Honored only with an approve decision on an allow.edit item.
+  edited_args?: string;
+  // #1030 respond: the operator's answer to a needs-input / agent_question
+  // item. Honored only with an approve decision on an allow.respond item.
+  response?: string;
 }
 
 export interface ApprovalDecideResponse {
