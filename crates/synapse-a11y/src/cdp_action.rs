@@ -147,6 +147,18 @@ pub struct CdpPageState {
     pub history_entry_count: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpPageTextState {
+    pub target_id: String,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
+    pub text: String,
+    pub text_len: usize,
+    pub text_truncated: bool,
+    pub max_chars: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CdpPageNavigationResult {
     pub target_id: String,
@@ -652,6 +664,69 @@ pub async fn cdp_active_element_state(
             .into_value::<CdpActiveElementState>()
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("Runtime.evaluate active-element decode: {err}"),
+            })
+    })
+    .await
+}
+
+/// Reads bounded visible DOM text from a specific CDP page target without
+/// activating the tab or using OS foreground input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if `Runtime.evaluate` cannot read/decode the page.
+pub async fn cdp_page_text_target(
+    endpoint: &str,
+    target_id: &str,
+    max_chars: usize,
+) -> A11yResult<CdpPageTextState> {
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        let target_id_json =
+            serde_json::to_string(&target_id).unwrap_or_else(|_| "\"\"".to_owned());
+        let max_chars = max_chars.min(65_536);
+        let expression = format!(
+            r#"(() => {{
+                const maxChars = {max_chars};
+                const source =
+                    (document.body && typeof document.body.innerText === "string")
+                        ? document.body.innerText
+                        : ((document.documentElement && typeof document.documentElement.innerText === "string")
+                            ? document.documentElement.innerText
+                            : ((document.body && typeof document.body.textContent === "string")
+                                ? document.body.textContent
+                                : ((document.documentElement && typeof document.documentElement.textContent === "string")
+                                    ? document.documentElement.textContent
+                                    : "")));
+                let text = "";
+                let textLen = 0;
+                for (const ch of String(source || "")) {{
+                    if (textLen < maxChars) {{
+                        text += ch;
+                    }}
+                    textLen += 1;
+                }}
+                return {{
+                    target_id: {target_id_json},
+                    url: String(location.href || ""),
+                    title: String(document.title || ""),
+                    ready_state: String(document.readyState || ""),
+                    text,
+                    text_len: textLen,
+                    text_truncated: textLen > maxChars,
+                    max_chars: maxChars
+                }};
+            }})()"#,
+        );
+        page.evaluate_expression(expression)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Runtime.evaluate page text readback: {err}"),
+            })?
+            .into_value::<CdpPageTextState>()
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Runtime.evaluate page text decode: {err}"),
             })
     })
     .await

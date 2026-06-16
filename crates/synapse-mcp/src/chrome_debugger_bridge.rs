@@ -38,15 +38,17 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str =
+    "synapse-chrome-bridge-2026-06-16-target-info-text-1206-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "4a5c0307cda4d2812e054977fc703c558ebc27c2d31c99cb1bcfbbe788a026da";
+    "3ab6a7287913bbd234e8c1283e2fd0e8814f229bd6df6853287c358a973271a9";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "closeTab",
     "navigateTab",
     "openTab",
     "reloadSelf",
     "targetInfo",
+    "targetInfoPageText",
     "typeActiveElement",
 ];
 const LEGACY_DIRECT_HTTP_CAPABILITIES: &[&str] =
@@ -584,9 +586,31 @@ pub(crate) struct ChromeDebuggerTargetInfo {
     pub readback_backend: String,
     #[serde(default)]
     pub active_element: Option<ChromeDebuggerActiveElement>,
+    #[serde(default)]
+    pub page_text: Option<ChromeDebuggerPageText>,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
     pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerPageText {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub readback_source: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub text_len: usize,
+    #[serde(default)]
+    pub text_truncated: bool,
+    #[serde(default)]
+    pub max_chars: usize,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -2118,10 +2142,10 @@ pub(crate) async fn target_info(
     hwnd: i64,
     target_id: &str,
 ) -> Result<ChromeDebuggerTargetInfo, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_popup_safe(hwnd, "targetInfo")?;
+    ensure_normal_bridge_popup_safe(hwnd, "targetInfoPageText")?;
     let result = bridge()
         .send_command(
-            "targetInfo",
+            "targetInfoPageText",
             json!({
                 "hwnd": hwnd,
                 "targetIdHint": target_id,
@@ -2909,12 +2933,21 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
         }),
-        "targetInfo" => json!({
+        "targetInfo" | "targetInfoPageText" => json!({
             "target_id": result.get("target_id"),
             "tab_id": result.get("tab_id"),
             "target_type": result.get("target_type"),
             "url": result.get("url"),
             "title": result.get("title"),
+            "page_text_available": result
+                .get("page_text")
+                .and_then(|value| value.get("available")),
+            "page_text_len": result
+                .get("page_text")
+                .and_then(|value| value.get("text_len")),
+            "page_text_truncated": result
+                .get("page_text")
+                .and_then(|value| value.get("text_truncated")),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
@@ -3206,6 +3239,9 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect();
+        let reason = bridge_command_stale_reason(&host, "targetInfoPageText")
+            .expect("missing targetInfoPageText capability");
+        assert!(reason.contains("missing_capability=targetInfoPageText"));
         let reason = bridge_command_stale_reason(&host, "reloadSelf").expect("missing capability");
         assert!(reason.contains("missing_capability=reloadSelf"));
 

@@ -1,10 +1,11 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
-const BRIDGE_BUILD_SHA256 = "4a5c0307cda4d2812e054977fc703c558ebc27c2d31c99cb1bcfbbe788a026da";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-16-target-info-text-1206-v1";
+const BRIDGE_BUILD_SHA256 = "3ab6a7287913bbd234e8c1283e2fd0e8814f229bd6df6853287c358a973271a9";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
   "targetInfo",
+  "targetInfoPageText",
   "navigateTab",
   "activateTab",
   "reloadSelf",
@@ -28,6 +29,7 @@ const RECONNECT_MAX_MS = 30000;
 const DISCONNECTED_KEEPALIVE_MS = 20000;
 const AGENT_NAVIGATION_CLAIM_TTL_MS = 30000;
 const MAX_RECENT_NAVIGATION_KEYS = 128;
+const MAX_PAGE_TEXT_CHARS = 4096;
 
 let hostId = null;
 let bridgeToken = null;
@@ -346,7 +348,7 @@ async function handleCommand(command) {
       result = await handleOpenTab(params);
     } else if (kind === "closeTab") {
       result = await handleCloseTab(params);
-    } else if (kind === "targetInfo") {
+    } else if (kind === "targetInfo" || kind === "targetInfoPageText") {
       result = await handleTargetInfo(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
@@ -453,6 +455,7 @@ async function handleTargetInfo(params) {
   const selected = await selectTabTarget(params, { requireTargetId: true });
   const state = await tabPageState(selected.tabId, selected.target);
   const activeElement = await tabActiveElementState(selected.tabId);
+  const pageText = await tabPageTextState(selected.tabId);
   return {
     extension_id: chrome.runtime.id,
     target_id: state.target_id || selected.target.id,
@@ -465,8 +468,9 @@ async function handleTargetInfo(params) {
     active: Boolean(state.active),
     highlighted: Boolean(state.highlighted),
     pinned: Boolean(state.pinned),
-    readback_backend: "chrome.tabs.get",
+    readback_backend: "chrome.tabs.get+chrome.scripting.executeScript",
     active_element: activeElement,
+    page_text: pageText,
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
@@ -920,6 +924,85 @@ async function tabActiveElementState(tabId) {
       error_detail: errorMessage(error)
     };
   }
+}
+
+async function tabPageTextState(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      text: null,
+      text_len: 0,
+      text_truncated: false,
+      max_chars: MAX_PAGE_TEXT_CHARS,
+      error_code: "CHROME_SCRIPTING_UNAVAILABLE",
+      error_detail: "Chrome scripting API is unavailable; extension is missing scripting permission"
+    };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readPageTextInPage,
+      args: [MAX_PAGE_TEXT_CHARS]
+    });
+    const first = Array.isArray(results) ? results[0] : null;
+    if (!first || typeof first.result !== "object" || first.result === null) {
+      return {
+        available: false,
+        readback_source: "chrome.scripting.executeScript",
+        text: null,
+        text_len: 0,
+        text_truncated: false,
+        max_chars: MAX_PAGE_TEXT_CHARS,
+        error_code: "CHROME_SCRIPTING_EMPTY_RESULT",
+        error_detail: "chrome.scripting.executeScript returned no page-text result"
+      };
+    }
+    return {
+      available: true,
+      readback_source: "chrome.scripting.executeScript",
+      ...first.result
+    };
+  } catch (error) {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      text: null,
+      text_len: 0,
+      text_truncated: false,
+      max_chars: MAX_PAGE_TEXT_CHARS,
+      error_code: "CHROME_SCRIPTING_EXECUTE_FAILED",
+      error_detail: errorMessage(error)
+    };
+  }
+}
+
+function readPageTextInPage(maxChars) {
+  const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? Math.min(maxChars, 65536) : 4096;
+  const source =
+    document.body && typeof document.body.innerText === "string"
+      ? document.body.innerText
+      : document.documentElement && typeof document.documentElement.innerText === "string"
+        ? document.documentElement.innerText
+        : document.body && typeof document.body.textContent === "string"
+          ? document.body.textContent
+          : document.documentElement && typeof document.documentElement.textContent === "string"
+            ? document.documentElement.textContent
+            : "";
+  let text = "";
+  let textLen = 0;
+  for (const ch of String(source || "")) {
+    if (textLen < limit) {
+      text += ch;
+    }
+    textLen += 1;
+  }
+  return {
+    text,
+    text_len: textLen,
+    text_truncated: textLen > limit,
+    max_chars: limit
+  };
 }
 
 function readActiveElementInPage() {

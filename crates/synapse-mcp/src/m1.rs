@@ -677,6 +677,8 @@ pub struct CdpTargetInfoResponse {
     pub target_selection_reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_element: Option<CdpActiveElementInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_text: Option<CdpPageTextInfo>,
 }
 
 /// Parameters for `window_list` (#1021). All fields optional; an empty object
@@ -817,6 +819,28 @@ pub struct CdpBridgeReloadResponse {
     pub after: CdpBridgeHostReadback,
     pub reconnected: bool,
     pub waited_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpPageTextInfo {
+    pub available: bool,
+    pub readback_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub text_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_sha256: Option<String>,
+    pub text_truncated: bool,
+    pub max_chars: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perceived_text_notice: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspected_injection: Vec<synapse_core::SuspectedInjectionAnnotation>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
