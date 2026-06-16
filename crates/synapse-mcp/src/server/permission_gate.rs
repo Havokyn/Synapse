@@ -117,6 +117,12 @@ pub struct ApprovalGateParams {
     /// The tool_use id of the pending call (used to dedupe retries).
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// Spawn id of the calling agent, for attribution when the caller cannot set
+    /// the `x-synapse-spawn-id` header — the local-model harness (#1028) calls
+    /// this tool itself over a shared-token MCP session. The header still wins
+    /// when present (Claude's native path); this is the explicit fallback.
+    #[serde(default)]
+    pub spawn_id: Option<String>,
 }
 
 #[tool_router(router = permission_gate_tool_router, vis = "pub(super)")]
@@ -150,7 +156,9 @@ impl SynapseService {
 
         let by_session = super::context::mcp_session_id_from_request_context(&request_context)?
             .unwrap_or_else(|| "stdio".to_owned());
-        let spawn_id = header_value(&request_context, SPAWN_ID_HEADER);
+        // Header (Claude's native path) wins; the explicit param is the
+        // local-harness fallback (#1028) since it shares the bearer token.
+        let spawn_id = header_value(&request_context, SPAWN_ID_HEADER).or(params.spawn_id.clone());
 
         self.run_gate(
             &tool_name,
@@ -562,6 +570,52 @@ mod tests {
             .expect("exists")
             .item;
         assert_eq!(item.status, ApprovalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn pending_row_is_attributed_to_the_calling_spawn() {
+        // #1028: a local-model agent's gated call must produce a Pending row the
+        // dashboard can attribute to THAT spawn (payload spawn_id + dedupe key),
+        // so the fleet inbox shows which agent is blocked. Physical SoT: read the
+        // durable row back and inspect its attribution fields.
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let input = json!({ "command": "echo hi" });
+        let gate = service.run_gate(
+            "mcp__synapse__act_run_shell",
+            &input,
+            Some("tuse-attr"),
+            "sess",
+            Some("agent-spawn-local-42"),
+        );
+        let decide = async {
+            let id = await_pending_id(&service).await;
+            let db = service.m3_storage().expect("storage");
+            let item = crate::m3::approvals::get_approval(&db, &id)
+                .expect("read")
+                .expect("exists")
+                .item;
+            // Attribution is physically present in the durable row.
+            let payload = item.payload_json.clone().expect("payload");
+            assert!(
+                payload.contains("agent-spawn-local-42"),
+                "payload must carry the spawn id: {payload}"
+            );
+            assert_eq!(
+                item.dedupe_key.as_deref(),
+                Some("gate:agent-spawn-local-42:tuse-attr"),
+                "dedupe key must scope to the spawn + tool_use id"
+            );
+            println!(
+                "readback=attribution approval_id={id} dedupe_key={:?} spawn_in_payload=true",
+                item.dedupe_key
+            );
+            service
+                .approval_decide_from_dashboard(&id, ApprovalDecision::Accept, None, None, None, "tester")
+                .expect("decide");
+        };
+        let (result, ()) = tokio::join!(gate, decide);
+        assert_eq!(verdict_of(&result.expect("gate ok"))["behavior"], "allow");
     }
 
     #[tokio::test]

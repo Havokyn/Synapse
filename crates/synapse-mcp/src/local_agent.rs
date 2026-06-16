@@ -587,6 +587,20 @@ impl Runner {
             }
         };
 
+        // #1028: gate hazardous tool calls through the shared approval queue
+        // before dispatch. Safe (read-only/low-consequence) calls pass through
+        // instantly; risky calls block on the in-daemon approval_gate and may be
+        // denied (no dispatch) or approved-with-edits (dispatch the operator's
+        // edited args). Fail-closed: a gate that cannot answer denies the action.
+        let args = match self.gate_tool_call(&tool_name, args, &call.id).await? {
+            ToolGate::Allow(effective_args) => effective_args,
+            ToolGate::Deny(reason) => {
+                self.record_tool_gate_denied(&call, &tool_name, routed, &reason)
+                    .await?;
+                return Ok(());
+            }
+        };
+
         let result = match self
             .mcp
             .peer()
@@ -695,6 +709,153 @@ impl Runner {
             "tool_call_id": call.id,
             "tool_response": result_value,
             "error_code": if is_error { "SYNAPSE_TOOL_ERROR" } else { "" },
+            "tool_exposure": self.tool_exposure.as_str(),
+        }))
+        .await?;
+        Ok(())
+    }
+
+    /// #1028: route a hazardous tool call through the shared approval queue
+    /// before dispatch. Read-only / low-consequence calls (per the SAME
+    /// `permission_policy` the daemon's Claude gate uses) skip the gate entirely;
+    /// risky calls block on the in-daemon `approval_gate`, which creates a Pending
+    /// `AgentPermission` row attributed to this spawn and returns the operator's
+    /// verdict (allow / approve-with-edits / deny). Fail-closed: a gate that
+    /// cannot answer denies the action — the risky tool is never dispatched on a
+    /// gate failure.
+    async fn gate_tool_call(
+        &mut self,
+        tool_name: &str,
+        args: JsonObject,
+        tool_use_id: &str,
+    ) -> anyhow::Result<ToolGate> {
+        let label = gate_tool_label(tool_name);
+        if !crate::server::permission_policy::classify(&label, &Value::Object(args.clone()))
+            .is_gate()
+        {
+            return Ok(ToolGate::Allow(args));
+        }
+
+        // The agent is now waiting on a human — surface it to the fleet inbox /
+        // escalation pipeline via the state machine.
+        self.post_event(json!({
+            "event": "state_changed",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "state_to": "awaiting_approval",
+            "reason_code": "local_tool_gate",
+            "tool_name": tool_name,
+            "tool_call_id": tool_use_id,
+        }))
+        .await?;
+        self.write_line(json!({
+            "type": "local.tool_call.gate_blocking",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": tool_name,
+            "tool_call_id": tool_use_id,
+        }))?;
+
+        let mut gate_args = Map::new();
+        gate_args.insert("tool_name".to_owned(), Value::String(label));
+        gate_args.insert("input".to_owned(), Value::Object(args.clone()));
+        gate_args.insert("tool_use_id".to_owned(), Value::String(tool_use_id.to_owned()));
+        gate_args.insert("spawn_id".to_owned(), Value::String(self.spawn_id.clone()));
+
+        let verdict = match self
+            .mcp
+            .peer()
+            .call_tool(CallToolRequestParams::new("approval_gate").with_arguments(gate_args))
+            .await
+        {
+            Ok(result) => parse_gate_verdict(&tool_result_value(&result), &args)?,
+            Err(error) => {
+                if tool_call_error_is_terminal(&error) {
+                    bail!("APPROVAL_GATE_TRANSPORT_DEAD: approval_gate transport lost: {error}");
+                }
+                tracing::error!(
+                    code = "LOCAL_AGENT_APPROVAL_GATE_FAILED",
+                    tool = tool_name,
+                    spawn_id = %self.spawn_id,
+                    detail = %error,
+                    "approval_gate call failed; denying the action fail-closed"
+                );
+                ToolGate::Deny(format!(
+                    "approval gate unavailable ({error}); action blocked, not executed"
+                ))
+            }
+        };
+
+        let reason_code = match &verdict {
+            ToolGate::Allow(_) => "local_tool_gate_approved",
+            ToolGate::Deny(_) => "local_tool_gate_denied",
+        };
+        self.post_event(json!({
+            "event": "state_changed",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "state_to": "live",
+            "reason_code": reason_code,
+            "tool_name": tool_name,
+            "tool_call_id": tool_use_id,
+        }))
+        .await?;
+        Ok(verdict)
+    }
+
+    /// Feed an operator denial back to the model as the tool result (so it can
+    /// pick another approach), and journal the gate-denied transition. The risky
+    /// tool is NOT dispatched.
+    async fn record_tool_gate_denied(
+        &mut self,
+        call: &OpenAiToolCall,
+        tool_name: &str,
+        routed: bool,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let feedback = json!({
+            "error": "APPROVAL_DENIED",
+            "tool": tool_name,
+            "message": reason,
+            "recoverable": true,
+            "suggestion": "The operator denied this action. Do not retry it; choose a different approach or stop and explain why you cannot proceed.",
+        });
+        let result_value = json!({ "error": format!("APPROVAL_DENIED: {tool_name}: {reason}") });
+        self.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": feedback.to_string(),
+        }));
+        self.write_line(json!({
+            "type": "local.tool_call.finished",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "routed_tool_name": if routed { Some(tool_name) } else { None },
+            "tool_call_id": call.id,
+            "status": "denied",
+            "error_code": "APPROVAL_DENIED",
+            "result": result_value,
+            "tool_exposure": self.tool_exposure.as_str(),
+        }))?;
+        self.post_event(json!({
+            "event": "tool_call_finished",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "turn_index": self.turn_count,
+            "tool_name": call.name,
+            "routed_tool_name": if routed { Some(tool_name) } else { None },
+            "tool_call_id": call.id,
+            "tool_response": result_value,
+            "error_code": "APPROVAL_DENIED",
             "tool_exposure": self.tool_exposure.as_str(),
         }))
         .await?;
@@ -1770,6 +1931,52 @@ fn tool_failure_suggestion(fatal: bool, exposure: ToolExposure) -> &'static str 
     }
 }
 
+/// Verdict the in-daemon `approval_gate` returned to the harness for a gated
+/// tool call (#1028).
+enum ToolGate {
+    /// Approved (by the operator or by auto-allow). Carries the EFFECTIVE
+    /// arguments — the operator's edited args when they approved-with-edits
+    /// (#1030), otherwise the original input.
+    Allow(JsonObject),
+    /// Denied (operator declined, gate timed out, or the gate could not answer).
+    /// Carries the reason fed back to the model; the tool is NOT dispatched.
+    Deny(String),
+}
+
+/// The tool-name form the harness hands the approval policy/gate so a bare
+/// Synapse tool name (e.g. `act_type`) classifies as the MCP tool it is
+/// (`mcp__synapse__act_type`) — otherwise `permission_policy::classify` would
+/// hit its unknown-bare-name branch and gate every call indiscriminately.
+fn gate_tool_label(tool_name: &str) -> String {
+    format!("mcp__synapse__{tool_name}")
+}
+
+/// Parse the `approval_gate` verdict value (`{"behavior":"allow","updatedInput":…}`
+/// or `{"behavior":"deny","message":…}`). Fail-closed: an unknown/!object/missing
+/// behavior is an error the caller turns into a denial — never a silent allow.
+fn parse_gate_verdict(verdict: &Value, fallback: &JsonObject) -> anyhow::Result<ToolGate> {
+    match verdict.get("behavior").and_then(Value::as_str) {
+        Some("allow") => {
+            let args = match verdict.get("updatedInput") {
+                Some(Value::Object(map)) => map.clone(),
+                None | Some(Value::Null) => fallback.clone(),
+                Some(other) => {
+                    bail!("approval_gate updatedInput must be a JSON object, got {other}")
+                }
+            };
+            Ok(ToolGate::Allow(args))
+        }
+        Some("deny") => Ok(ToolGate::Deny(
+            verdict
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("denied by operator")
+                .to_owned(),
+        )),
+        other => bail!("approval_gate returned an unknown behavior {other:?}: {verdict}"),
+    }
+}
+
 fn error_code_from_detail(detail: &str) -> &str {
     for code in [
         "MODEL_ENDPOINT_UNREACHABLE",
@@ -2019,6 +2226,74 @@ mod tests {
         // A dead transport is terminal regardless of exposure.
         assert!(tool_failure_suggestion(true, ToolExposure::Direct).contains("run is ending"));
         assert!(tool_failure_suggestion(true, ToolExposure::Routed).contains("run is ending"));
+    }
+
+    #[test]
+    fn gate_label_makes_bare_synapse_tools_classify_as_mcp_tools() {
+        use crate::server::permission_policy::classify;
+        // A hazardous action tool must gate; a read-only one must auto-allow —
+        // proving the harness shares the daemon's single classification authority.
+        assert_eq!(gate_tool_label("act_run_shell"), "mcp__synapse__act_run_shell");
+        assert!(
+            classify(&gate_tool_label("act_run_shell"), &json!({})).is_gate(),
+            "act_run_shell must be gated"
+        );
+        assert!(
+            classify(&gate_tool_label("act_type"), &json!({})).is_gate(),
+            "act_type (typing into apps) must be gated"
+        );
+        assert!(
+            !classify(&gate_tool_label("observe"), &json!({})).is_gate(),
+            "observe is read-only and must auto-allow"
+        );
+        assert!(
+            !classify(&gate_tool_label("read_text"), &json!({})).is_gate(),
+            "read_text is read-only and must auto-allow"
+        );
+    }
+
+    #[test]
+    fn parse_gate_verdict_allow_prefers_operator_edited_args() {
+        let fallback: JsonObject = serde_json::from_value(json!({"command": "original"}))
+            .expect("fallback object");
+        // Approve-with-edits (#1030): the edited args win.
+        let edited = json!({"behavior": "allow", "updatedInput": {"command": "edited"}});
+        match parse_gate_verdict(&edited, &fallback).expect("allow") {
+            ToolGate::Allow(args) => assert_eq!(args["command"], "edited"),
+            ToolGate::Deny(reason) => panic!("expected allow, got deny: {reason}"),
+        }
+        // Plain allow (no updatedInput) falls back to the original input.
+        let plain = json!({"behavior": "allow"});
+        match parse_gate_verdict(&plain, &fallback).expect("allow") {
+            ToolGate::Allow(args) => assert_eq!(args["command"], "original"),
+            ToolGate::Deny(reason) => panic!("expected allow, got deny: {reason}"),
+        }
+    }
+
+    #[test]
+    fn parse_gate_verdict_deny_carries_reason() {
+        let fallback = JsonObject::new();
+        let deny = json!({"behavior": "deny", "message": "not safe right now"});
+        match parse_gate_verdict(&deny, &fallback).expect("deny parses") {
+            ToolGate::Deny(reason) => assert_eq!(reason, "not safe right now"),
+            ToolGate::Allow(_) => panic!("expected deny"),
+        }
+    }
+
+    #[test]
+    fn parse_gate_verdict_is_fail_closed_on_garbage() {
+        let fallback = JsonObject::new();
+        // Unknown behavior, missing behavior, and a non-object updatedInput must
+        // all error (the caller turns the error into a denial) — never allow.
+        assert!(parse_gate_verdict(&json!({"behavior": "maybe"}), &fallback).is_err());
+        assert!(parse_gate_verdict(&json!({}), &fallback).is_err());
+        assert!(
+            parse_gate_verdict(
+                &json!({"behavior": "allow", "updatedInput": "not-an-object"}),
+                &fallback
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

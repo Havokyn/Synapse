@@ -216,7 +216,7 @@ mod m3_tools;
 pub(crate) mod m4_tools;
 mod notify_tools;
 mod permission_gate;
-mod permission_policy;
+pub(crate) mod permission_policy;
 mod reality;
 mod schema_sanitize;
 pub(crate) mod session_continuity;
