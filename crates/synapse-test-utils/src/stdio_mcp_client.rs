@@ -104,6 +104,7 @@ impl StdioMcpClient {
                 "SYNAPSE_MCP_SYNTHETIC_FIXTURE"
                     | "SYNAPSE_MCP_FORCE_NO_PERCEPTION"
                     | "SYNAPSE_MCP_FORCE_OBSERVE_INTERNAL"
+                    | "SYNAPSE_MCP_FORCE_NO_FOREGROUND"
             )
         });
         let mut command = Command::new(bin);
