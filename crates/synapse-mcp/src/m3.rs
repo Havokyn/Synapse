@@ -8,6 +8,7 @@ pub mod episodes;
 pub mod hygiene;
 pub mod intent;
 pub mod intent_events;
+pub mod plan;
 pub mod interaction_cadence;
 pub mod local_models;
 pub mod permissions;
@@ -21,6 +22,7 @@ pub mod routine_miner_job;
 pub mod routines;
 pub mod storage;
 pub mod subscribe;
+pub mod suggestions;
 #[cfg(test)]
 mod tests;
 pub mod timeline;

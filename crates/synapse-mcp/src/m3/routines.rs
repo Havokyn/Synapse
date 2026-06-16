@@ -35,9 +35,11 @@ use serde::{Deserialize, Serialize};
 use synapse_core::error_codes;
 use synapse_core::routines::{MiningDay, RoutineMiningConfig, mine_routines};
 use synapse_core::types::{
-    ROUTINE_STATE_MAX_CONFIDENCE_POINTS, ROUTINE_STATE_MAX_TRANSITIONS,
-    ROUTINE_STATE_RECORD_VERSION, RoutineConfidencePoint, RoutineGranularity, RoutineLifecycle,
-    RoutineRecord, RoutineStateAction, RoutineStateRecord, RoutineStep, RoutineTransition,
+    ROUTINE_STATE_MAX_CONFIDENCE_POINTS, ROUTINE_STATE_MAX_FEEDBACK_EVENTS,
+    ROUTINE_STATE_MAX_TRANSITIONS, ROUTINE_STATE_RECORD_VERSION, RoutineConfidencePoint,
+    RoutineDowClass, RoutineFeedbackEvent, RoutineFeedbackOutcome, RoutineGranularity,
+    RoutineLifecycle, RoutineRecord, RoutineStateAction, RoutineStateRecord, RoutineStep,
+    RoutineTransition,
 };
 use synapse_storage::{Db, cf, decode_json, encode_json, routines as routine_codec};
 
@@ -364,12 +366,20 @@ fn decode_state_row(key: &[u8], value: &[u8]) -> Result<RoutineStateRecord, Erro
             ),
         )
     })?;
-    if record.record_version != ROUTINE_STATE_RECORD_VERSION {
+    // Forward-compatible read: older rows deserialize via the field-level
+    // serde defaults (e.g. a v1 row decodes as "no feedback yet" — see #856)
+    // and are upgraded to the current version the next time they are written
+    // (feedback / lifecycle update / miner reconcile). Only a row written by a
+    // NEWER binary than this one is unsupported — silently truncating its
+    // unknown fields would lose operator state, so that is the loud refusal.
+    if record.record_version > ROUTINE_STATE_RECORD_VERSION {
         return Err(mcp_error(
             error_codes::STORAGE_CORRUPTED,
             format!(
                 "ROUTINE_STATE_VERSION_UNSUPPORTED in CF_ROUTINE_STATE at {routine_id}: \
-                 record_version {} (this binary supports {ROUTINE_STATE_RECORD_VERSION})",
+                 record_version {} is newer than this binary supports \
+                 ({ROUTINE_STATE_RECORD_VERSION}); upgrade the daemon — do not downgrade-write \
+                 this row or operator state will be lost",
                 record.record_version
             ),
         ));
@@ -425,7 +435,10 @@ fn load_all_state_rows(
 }
 
 /// Point lookup of one `CF_ROUTINE_STATE` row by routine id.
-fn load_state_row(db: &Db, routine_id: &str) -> Result<Option<RoutineStateRecord>, ErrorData> {
+pub(crate) fn load_state_row(
+    db: &Db,
+    routine_id: &str,
+) -> Result<Option<RoutineStateRecord>, ErrorData> {
     let key =
         routine_codec::routine_state_key(routine_id).map_err(|error| invalid(error.to_string()))?;
     let rows = db
@@ -449,7 +462,10 @@ fn load_state_row(db: &Db, routine_id: &str) -> Result<Option<RoutineStateRecord
 }
 
 /// Point lookup of one `CF_ROUTINES` row by routine id.
-fn load_routine_record(db: &Db, routine_id: &str) -> Result<Option<RoutineRecord>, ErrorData> {
+pub(crate) fn load_routine_record(
+    db: &Db,
+    routine_id: &str,
+) -> Result<Option<RoutineRecord>, ErrorData> {
     let key = routine_codec::routine_key(routine_id).map_err(|error| invalid(error.to_string()))?;
     let rows = db
         .scan_cf_prefix(cf::CF_ROUTINES, &key)
@@ -609,6 +625,15 @@ fn reconcile_state_rows(
                 transitions_truncated: 0,
                 confidence_history: Vec::new(),
                 confidence_history_truncated: 0,
+                feedback_events: Vec::new(),
+                feedback_events_truncated: 0,
+                accept_count: 0,
+                decline_count: 0,
+                ignore_count: 0,
+                abandon_count: 0,
+                consecutive_declines: 0,
+                cooldown_level: 0,
+                cooldown_until_ts_ns: None,
             };
             push_confidence_point(&mut state, point);
             counters.created += 1;
@@ -841,6 +866,15 @@ fn synthesized_default_state(routine: &RoutineRecord) -> RoutineStateRecord {
         transitions_truncated: 0,
         confidence_history: Vec::new(),
         confidence_history_truncated: 0,
+        feedback_events: Vec::new(),
+        feedback_events_truncated: 0,
+        accept_count: 0,
+        decline_count: 0,
+        ignore_count: 0,
+        abandon_count: 0,
+        consecutive_declines: 0,
+        cooldown_level: 0,
+        cooldown_until_ts_ns: None,
     }
 }
 
@@ -1068,7 +1102,7 @@ pub fn required_permissions_update(_params: &RoutineUpdateParams) -> RequiredPer
     required([Permission::ReadStorage, Permission::WriteStorage])
 }
 
-fn validate_routine_id_param(tool: &str, routine_id: &str) -> Result<(), ErrorData> {
+pub(crate) fn validate_routine_id_param(tool: &str, routine_id: &str) -> Result<(), ErrorData> {
     routine_codec::routine_key(routine_id)
         .map(|_key| ())
         .map_err(|_error| {
@@ -1289,6 +1323,538 @@ pub fn inspect_routine(
         state,
         tainted,
         taint,
+    })
+}
+
+/// Default and maximum sample occurrences carried in a label export.
+pub const DEFAULT_LABEL_EXPORT_SAMPLES: u32 = 3;
+pub const MAX_LABEL_EXPORT_SAMPLES: u32 = 10;
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineLabelExportParams {
+    /// Routine to export naming evidence for. Must be a mined routine present
+    /// in `CF_ROUTINES` (an operator-only state row with no mined template
+    /// cannot be labelled — there is nothing to name).
+    pub routine_id: String,
+    /// Recent sample occurrences to include (default 3, max 10), newest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_samples: Option<u32>,
+}
+
+pub fn required_permissions_label_export(
+    _params: &RoutineLabelExportParams,
+) -> RequiredPermissions {
+    required([Permission::ReadStorage])
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LabelStep {
+    /// Zero-based template position.
+    pub index: u32,
+    pub app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
+    /// `app` or `app:document` machine identity for this step.
+    pub identity: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LabelSample {
+    pub day_start_ns: u64,
+    pub minute_of_day: u32,
+    /// Rendered local start, e.g. `Mon 2026-06-09 08:47`.
+    pub local_start: String,
+    /// Stable episode ids of this occurrence; resolve full content (titles,
+    /// urls, keystrokes) via `episode_get`.
+    pub episode_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineLabelExportResponse {
+    pub routine_id: String,
+    /// Whether a `CF_ROUTINE_STATE` row already exists for this routine.
+    pub state_row_exists: bool,
+    pub lifecycle: RoutineLifecycle,
+    /// Current operator label, `None` if the routine was never named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_label: Option<String>,
+    pub granularity: RoutineGranularity,
+    /// Whole-routine machine identity, e.g.
+    /// `chrome:mail.google.com → excel:report.xlsx → teams`.
+    pub machine_identity: String,
+    pub schedule_label: String,
+    pub dow_class: RoutineDowClass,
+    pub mean_minute_of_day: u32,
+    pub support_days: u32,
+    pub occurrence_count: u32,
+    pub opportunity_days: u32,
+    pub confidence: f64,
+    pub steps: Vec<LabelStep>,
+    /// Newest-first sample occurrences (capped by `max_samples`).
+    pub samples: Vec<LabelSample>,
+    /// Total occurrences the mined record carries (samples are a suffix).
+    pub total_evidence_occurrences: u32,
+    /// Ready-to-use compact prompt block for an LLM to name/describe this
+    /// routine without any other context.
+    pub prompt: String,
+    /// Exact `routine_update` call to persist the agent's chosen label.
+    pub writeback_hint: String,
+    /// Character count of `prompt` (a coarse token-budget proxy).
+    pub prompt_chars: u32,
+}
+
+fn render_minute_of_day(minute_of_day: u32) -> String {
+    let minute = minute_of_day % 1440;
+    format!("{:02}:{:02}", minute / 60, minute % 60)
+}
+
+fn render_local_start(day_start_ns: u64, minute_of_day: u32) -> String {
+    let secs = i64::try_from(day_start_ns / 1_000_000_000).unwrap_or(0)
+        + i64::from(minute_of_day % 1440) * 60;
+    match Local.timestamp_opt(secs, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%a %Y-%m-%d %H:%M").to_string(),
+        _ => format!("ts {day_start_ns}+{minute_of_day}m"),
+    }
+}
+
+fn step_identity(step: &RoutineStep) -> String {
+    match &step.document {
+        Some(document) => format!("{}:{document}", step.app),
+        None => step.app.clone(),
+    }
+}
+
+fn render_dow_class(dow: &RoutineDowClass) -> String {
+    match dow {
+        RoutineDowClass::Daily => "daily".to_owned(),
+        RoutineDowClass::Weekdays => "weekdays".to_owned(),
+        RoutineDowClass::Weekend => "weekend".to_owned(),
+        RoutineDowClass::Days { days } => {
+            const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            let list = days
+                .iter()
+                .map(|day| NAMES.get(usize::from(*day)).copied().unwrap_or("?"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("days[{list}]")
+        }
+    }
+}
+
+/// Builds a compact, prompt-ready naming bundle for a mined routine (#851).
+///
+/// Read-only: it reuses the mined `CF_ROUTINES` template (the machine
+/// identity, schedule signature, and capped sample evidence) plus the current
+/// `CF_ROUTINE_STATE` label/lifecycle. The mined evidence already carries
+/// stable `episode_id`s, so an agent can pull richer per-episode content via
+/// `episode_get` if the compact bundle is not enough to name the routine.
+/// A routine with no mined record is an honest, structured refusal — there is
+/// no template to name.
+pub fn export_routine_label(
+    db: &Arc<Db>,
+    params: &RoutineLabelExportParams,
+) -> Result<RoutineLabelExportResponse, ErrorData> {
+    validate_routine_id_param("routine_label_export", &params.routine_id)?;
+    let max_samples = params.max_samples.unwrap_or(DEFAULT_LABEL_EXPORT_SAMPLES);
+    if max_samples == 0 || max_samples > MAX_LABEL_EXPORT_SAMPLES {
+        return Err(invalid(format!(
+            "routine_label_export max_samples must be between 1 and \
+             {MAX_LABEL_EXPORT_SAMPLES}; got {max_samples}"
+        )));
+    }
+
+    let Some(record) = load_routine_record(db, &params.routine_id)? else {
+        return Err(invalid(format!(
+            "ROUTINE_NOT_MINED: routine_id {} is not present in CF_ROUTINES, so it has no \
+             mined template (apps/documents/schedule) to name. Run routine_mine, or \
+             routine_list to see what currently exists",
+            params.routine_id
+        )));
+    };
+
+    let state = load_state_row(db, &params.routine_id)?;
+    let state_row_exists = state.is_some();
+    let (lifecycle, current_label) = match &state {
+        Some(state) => (state.lifecycle, state.label.clone()),
+        None => (RoutineLifecycle::Candidate, None),
+    };
+
+    let steps: Vec<LabelStep> = record
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| LabelStep {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            app: step.app.clone(),
+            document: step.document.clone(),
+            identity: step_identity(step),
+        })
+        .collect();
+
+    // `evidence` is newest-last; take the most recent `max_samples`, newest first.
+    let samples: Vec<LabelSample> = record
+        .evidence
+        .iter()
+        .rev()
+        .take(max_samples as usize)
+        .map(|evidence| LabelSample {
+            day_start_ns: evidence.day_start_ns,
+            minute_of_day: evidence.minute_of_day,
+            local_start: render_local_start(evidence.day_start_ns, evidence.minute_of_day),
+            episode_ids: evidence.episode_ids.clone(),
+        })
+        .collect();
+
+    let machine_identity = record
+        .steps
+        .iter()
+        .map(step_identity)
+        .collect::<Vec<_>>()
+        .join(" → ");
+    let dow = render_dow_class(&record.dow_class);
+
+    use std::fmt::Write as _;
+    let mut prompt = String::new();
+    prompt.push_str("Name and describe this recurring computer routine for its operator.\n");
+    // Writing to a String is infallible; the discarded Result is the idiomatic
+    // way to satisfy `write!`'s must-use without an unwrap that can never fire.
+    let _ = writeln!(prompt, "Machine identity: {machine_identity}");
+    let _ = writeln!(
+        prompt,
+        "Schedule: {} ({dow}), typically around {}.",
+        record.schedule_label,
+        render_minute_of_day(record.mean_minute_of_day)
+    );
+    let _ = writeln!(
+        prompt,
+        "Seen on {} of {} eligible days (confidence {:.2}); {} occurrences total.",
+        record.support_days, record.opportunity_days, record.confidence, record.occurrence_count
+    );
+    prompt.push_str("Steps in order:\n");
+    for step in &steps {
+        let _ = writeln!(prompt, "  {}. {}", step.index + 1, step.identity);
+    }
+    if !samples.is_empty() {
+        prompt.push_str("Recent occurrences:\n");
+        for sample in &samples {
+            let _ = writeln!(prompt, "  - {}", sample.local_start);
+        }
+    }
+    if let Some(label) = &current_label {
+        let _ = writeln!(prompt, "Current label: {label}");
+    }
+    prompt.push_str(
+        "Reply with a short human name (<=120 chars) and a one-sentence description.\n",
+    );
+
+    let writeback_hint = format!(
+        "routine_update {{ \"routine_id\": \"{}\", \"action\": \"rename\", \
+         \"label\": \"<chosen name>\", \"note\": \"<optional one-sentence description>\" }}",
+        params.routine_id
+    );
+    let prompt_chars = u32::try_from(prompt.chars().count()).unwrap_or(u32::MAX);
+
+    Ok(RoutineLabelExportResponse {
+        routine_id: params.routine_id.clone(),
+        state_row_exists,
+        lifecycle,
+        current_label,
+        granularity: record.granularity,
+        machine_identity,
+        schedule_label: record.schedule_label.clone(),
+        dow_class: record.dow_class.clone(),
+        mean_minute_of_day: record.mean_minute_of_day,
+        support_days: record.support_days,
+        occurrence_count: record.occurrence_count,
+        opportunity_days: record.opportunity_days,
+        confidence: record.confidence,
+        steps,
+        samples,
+        total_evidence_occurrences: u32::try_from(record.evidence.len()).unwrap_or(u32::MAX),
+        prompt,
+        writeback_hint,
+        prompt_chars,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// #856 — suggestion feedback loop (Wilson-bound confidence + escalating cooldown)
+// ---------------------------------------------------------------------------
+
+/// Cooldown applied at the first consecutive decline (1 hour).
+pub const FEEDBACK_COOLDOWN_BASE_SECS: u64 = 3_600;
+/// Per-consecutive-decline growth factor for the cooldown (geometric backoff,
+/// the proven anti-fatigue pattern — cf. Chrome web-push escalation).
+pub const FEEDBACK_COOLDOWN_MULTIPLIER: u64 = 6;
+/// Hard cap on a single cooldown window (14 days), so a long decline streak
+/// can never silence a routine effectively forever.
+pub const FEEDBACK_COOLDOWN_CAP_SECS: u64 = 14 * 24 * 3_600;
+
+/// Escalating cooldown duration for `consecutive` consecutive non-accept
+/// outcomes: `base * multiplier^(consecutive-1)`, capped. `consecutive == 0`
+/// means no cooldown. Pure and saturating so it is unit-testable and can never
+/// panic on overflow.
+#[must_use]
+pub fn feedback_cooldown_secs(consecutive: u32) -> u64 {
+    if consecutive == 0 {
+        return 0;
+    }
+    let mut secs = FEEDBACK_COOLDOWN_BASE_SECS;
+    for _ in 1..consecutive {
+        secs = secs.saturating_mul(FEEDBACK_COOLDOWN_MULTIPLIER);
+        if secs >= FEEDBACK_COOLDOWN_CAP_SECS {
+            return FEEDBACK_COOLDOWN_CAP_SECS;
+        }
+    }
+    secs.min(FEEDBACK_COOLDOWN_CAP_SECS)
+}
+
+/// Trials that count toward the acceptance Wilson bound: accepts + declines +
+/// ignored-timeouts. Abandonments are provenance only and excluded.
+#[must_use]
+pub const fn feedback_trials(state: &RoutineStateRecord) -> u64 {
+    state.accept_count as u64 + state.decline_count as u64 + state.ignore_count as u64
+}
+
+/// Wilson 95% lower bound of the accept rate, or `None` when there are no
+/// trials yet (honest "unknown", never a forced 0 that would suppress an
+/// un-judged routine).
+#[must_use]
+pub fn feedback_acceptance_lower_bound(state: &RoutineStateRecord) -> Option<f64> {
+    let trials = feedback_trials(state);
+    if trials == 0 {
+        return None;
+    }
+    Some(synapse_core::routines::wilson_lower_bound(
+        u64::from(state.accept_count),
+        trials,
+    ))
+}
+
+/// True when `now_ns` is before the routine's cooldown deadline.
+#[must_use]
+pub fn feedback_suppressed(state: &RoutineStateRecord, now_ns: u64) -> bool {
+    state
+        .cooldown_until_ts_ns
+        .is_some_and(|until| now_ns < until)
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineFeedbackParams {
+    /// Routine the surfaced suggestion was for.
+    pub routine_id: String,
+    /// How the suggestion resolved.
+    pub outcome: RoutineFeedbackOutcome,
+    /// Optional operator/agent note recorded with the outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Replay/test seam: evaluate as of this instant instead of the wall clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineFeedbackResponse {
+    pub routine_id: String,
+    pub outcome: RoutineFeedbackOutcome,
+    pub state_row_created: bool,
+    pub accept_count: u32,
+    pub decline_count: u32,
+    pub ignore_count: u32,
+    pub abandon_count: u32,
+    pub consecutive_declines: u32,
+    pub cooldown_level: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_until_ts_ns: Option<u64>,
+    /// Seconds of cooldown remaining as of evaluation (0 when not suppressed).
+    pub cooldown_remaining_secs: u64,
+    /// Whether the suggestion engine must suppress this routine right now.
+    pub suppressed: bool,
+    /// Wilson lower bound of the accept rate, `None` until the first trial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_lower_bound: Option<f64>,
+    /// Mined confidence (`None` when only an operator state row exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mined_confidence: Option<f64>,
+    /// Mined confidence folded with the acceptance lower bound (`mined *
+    /// acceptance`); equals `mined_confidence` while there are no trials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_confidence: Option<f64>,
+    /// Read-your-write of the persisted `CF_ROUTINE_STATE` row.
+    pub state: RoutineStateRecord,
+}
+
+pub fn required_permissions_feedback(_params: &RoutineFeedbackParams) -> RequiredPermissions {
+    required([Permission::ReadStorage, Permission::WriteStorage])
+}
+
+fn validate_feedback_fields(params: &RoutineFeedbackParams) -> Result<(), ErrorData> {
+    if let Some(note) = &params.note {
+        if note.trim().is_empty() {
+            return Err(invalid("routine_feedback note must not be blank when set"));
+        }
+        if note.chars().count() > MAX_NOTE_CHARS {
+            return Err(invalid(format!(
+                "routine_feedback note must be at most {MAX_NOTE_CHARS} characters; got {}",
+                note.chars().count()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Appends a feedback event, enforcing the newest-last cap via the truncation
+/// counter (mirrors [`push_transition`]).
+fn push_feedback_event(record: &mut RoutineStateRecord, event: RoutineFeedbackEvent) {
+    record.feedback_events.push(event);
+    while record.feedback_events.len() > ROUTINE_STATE_MAX_FEEDBACK_EVENTS {
+        record.feedback_events.remove(0);
+        record.feedback_events_truncated = record.feedback_events_truncated.saturating_add(1);
+    }
+}
+
+/// Records one suggestion outcome against a routine and folds it into the
+/// routine's effective confidence and escalating decline cooldown (#856).
+///
+/// Accepts reset the decline streak and clear the cooldown (recovery); declines
+/// and ignored-timeouts escalate the cooldown geometrically; abandonments are
+/// recorded for provenance but never suppress. Synchronous flushed write
+/// followed by a physical read-back, exactly like [`update_routine`].
+pub fn record_routine_feedback(
+    db: &Arc<Db>,
+    params: &RoutineFeedbackParams,
+    by_session: &str,
+) -> Result<RoutineFeedbackResponse, ErrorData> {
+    validate_routine_id_param("routine_feedback", &params.routine_id)?;
+    validate_feedback_fields(params)?;
+
+    if !db.pressure_permits_write(cf::CF_ROUTINE_STATE) {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "routine_feedback refused under disk pressure: cf_name={} pressure_level={:?}; \
+                 the feedback is unchanged",
+                cf::CF_ROUTINE_STATE,
+                db.pressure_level()
+            ),
+        ));
+    }
+
+    let mined = load_routine_record(db, &params.routine_id)?;
+    let existing_state = load_state_row(db, &params.routine_id)?;
+    let state_row_created = existing_state.is_none();
+    let mut state = match existing_state {
+        Some(state) => state,
+        None => match &mined {
+            Some(record) => synthesized_default_state(record),
+            None => {
+                return Err(invalid(format!(
+                    "ROUTINE_NOT_FOUND: routine_id {} exists in neither CF_ROUTINES nor \
+                     CF_ROUTINE_STATE; run routine_list to see what exists",
+                    params.routine_id
+                )));
+            }
+        },
+    };
+
+    let now = params.now_ts_ns.unwrap_or_else(now_ts_ns);
+    state.record_version = ROUTINE_STATE_RECORD_VERSION;
+    push_feedback_event(
+        &mut state,
+        RoutineFeedbackEvent {
+            ts_ns: now,
+            outcome: params.outcome,
+            by: by_session.to_owned(),
+            note: params.note.clone(),
+        },
+    );
+
+    match params.outcome {
+        RoutineFeedbackOutcome::Accepted => {
+            state.accept_count = state.accept_count.saturating_add(1);
+            state.consecutive_declines = 0;
+            state.cooldown_level = 0;
+            state.cooldown_until_ts_ns = None;
+        }
+        RoutineFeedbackOutcome::Declined | RoutineFeedbackOutcome::IgnoredTimeout => {
+            if params.outcome == RoutineFeedbackOutcome::Declined {
+                state.decline_count = state.decline_count.saturating_add(1);
+            } else {
+                state.ignore_count = state.ignore_count.saturating_add(1);
+            }
+            state.consecutive_declines = state.consecutive_declines.saturating_add(1);
+            state.cooldown_level = state.consecutive_declines;
+            let cooldown = feedback_cooldown_secs(state.consecutive_declines);
+            state.cooldown_until_ts_ns = Some(now.saturating_add(cooldown.saturating_mul(1_000_000_000)));
+        }
+        RoutineFeedbackOutcome::Abandoned => {
+            state.abandon_count = state.abandon_count.saturating_add(1);
+        }
+    }
+    state.updated_ts_ns = now;
+
+    put_state_rows(db, std::slice::from_ref(&state))?;
+    let readback = load_state_row(db, &params.routine_id)?.ok_or_else(|| {
+        internal(format!(
+            "ROUTINE_STATE_READBACK_MISSING: CF_ROUTINE_STATE row for {} vanished immediately \
+             after a flushed feedback write",
+            params.routine_id
+        ))
+    })?;
+    if readback != state {
+        return Err(internal(format!(
+            "ROUTINE_STATE_READBACK_MISMATCH: CF_ROUTINE_STATE row for {} does not match the \
+             value just written after feedback",
+            params.routine_id
+        )));
+    }
+
+    let acceptance_lower_bound = feedback_acceptance_lower_bound(&readback);
+    let mined_confidence = mined.as_ref().map(|record| record.confidence);
+    let effective_confidence = mined_confidence.map(|mined_c| match acceptance_lower_bound {
+        Some(acceptance) => mined_c * acceptance,
+        None => mined_c,
+    });
+    let suppressed = feedback_suppressed(&readback, now);
+    let cooldown_remaining_secs = readback
+        .cooldown_until_ts_ns
+        .filter(|until| now < *until)
+        .map_or(0, |until| (until - now) / 1_000_000_000);
+
+    tracing::info!(
+        code = "ROUTINE_FEEDBACK_RECORDED",
+        routine_id = %params.routine_id,
+        outcome = ?params.outcome,
+        consecutive_declines = readback.consecutive_declines,
+        cooldown_until_ts_ns = readback.cooldown_until_ts_ns,
+        suppressed,
+        by = by_session,
+        "routine suggestion feedback persisted and read back"
+    );
+
+    Ok(RoutineFeedbackResponse {
+        routine_id: params.routine_id.clone(),
+        outcome: params.outcome,
+        state_row_created,
+        accept_count: readback.accept_count,
+        decline_count: readback.decline_count,
+        ignore_count: readback.ignore_count,
+        abandon_count: readback.abandon_count,
+        consecutive_declines: readback.consecutive_declines,
+        cooldown_level: readback.cooldown_level,
+        cooldown_until_ts_ns: readback.cooldown_until_ts_ns,
+        cooldown_remaining_secs,
+        suppressed,
+        acceptance_lower_bound,
+        mined_confidence,
+        effective_confidence,
+        state: readback,
     })
 }
 
@@ -1568,7 +2134,73 @@ mod tests {
             transitions_truncated: 0,
             confidence_history: Vec::new(),
             confidence_history_truncated: 0,
+            feedback_events: Vec::new(),
+            feedback_events_truncated: 0,
+            accept_count: 0,
+            decline_count: 0,
+            ignore_count: 0,
+            abandon_count: 0,
+            consecutive_declines: 0,
+            cooldown_level: 0,
+            cooldown_until_ts_ns: None,
         }
+    }
+
+    #[test]
+    fn feedback_cooldown_escalates_geometrically_and_caps() {
+        // No streak -> no cooldown.
+        assert_eq!(feedback_cooldown_secs(0), 0);
+        // base, base*6, base*36, ... then hard cap at 14 days.
+        assert_eq!(feedback_cooldown_secs(1), FEEDBACK_COOLDOWN_BASE_SECS);
+        assert_eq!(
+            feedback_cooldown_secs(2),
+            FEEDBACK_COOLDOWN_BASE_SECS * FEEDBACK_COOLDOWN_MULTIPLIER
+        );
+        assert_eq!(
+            feedback_cooldown_secs(3),
+            FEEDBACK_COOLDOWN_BASE_SECS * FEEDBACK_COOLDOWN_MULTIPLIER * FEEDBACK_COOLDOWN_MULTIPLIER
+        );
+        // Monotonic non-decreasing and never above the cap, even for a huge streak.
+        let mut prev = 0;
+        for streak in 0..40 {
+            let secs = feedback_cooldown_secs(streak);
+            assert!(secs >= prev, "cooldown must not decrease as the streak grows");
+            assert!(secs <= FEEDBACK_COOLDOWN_CAP_SECS, "cooldown must respect the cap");
+            prev = secs;
+        }
+        assert_eq!(feedback_cooldown_secs(40), FEEDBACK_COOLDOWN_CAP_SECS);
+    }
+
+    #[test]
+    fn feedback_acceptance_lower_bound_is_honest_and_suppression_tracks_cooldown() {
+        let mut state = state_fixture(RoutineLifecycle::Candidate);
+        // No trials yet -> unknown, never a forced zero.
+        assert_eq!(feedback_acceptance_lower_bound(&state), None);
+        assert!(!feedback_suppressed(&state, 1_000));
+
+        // One decline: Wilson lower bound of 0/1 is 0 (honestly suppressive),
+        // and the cooldown window makes the routine suppressed inside it.
+        state.decline_count = 1;
+        state.cooldown_until_ts_ns = Some(10_000);
+        let lb = feedback_acceptance_lower_bound(&state).expect("trials exist");
+        assert!(lb.abs() < 1e-9, "0/1 accepts -> ~0 lower bound, got {lb}");
+        assert!(feedback_suppressed(&state, 9_999), "before deadline -> suppressed");
+        assert!(!feedback_suppressed(&state, 10_000), "at deadline -> not suppressed");
+
+        // Accepts recover: the lower bound rises monotonically with successes.
+        let lb_1_of_2 = {
+            let mut s = state.clone();
+            s.accept_count = 1;
+            feedback_acceptance_lower_bound(&s).unwrap()
+        };
+        let lb_5_of_6 = {
+            let mut s = state.clone();
+            s.accept_count = 5;
+            s.decline_count = 1;
+            feedback_acceptance_lower_bound(&s).unwrap()
+        };
+        assert!(lb_5_of_6 > lb_1_of_2, "more accepts -> higher acceptance bound");
+        assert!(lb_1_of_2 > lb, "any accept lifts the bound off zero");
     }
 
     #[test]

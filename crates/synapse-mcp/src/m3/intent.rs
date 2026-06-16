@@ -215,12 +215,15 @@ fn decode_routine_row(key: &[u8], value: &[u8]) -> Result<RoutineRecord, ErrorDa
             ),
         )
     })?;
-    if record.record_version != ROUTINE_RECORD_VERSION {
+    // Forward-compatible read: accept any version this binary or an older one
+    // wrote (newer fields fill from serde defaults); reject only rows written
+    // by a NEWER binary, whose unknown fields we cannot honor.
+    if record.record_version > ROUTINE_RECORD_VERSION {
         return Err(mcp_error(
             error_codes::STORAGE_CORRUPTED,
             format!(
-                "ROUTINE_VERSION_UNSUPPORTED in CF_ROUTINES at {routine_id}: record_version {} \
-                 (this binary supports {ROUTINE_RECORD_VERSION})",
+                "ROUTINE_VERSION_UNSUPPORTED in CF_ROUTINES at {routine_id}: record_version {} is \
+                 newer than this binary supports ({ROUTINE_RECORD_VERSION}); upgrade the daemon",
                 record.record_version
             ),
         ));
@@ -256,12 +259,16 @@ fn decode_state_row(key: &[u8], value: &[u8]) -> Result<RoutineStateRecord, Erro
             format!("ROUTINE_STATE_ROW_DECODE_FAILED in CF_ROUTINE_STATE at {routine_id}: {error}"),
         )
     })?;
-    if record.record_version != ROUTINE_STATE_RECORD_VERSION {
+    // Forward-compatible read (see decode_routine_row): old rows deserialize via
+    // serde defaults and upgrade in place on next write; only NEWER-than-known
+    // rows are the loud refusal.
+    if record.record_version > ROUTINE_STATE_RECORD_VERSION {
         return Err(mcp_error(
             error_codes::STORAGE_CORRUPTED,
             format!(
                 "ROUTINE_STATE_VERSION_UNSUPPORTED in CF_ROUTINE_STATE at {routine_id}: \
-                 record_version {} (this binary supports {ROUTINE_STATE_RECORD_VERSION})",
+                 record_version {} is newer than this binary supports \
+                 ({ROUTINE_STATE_RECORD_VERSION}); upgrade the daemon",
                 record.record_version
             ),
         ));

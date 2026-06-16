@@ -5,7 +5,16 @@ use serde::{Deserialize, Serialize};
 pub const ROUTINE_RECORD_VERSION: u32 = 1;
 
 /// Envelope schema version for [`RoutineStateRecord`] rows.
-pub const ROUTINE_STATE_RECORD_VERSION: u32 = 1;
+///
+/// v2 (#856) added the suggestion-feedback fields (`feedback_events`, the
+/// per-outcome counters, `consecutive_declines`, `cooldown_*`). They are all
+/// `#[serde(default)]`, so v1 rows written before #856 deserialize cleanly as
+/// "no feedback yet"; the next `routine_feedback`/`routine_update`/re-mine
+/// write upgrades the row to v2 in place.
+pub const ROUTINE_STATE_RECORD_VERSION: u32 = 2;
+
+/// Newest-last cap on [`RoutineStateRecord::feedback_events`].
+pub const ROUTINE_STATE_MAX_FEEDBACK_EVENTS: usize = 200;
 
 /// Newest-last cap on [`RoutineStateRecord::transitions`]. Overflow drops the
 /// oldest entry and increments `transitions_truncated` so the loss is visible.
@@ -183,6 +192,38 @@ pub struct RoutineConfidencePoint {
     pub opportunity_days: u32,
 }
 
+/// How a surfaced suggestion for a routine resolved (#856). Folded into the
+/// routine's effective confidence and its escalating decline cooldown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineFeedbackOutcome {
+    /// Operator accepted the suggestion (success). Resets the decline streak
+    /// and clears the cooldown.
+    Accepted,
+    /// Operator explicitly declined (failure). Escalates the cooldown.
+    Declined,
+    /// The suggestion expired unanswered (soft failure). Escalates the
+    /// cooldown like a decline but is tracked separately.
+    IgnoredTimeout,
+    /// The routine start was abandoned before the suggestion resolved
+    /// (`INTENT_ABANDONED`): the operator diverged, so this is recorded for
+    /// provenance but is NOT a judgement on the suggestion and never suppresses.
+    Abandoned,
+}
+
+/// One recorded suggestion outcome for a routine (#856), append-only,
+/// newest last, capped at [`ROUTINE_STATE_MAX_FEEDBACK_EVENTS`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineFeedbackEvent {
+    pub ts_ns: u64,
+    pub outcome: RoutineFeedbackOutcome,
+    /// Who recorded it: an MCP session id, `"stdio"`, or an engine actor.
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// Durable operator state for one routine, persisted in `CF_ROUTINE_STATE`
 /// (#849), keyed by the routine's stable deterministic id.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -212,4 +253,35 @@ pub struct RoutineStateRecord {
     pub confidence_history: Vec<RoutineConfidencePoint>,
     /// Oldest entries dropped from `confidence_history` after the cap.
     pub confidence_history_truncated: u64,
+    /// Suggestion outcomes (#856), newest last, capped at
+    /// [`ROUTINE_STATE_MAX_FEEDBACK_EVENTS`]. Defaulted on v1 rows.
+    #[serde(default)]
+    pub feedback_events: Vec<RoutineFeedbackEvent>,
+    /// Oldest entries dropped from `feedback_events` after the cap.
+    #[serde(default)]
+    pub feedback_events_truncated: u64,
+    /// Lifetime count of `accepted` outcomes (the Wilson success count).
+    #[serde(default)]
+    pub accept_count: u32,
+    /// Lifetime count of `declined` outcomes.
+    #[serde(default)]
+    pub decline_count: u32,
+    /// Lifetime count of `ignored_timeout` outcomes.
+    #[serde(default)]
+    pub ignore_count: u32,
+    /// Lifetime count of `abandoned` outcomes (provenance only).
+    #[serde(default)]
+    pub abandon_count: u32,
+    /// Consecutive non-accept outcomes (`declined` / `ignored_timeout`) since
+    /// the last accept. Drives the escalating cooldown; reset to 0 on accept.
+    #[serde(default)]
+    pub consecutive_declines: u32,
+    /// Current cooldown escalation level (== `consecutive_declines` at the time
+    /// the cooldown was last set; kept explicit for auditability).
+    #[serde(default)]
+    pub cooldown_level: u32,
+    /// Wall-clock instant before which the suggestion engine must NOT surface
+    /// this routine. `None` once an accept clears it or no decline has set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_until_ts_ns: Option<u64>,
 }
