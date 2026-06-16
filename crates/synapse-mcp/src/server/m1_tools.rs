@@ -3,17 +3,17 @@ use super::{
     CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse,
-    CdpOpenTabParams, CdpOpenTabResponse,
-    CdpTargetInfoParams, CdpTargetInfoResponse, CdpTargetOwner, ErrorData, FindParams,
-    FindResponse, Health, HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse,
-    HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters, ReadTextParams, SessionTarget,
-    SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
-    SetPerceptionModeResponse, SetTargetParam, SetTargetParams, SynapseService, TargetResponse,
-    TargetWire, WindowListEntry, WindowListParams, WindowListResponse, empty_input_schema,
-    mcp_error, observe_include, observe_input, populate_audio_summary, populate_clipboard_summary,
-    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
-    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
-    set_target_input_schema, tool, tool_router,
+    CdpOpenTabParams, CdpOpenTabResponse, CdpTargetInfoParams, CdpTargetInfoResponse,
+    CdpTargetOwner, ErrorData, FindParams, FindResponse, Health, HiddenDesktopPipFrameParams,
+    HiddenDesktopPipFrameResponse, HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters,
+    ReadTextParams, SessionTarget, SetCaptureTargetParams, SetCaptureTargetResponse,
+    SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam, SetTargetParams,
+    SynapseService, TargetResponse, TargetWire, WindowListEntry, WindowListParams,
+    WindowListResponse, empty_input_schema, mcp_error, observe_include, observe_input,
+    populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
+    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
+    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
+    tool_router,
 };
 use crate::m1::{
     ClipboardTimelineSample, FsTimelineEvent, effective_ocr_backend,
@@ -2727,18 +2727,21 @@ impl SynapseService {
             });
         }
 
-        let activated =
-            crate::chrome_debugger_bridge::activate_tab(window_hwnd, cdp_target_id, wait_timeout_ms)
-                .await
-                .map_err(|error| {
-                    mcp_error(
-                        error.code(),
-                        format!(
-                            "cdp_activate_tab Chrome bridge chrome.tabs.update({{active:true}}) failed: {}",
-                            error.detail()
-                        ),
-                    )
-                })?;
+        let activated = crate::chrome_debugger_bridge::activate_tab(
+            window_hwnd,
+            cdp_target_id,
+            wait_timeout_ms,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "cdp_activate_tab Chrome bridge chrome.tabs.update({{active:true}}) failed: {}",
+                    error.detail()
+                ),
+            )
+        })?;
         let endpoint = activated
             .extension_id
             .as_deref()

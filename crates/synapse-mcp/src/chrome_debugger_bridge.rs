@@ -38,8 +38,7 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
     "4a5c0307cda4d2812e054977fc703c558ebc27c2d31c99cb1bcfbbe788a026da";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[

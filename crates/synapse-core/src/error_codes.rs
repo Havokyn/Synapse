@@ -201,11 +201,8 @@ pub const SAFETY_KILLSWITCH_ACTIVE: &str = "SAFETY_KILLSWITCH_ACTIVE";
 pub const SAFETY_PROCESS_DENYLISTED: &str = "SAFETY_PROCESS_DENYLISTED";
 pub const SAFETY_SHELL_DENIED_BY_POLICY: &str = "SAFETY_SHELL_DENIED_BY_POLICY";
 /// `act_run_shell`/`act_run_shell_start` command performs global OS input
-/// (e.g. SendKeys/SendInput/keybd_event/mouse_event/SetForegroundWindow), which
-/// bypasses the foreground input lease and lands on the human operator's
-/// foreground window — the exact background-first violation tracked by #717.
-/// Fail closed; use the lease-gated `act_press`/`act_type`/`act_stroke`
-/// primitives or `cdp_activate_tab` instead (#1204).
+/// (for example SendKeys/SendInput/keybd_event/mouse_event/SetForegroundWindow),
+/// bypassing Synapse's foreground input lease and acting on the human foreground.
 pub const SAFETY_SHELL_GLOBAL_INPUT_DENIED: &str = "SAFETY_SHELL_GLOBAL_INPUT_DENIED";
 pub const SAFETY_LAUNCH_DENIED_BY_POLICY: &str = "SAFETY_LAUNCH_DENIED_BY_POLICY";
 pub const SAFETY_SECRET_REDACTED: &str = "SAFETY_SECRET_REDACTED";

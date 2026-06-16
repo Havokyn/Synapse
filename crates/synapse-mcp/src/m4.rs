@@ -3615,13 +3615,13 @@ fn validate_run_shell_params(params: &ActRunShellParams) -> Result<(), ErrorData
     if let Some(marker) = detect_shell_global_input(&shell_command_line(params)) {
         return Err(shell_tool_error(
             error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED,
-            "act_run_shell command performs global OS keyboard/mouse/foreground input, which bypasses the foreground input lease and lands on the human operator's foreground window (the #717 background-first violation); use the lease-gated act_press/act_type/act_stroke primitives for input, or cdp_activate_tab to select a browser tab, instead of injecting input through a shell",
+            "act_run_shell command performs global OS keyboard/mouse/foreground input, which bypasses the foreground input lease and lands on the human operator's foreground window; use Synapse's lease-gated action primitives or a background target-specific tool instead of injecting input through a shell",
             json!({
                 "code": error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED,
                 "matched_marker": marker,
                 "reason": "global_input_via_shell_denied",
                 "command": params.command,
-                "remediation": "act_press|act_type|act_stroke (lease-gated) for input, or cdp_activate_tab for browser-tab selection",
+                "remediation": "use lease-gated act_press/act_type/act_stroke for input or a target-specific background browser tool for tab/window selection",
             }),
         ));
     }
@@ -9007,11 +9007,8 @@ fn shell_command_line(params: &ActRunShellParams) -> String {
 }
 
 /// Distinctive substrings of global OS input / foreground-seizing APIs that a
-/// shell command must not invoke. These are session-unscoped Win32/.NET/COM
-/// calls that bypass Synapse's foreground input lease and act on the human
-/// operator's foreground window — exactly the contention #717 eliminates
-/// (#1204). The names are specific enough that they do not appear in ordinary
-/// build/test/deploy commands.
+/// shell command must not invoke. These calls bypass Synapse's lease and act on
+/// the human operator's foreground window (#717/#1204).
 const SHELL_GLOBAL_INPUT_MARKERS: &[&str] = &[
     "sendkeys",
     "sendwait",
@@ -10374,10 +10371,10 @@ mod tests {
         );
     }
 
-    // Regression for #1204: the exact SendKeys command an agent used to activate
-    // a background Chrome tab — which landed on the human's foreground window —
-    // must be rejected by authorize_run_shell, even though shell_config_for
-    // allowlists the precise command line (the guard runs before the allowlist).
+    // Regression for #1204: the witnessed SendKeys command used shell-based
+    // global input to select a background Chrome tab, which landed on the human
+    // foreground window. It must be denied before the allowlist check can permit
+    // the exact command line.
     #[test]
     fn run_shell_rejects_global_sendkeys_input() {
         let params = shell_params(
@@ -10391,10 +10388,18 @@ mod tests {
         );
         let error = authorize_run_shell(&shell_config_for(&params), &params)
             .expect_err("a SendKeys global-input command must be denied");
+
         assert_eq!(
             error.data.as_ref().and_then(|data| data.get("code")),
-            Some(&json!(error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED)),
-            "global-input shell command must fail with SAFETY_SHELL_GLOBAL_INPUT_DENIED"
+            Some(&json!(error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED))
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("matched_marker"))
+                .and_then(|marker| marker.as_str()),
+            Some("sendkeys")
         );
     }
 
@@ -10414,6 +10419,7 @@ mod tests {
             let params = shell_params("powershell", vec!["-Command", snippet], 5_000);
             let error = authorize_run_shell(&shell_config_for(&params), &params)
                 .expect_err("global-input snippet must be denied");
+
             assert_eq!(
                 error.data.as_ref().and_then(|data| data.get("code")),
                 Some(&json!(error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED)),
@@ -10424,12 +10430,11 @@ mod tests {
 
     #[test]
     fn run_shell_allows_ordinary_commands_without_global_input() {
-        // Benign build/test/deploy commands must not trip the guard.
         for params in [
             shell_params("cmd.exe", vec!["/c", "echo hello"], 5_000),
             shell_params("powershell", vec!["-Command", "Get-Process chrome"], 5_000),
             shell_params("git", vec!["status", "--short"], 5_000),
-            shell_params("cargo", vec!["build", "--release"], 5_000),
+            shell_params("cargo", vec!["check", "-p", "synapse-core"], 5_000),
         ] {
             assert!(
                 detect_shell_global_input(&shell_command_line(&params)).is_none(),
