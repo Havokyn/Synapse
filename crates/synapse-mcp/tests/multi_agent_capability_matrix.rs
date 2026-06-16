@@ -7,95 +7,16 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 const TOOL_PROFILES_SOURCE: &str = include_str!("../src/server/tool_profiles.rs");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 87] = [
-    "act_click",
-    "act_clipboard",
-    "act_combo",
-    "act_focus_window",
-    "act_keymap",
-    "act_launch",
-    "act_pad",
-    "act_press",
-    "act_run_shell",
-    "act_run_shell_cancel",
-    "act_run_shell_start",
-    "act_run_shell_status",
-    "act_scroll",
-    "act_set_field_text",
-    "act_set_value",
-    "act_spawn_agent",
-    "act_stroke",
-    "act_type",
-    "action_diagnostic_queue_full_setup",
-    "action_diagnostic_rate_limit_override",
-    "agent_cost",
-    "agent_cost_price_delete",
-    "agent_cost_price_list",
-    "agent_cost_price_put",
-    "agent_inbox",
-    "agent_interrupt",
-    "agent_kill",
-    "agent_pause",
-    "agent_query",
-    "agent_receipts",
-    "agent_respawn",
-    "agent_resume",
-    "agent_send",
-    "agent_send_broadcast",
-    "agent_stats",
-    "agent_steer",
-    "agent_template_delete",
-    "agent_template_get",
-    "agent_template_list",
-    "agent_template_put",
-    "agent_wait",
-    "audio_tail",
-    "audio_transcribe",
-    "capture_screenshot",
-    "cdp_bridge_reload",
-    "cdp_close_tab",
-    "cdp_navigate_tab",
-    "cdp_open_tab",
-    "cdp_target_info",
-    "clear_target",
-    "control_lease_acquire",
-    "control_lease_handoff",
-    "control_lease_release",
-    "control_lease_status",
-    "find",
-    "fleet_stop",
-    "get_target",
-    "hidden_desktop_pip_frame",
-    "observe",
-    "observe_delta",
-    "read_text",
-    "reality_audit",
-    "reality_baseline",
-    "reflex_cancel",
-    "reflex_history",
-    "reflex_list",
-    "reflex_register",
-    "release_all",
-    "session_list",
-    "session_status",
-    "set_capture_target",
-    "set_perception_mode",
-    "set_target",
-    "subscribe",
-    "subscribe_cancel",
-    "target_act",
-    "target_claim",
-    "target_claim_adopt",
-    "target_claim_status",
-    "target_release",
-    "tool_profile_set",
-    "tool_profile_status",
-    "window_list",
-    "workspace_get",
-    "workspace_list",
-    "workspace_put",
-    "workspace_subscribe",
-];
+// The set of action/perception tools the matrix must cover is DERIVED from the
+// real built tool surface at run time (the same surface `m4_tools_list`
+// snapshots), filtered to matrix scope by `is_matrix_scope_tool`. There is
+// deliberately NO hardcoded `EXPECTED_MATRIX_TOOLS` array/count literal: a
+// hand-maintained third copy of the surface was the single highest-friction
+// recurring merge-conflict source (#1062) and a silent count-drift class
+// (#953/#960/#963). Adding or removing a matrix-scope tool now updates exactly
+// two places — the doc tables in this file's sibling markdown (whose row
+// completeness this test enforces against the live surface) and the
+// `m4_tools_list` insta snapshot — never a magic `[&str; N]` array. See #1062.
 
 const ALLOWED_STATUS: [&str; 7] = [
     "background-pass",
@@ -135,27 +56,9 @@ struct ExposureRow {
 
 #[tokio::test]
 async fn multi_agent_capability_matrix_covers_action_perception_surface() -> anyhow::Result<()> {
-    let rows = parse_matrix(MATRIX_DOC)?;
-    let by_tool = rows_by_tool(&rows)?;
-    let exposure_rows = parse_exposure_overlay(MATRIX_DOC)?;
-    let exposure_by_tool = exposure_rows_by_tool(&exposure_rows)?;
-    let expected_tools = expected_tool_set();
-    let matrix_tools = by_tool.keys().cloned().collect::<BTreeSet<_>>();
-    ensure!(
-        matrix_tools == expected_tools,
-        "matrix tool set drift: missing={:?} extra={:?}",
-        expected_tools.difference(&matrix_tools).collect::<Vec<_>>(),
-        matrix_tools.difference(&expected_tools).collect::<Vec<_>>()
-    );
-
-    for row in &rows {
-        assert_row_complete(row)?;
-    }
-    for row in &exposure_rows {
-        assert_exposure_row_complete(row)?;
-    }
-    assert_exposure_overlay_matches_policy(&exposure_by_tool, &expected_tools)?;
-
+    // Source of truth: the real built tool surface. Launch the wired client with
+    // the full surface enabled, then derive the matrix-scope set from it instead
+    // of from a hand-maintained literal (#1062).
     let mut client = StdioMcpClient::launch_and_init_with_env(
         None,
         &[
@@ -169,17 +72,31 @@ async fn multi_agent_capability_matrix_covers_action_perception_surface() -> any
         .get("tools")
         .and_then(Value::as_array)
         .context("tools array missing")?;
-    let listed_matrix_scope = listed_matrix_scope_tools(tools)?;
+    let expected_tools = listed_matrix_scope_tools(tools)?;
     ensure!(
-        listed_matrix_scope == expected_tools,
-        "tools/list matrix-scope drift: missing={:?} extra={:?}",
-        expected_tools
-            .difference(&listed_matrix_scope)
-            .collect::<Vec<_>>(),
-        listed_matrix_scope
-            .difference(&expected_tools)
-            .collect::<Vec<_>>()
+        !expected_tools.is_empty(),
+        "live tool surface produced no matrix-scope tools — scope filter or surface is broken"
     );
+
+    let rows = parse_matrix(MATRIX_DOC)?;
+    let by_tool = rows_by_tool(&rows)?;
+    let exposure_rows = parse_exposure_overlay(MATRIX_DOC)?;
+    let exposure_by_tool = exposure_rows_by_tool(&exposure_rows)?;
+    let matrix_tools = by_tool.keys().cloned().collect::<BTreeSet<_>>();
+    ensure!(
+        matrix_tools == expected_tools,
+        "capability matrix doc drift vs live surface: missing rows for={:?} stale rows for={:?}",
+        expected_tools.difference(&matrix_tools).collect::<Vec<_>>(),
+        matrix_tools.difference(&expected_tools).collect::<Vec<_>>()
+    );
+
+    for row in &rows {
+        assert_row_complete(row)?;
+    }
+    for row in &exposure_rows {
+        assert_exposure_row_complete(row)?;
+    }
+    assert_exposure_overlay_matches_policy(&exposure_by_tool, &expected_tools)?;
 
     let status = client.shutdown().await?;
     assert!(status.success());
@@ -659,12 +576,4 @@ fn is_matrix_scope_tool(name: &str) -> bool {
                 | "subscribe_cancel"
                 | "window_list"
         )
-}
-
-fn expected_tool_set() -> BTreeSet<String> {
-    EXPECTED_MATRIX_TOOLS
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .collect()
 }
