@@ -200,9 +200,12 @@ pub const NOTIFY_WORKER_FAILED: &str = "NOTIFY_WORKER_FAILED";
 pub const SAFETY_KILLSWITCH_ACTIVE: &str = "SAFETY_KILLSWITCH_ACTIVE";
 pub const SAFETY_PROCESS_DENYLISTED: &str = "SAFETY_PROCESS_DENYLISTED";
 pub const SAFETY_SHELL_DENIED_BY_POLICY: &str = "SAFETY_SHELL_DENIED_BY_POLICY";
-/// `act_run_shell`/`act_run_shell_start` command performs global OS input
-/// (for example SendKeys/SendInput/keybd_event/mouse_event/SetForegroundWindow),
-/// bypassing Synapse's foreground input lease and acting on the human foreground.
+/// Shell command requested global OS input.
+///
+/// Applies to `act_run_shell`/`act_run_shell_start` commands containing markers
+/// such as `SendKeys`, `SendInput`, `keybd_event`, `mouse_event`, or
+/// `SetForegroundWindow`, which bypass Synapse's foreground input lease and act
+/// on the human foreground.
 pub const SAFETY_SHELL_GLOBAL_INPUT_DENIED: &str = "SAFETY_SHELL_GLOBAL_INPUT_DENIED";
 pub const SAFETY_LAUNCH_DENIED_BY_POLICY: &str = "SAFETY_LAUNCH_DENIED_BY_POLICY";
 pub const SAFETY_SECRET_REDACTED: &str = "SAFETY_SECRET_REDACTED";
