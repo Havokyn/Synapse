@@ -31,11 +31,9 @@ use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    http::auth::{self, HttpAuth},
     http::session,
     http::sse::{self, SseState},
-    http::{
-        auth::{self, HttpAuth},
-    },
     m2::M2ServiceConfig,
     m3::M3ServiceConfig,
     m4::M4ServiceConfig,
@@ -316,7 +314,7 @@ pub(super) async fn serve(
     )
     .context("spawn periodic ambient agent discovery")?;
 
-    let _operator_hotkey_guard = crate::safety::install_operator_hotkey(service.m3_state_handle())
+    let _operator_hotkey_guard = crate::safety::install_operator_hotkey(service.clone())
         .context("install operator panic hotkey")?;
     let m2_emitter_done = service.m2_emitter_done_receiver();
     let runtime = router(&shutdown_cancel, local_addr, sse_state, service)
@@ -573,7 +571,9 @@ fn router(
             "/dashboard/templates",
             get(dashboard_template_list)
                 .post(dashboard_template_upsert)
-                .layer(DefaultBodyLimit::max(DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES)),
+                .layer(DefaultBodyLimit::max(
+                    DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES,
+                )),
         )
         .route(
             "/dashboard/templates/{template_id}",
@@ -1950,7 +1950,6 @@ async fn dashboard_asset(
     }
 }
 
-
 async fn dashboard_saved_views(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
@@ -3306,7 +3305,6 @@ fn trim_optional_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
-
 
 fn dashboard_error_response(
     status: StatusCode,

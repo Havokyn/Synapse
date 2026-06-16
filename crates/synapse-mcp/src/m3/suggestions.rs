@@ -240,12 +240,14 @@ pub fn gate_decision(
         return GateOutcome::DuplicateLive;
     }
     if let Some(last) = aggregates.last_created_by_routine.get(routine_id) {
-        if now_ns.saturating_sub(*last) < config.per_routine_window_secs.saturating_mul(1_000_000_000)
+        if now_ns.saturating_sub(*last)
+            < config.per_routine_window_secs.saturating_mul(1_000_000_000)
         {
             return GateOutcome::PerRoutineCap;
         }
     }
-    let window_floor = now_ns.saturating_sub(config.global_window_secs.saturating_mul(1_000_000_000));
+    let window_floor =
+        now_ns.saturating_sub(config.global_window_secs.saturating_mul(1_000_000_000));
     let global_count = aggregates
         .created_ts
         .iter()
@@ -364,14 +366,20 @@ fn write_suggestion(db: &Arc<Db>, record: &SuggestionRecord) -> Result<(), Error
     let value = encode_json(record).map_err(|error| {
         mcp_error(
             error_codes::STORAGE_WRITE_FAILED,
-            format!("failed to encode suggestion {}: {error}", record.suggestion_id),
+            format!(
+                "failed to encode suggestion {}: {error}",
+                record.suggestion_id
+            ),
         )
     })?;
     db.put_batch_pressure_bypass(cf::CF_KV, [(key.clone(), value)])
         .map_err(|error| {
             mcp_error(
                 error_codes::STORAGE_WRITE_FAILED,
-                format!("failed to persist suggestion {}: {error}", record.suggestion_id),
+                format!(
+                    "failed to persist suggestion {}: {error}",
+                    record.suggestion_id
+                ),
             )
         })?;
     // Read-your-write against the physical row.
@@ -675,22 +683,58 @@ mod tests {
         let c = config();
         // Below threshold.
         assert_eq!(
-            gate_decision("rt1-a", 0.59, RoutineLifecycle::Confirmed, false, T, Some(600), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.59,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                Some(600),
+                &agg,
+                &c
+            ),
             GateOutcome::BelowThreshold
         );
         // Disabled routine never surfaces, even at high confidence.
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Disabled, false, T, Some(600), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Disabled,
+                false,
+                T,
+                Some(600),
+                &agg,
+                &c
+            ),
             GateOutcome::DisabledRoutine
         );
         // Feedback cooldown suppresses.
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, true, T, Some(600), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                true,
+                T,
+                Some(600),
+                &agg,
+                &c
+            ),
             GateOutcome::SuppressedCooldown
         );
         // Clean pass.
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, Some(600), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                Some(600),
+                &agg,
+                &c
+            ),
             GateOutcome::Surface
         );
     }
@@ -702,7 +746,16 @@ mod tests {
         let mut agg = SuggestionAggregates::default();
         agg.live_routines.insert("rt1-a".to_owned());
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                None,
+                &agg,
+                &c
+            ),
             GateOutcome::DuplicateLive
         );
         // Recent (non-live) suggestion for the routine within the window -> cap.
@@ -710,7 +763,16 @@ mod tests {
         agg.last_created_by_routine
             .insert("rt1-a".to_owned(), T - 1_000_000_000); // 1s ago, window 4h
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                None,
+                &agg,
+                &c
+            ),
             GateOutcome::PerRoutineCap
         );
         // Outside the per-routine window -> allowed (only global applies).
@@ -718,7 +780,16 @@ mod tests {
         agg.last_created_by_routine
             .insert("rt1-a".to_owned(), T - 20_000 * 1_000_000_000); // >4h ago
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                None,
+                &agg,
+                &c
+            ),
             GateOutcome::Surface
         );
         // Global cap: 3 created within the window -> next is blocked.
@@ -727,7 +798,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            gate_decision("rt1-b", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
+            gate_decision(
+                "rt1-b",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                None,
+                &agg,
+                &c
+            ),
             GateOutcome::GlobalCap
         );
         // Old creations fall out of the window -> allowed again.
@@ -736,7 +816,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            gate_decision("rt1-b", 0.99, RoutineLifecycle::Confirmed, false, T, None, &agg, &c),
+            gate_decision(
+                "rt1-b",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                None,
+                &agg,
+                &c
+            ),
             GateOutcome::Surface
         );
     }
@@ -748,17 +837,44 @@ mod tests {
         let agg = SuggestionAggregates::default();
         // 23:00 -> quiet.
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, Some(1380), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                Some(1380),
+                &agg,
+                &c
+            ),
             GateOutcome::QuietHours
         );
         // 03:00 -> quiet (wrap).
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, Some(180), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                Some(180),
+                &agg,
+                &c
+            ),
             GateOutcome::QuietHours
         );
         // 12:00 -> awake.
         assert_eq!(
-            gate_decision("rt1-a", 0.99, RoutineLifecycle::Confirmed, false, T, Some(720), &agg, &c),
+            gate_decision(
+                "rt1-a",
+                0.99,
+                RoutineLifecycle::Confirmed,
+                false,
+                T,
+                Some(720),
+                &agg,
+                &c
+            ),
             GateOutcome::Surface
         );
     }

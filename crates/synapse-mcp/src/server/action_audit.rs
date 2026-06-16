@@ -591,8 +591,12 @@ mod tests {
 
     #[test]
     fn detail_required_foreground_reads_direct_flag_and_tier_attempts() {
-        assert!(detail_required_foreground(&json!({ "required_foreground": true })));
-        assert!(!detail_required_foreground(&json!({ "required_foreground": false })));
+        assert!(detail_required_foreground(
+            &json!({ "required_foreground": true })
+        ));
+        assert!(!detail_required_foreground(
+            &json!({ "required_foreground": false })
+        ));
         assert!(!detail_required_foreground(&json!({})));
         // any foreground-requiring tier attempt makes the whole action foreground-tier
         assert!(detail_required_foreground(&json!({

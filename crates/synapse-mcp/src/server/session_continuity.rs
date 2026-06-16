@@ -34,7 +34,7 @@ struct PersistedSessionLease {
     expires_at_unix_ms: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ContinuityCleanupReadback {
     pub target_row_existed_before: bool,
     pub target_row_exists_after: bool,
@@ -44,14 +44,14 @@ pub(crate) struct ContinuityCleanupReadback {
     pub lease_row_deleted: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct LeaseContinuityCleanupReadback {
     pub row_existed_before: bool,
     pub row_exists_after: bool,
     pub row_deleted: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct LeaseHandoffContinuityReadback {
     pub from_row_existed_before: bool,
     pub from_row_exists_after: bool,

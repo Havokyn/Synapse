@@ -1,12 +1,15 @@
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use synapse_action::{
     ActionError, OperatorHotkeyGuard, OperatorHotkeyStatus, RELEASE_ALL_HANDLE,
     set_operator_hotkey_status,
 };
 use synapse_core::error_codes;
+use tokio::runtime::Handle;
 
 use crate::m3::SharedM3State;
+use crate::server::SynapseService;
 
 pub const DISABLE_OPERATOR_HOTKEY_ENV: &str = "SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY";
 /// When set truthy, a failure to register the operator panic hotkey aborts
@@ -16,26 +19,41 @@ pub const DISABLE_OPERATOR_HOTKEY_ENV: &str = "SYNAPSE_MCP_DISABLE_OPERATOR_HOTK
 pub const REQUIRE_OPERATOR_HOTKEY_ENV: &str = "SYNAPSE_MCP_REQUIRE_OPERATOR_HOTKEY";
 
 /// Operator-facing remediation for an unavailable panic hotkey.
-const OPERATOR_HOTKEY_REMEDIATION: &str = "another process already owns Ctrl+Alt+Shift+P (most often a leaked or duplicate synapse-mcp instance); stop the other instance to arm the kill-switch, set SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY=1 to run intentionally without it, or set SYNAPSE_MCP_REQUIRE_OPERATOR_HOTKEY=1 to make this a hard startup failure";
+const OPERATOR_HOTKEY_REMEDIATION: &str = "the daemon-owned operator hotkey could not be armed; stop duplicate synapse-mcp instances or conflicting hook owners, set SYNAPSE_MCP_DISABLE_OPERATOR_HOTKEY=1 to run intentionally without it, set SYNAPSE_MCP_REQUIRE_OPERATOR_HOTKEY=1 to make this a hard startup failure, or set SYNAPSE_OPERATOR_HOTKEY / SYNAPSE_MCP_OPERATOR_HOTKEY to another Ctrl+Alt+Shift+<A-Z|0-9> chord";
 const OPERATOR_RELEASE_ALL_TIMEOUT: Duration = Duration::from_millis(50);
 
-#[derive(Debug)]
-struct DisableReport {
-    result: &'static str,
-    disabled_ids: Vec<String>,
-    error_code: Option<&'static str>,
-    detail: Option<String>,
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DisableReport {
+    pub(crate) result: &'static str,
+    pub(crate) disabled_ids: Vec<String>,
+    pub(crate) error_code: Option<&'static str>,
+    pub(crate) detail: Option<String>,
 }
 
-#[derive(Debug)]
-struct ReleaseAllReport {
-    result: &'static str,
-    error_code: Option<&'static str>,
-    detail: Option<String>,
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseAllReport {
+    pub(crate) result: &'static str,
+    pub(crate) error_code: Option<&'static str>,
+    pub(crate) detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OperatorHotkeyImmediateReport {
+    pub hotkey: &'static str,
+    pub lease_before: synapse_action::LeaseStatus,
+    pub preempted_lease: Option<synapse_action::LeaseStatus>,
+    pub lease_after_preempt: synapse_action::LeaseStatus,
+    pub disable_report: DisableReport,
+    pub release_all_report: ReleaseAllReport,
+    pub elapsed_ms: u128,
+    pub within_budget: bool,
 }
 
 pub fn install_operator_hotkey(
-    m3_state: SharedM3State,
+    service: SynapseService,
 ) -> synapse_action::ActionResult<Option<OperatorHotkeyGuard>> {
     if operator_hotkey_disabled_by_env()? {
         tracing::warn!(
@@ -46,7 +64,11 @@ pub fn install_operator_hotkey(
         set_operator_hotkey_status(OperatorHotkeyStatus::DisabledByEnv);
         return Ok(None);
     }
-    match synapse_action::install_operator_hotkey(move || handle_operator_hotkey(&m3_state)) {
+    let m3_state = service.m3_state_handle();
+    let runtime = Handle::current();
+    match synapse_action::install_operator_hotkey(move || {
+        handle_operator_hotkey(&service, &m3_state, &runtime);
+    }) {
         Ok(guard) => {
             set_operator_hotkey_status(OperatorHotkeyStatus::Registered);
             Ok(Some(guard))
@@ -65,7 +87,7 @@ pub fn install_operator_hotkey(
             tracing::error!(
                 code = error_codes::ACTION_BACKEND_UNAVAILABLE,
                 component = "operator_hotkey",
-                hotkey = "ctrl+alt+shift+p",
+                hotkey = synapse_action::hotkey::DEFAULT_OPERATOR_HOTKEY,
                 status = OperatorHotkeyStatus::Unavailable.label(),
                 error = %error,
                 remediation = OPERATOR_HOTKEY_REMEDIATION,
@@ -100,15 +122,27 @@ fn parse_bool_env(name: &str) -> synapse_action::ActionResult<bool> {
     }
 }
 
-fn handle_operator_hotkey(m3_state: &SharedM3State) {
+fn handle_operator_hotkey(service: &SynapseService, m3_state: &SharedM3State, runtime: &Handle) {
     let started = Instant::now();
+    let lease_before = synapse_action::lease::status();
     let preempted_lease = synapse_action::force_preempt_input_lease("operator_hotkey");
     let disable_report = disable_reflexes(m3_state);
     let release_all_report = fire_release_all();
     let elapsed = started.elapsed();
+    let lease_after_preempt = synapse_action::lease::status();
+    let immediate = OperatorHotkeyImmediateReport {
+        hotkey: synapse_action::hotkey::DEFAULT_OPERATOR_HOTKEY,
+        lease_before,
+        preempted_lease: preempted_lease.clone(),
+        lease_after_preempt,
+        disable_report: disable_report.clone(),
+        release_all_report: release_all_report.clone(),
+        elapsed_ms: elapsed.as_millis(),
+        within_budget: elapsed <= OPERATOR_RELEASE_ALL_TIMEOUT,
+    };
     tracing::warn!(
         code = error_codes::SAFETY_OPERATOR_HOTKEY_FIRED,
-        hotkey = "ctrl+alt+shift+p",
+        hotkey = immediate.hotkey,
         input_lease_preempted = preempted_lease.is_some(),
         input_lease_prior_owner = ?preempted_lease
             .as_ref()
@@ -123,10 +157,25 @@ fn handle_operator_hotkey(m3_state: &SharedM3State) {
         release_all_result = release_all_report.result,
         release_all_error_code = ?release_all_report.error_code,
         release_all_detail = ?release_all_report.detail,
-        elapsed_ms = elapsed.as_millis(),
-        within_budget = elapsed <= OPERATOR_RELEASE_ALL_TIMEOUT,
-        "operator hotkey fired release_all and disabled reflexes"
+        elapsed_ms = immediate.elapsed_ms,
+        within_budget = immediate.within_budget,
+        "operator hotkey fired release_all, disabled reflexes, and queued K2 fleet kill"
     );
+    let service = service.clone();
+    let _operator_panic_task = runtime.spawn(async move {
+        if let Err(error) = service.operator_panic_kill_all(immediate).await {
+            tracing::error!(
+                code = error_codes::SAFETY_OPERATOR_HOTKEY_FIRED,
+                error_code = error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("code"))
+                    .and_then(serde_json::Value::as_str),
+                detail = %error.message,
+                "operator hotkey K2 fleet kill task failed"
+            );
+        }
+    });
 }
 
 fn disable_reflexes(m3_state: &SharedM3State) -> DisableReport {

@@ -55,8 +55,7 @@ use super::session_registry::unix_time_ms_now;
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
 use crate::m3::approvals::{
     ApprovalAllow, ApprovalAuditRecord, ApprovalItemRecord, ApprovalKind, ApprovalStatus,
-    ApprovalTimeoutDecision,
-    ApprovalToastState,
+    ApprovalTimeoutDecision, ApprovalToastState,
 };
 
 #[cfg(test)]

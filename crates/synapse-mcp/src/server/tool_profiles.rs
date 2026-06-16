@@ -1496,8 +1496,7 @@ mod tests {
             })
         };
 
-        let openai_tools: Vec<serde_json::Value> =
-            tools.iter().map(openai_tool_from_mcp).collect();
+        let openai_tools: Vec<serde_json::Value> = tools.iter().map(openai_tool_from_mcp).collect();
 
         // The actual `tools` field of the chat-completion request body.
         let openai_tools_json =

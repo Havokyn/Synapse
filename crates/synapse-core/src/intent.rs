@@ -268,7 +268,11 @@ fn collapse_observed(
 ) -> Vec<ObservedStep> {
     let mut steps: Vec<ObservedStep> = Vec::new();
     for episode in eligible {
-        let app = episode.app.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let app = episode
+            .app
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let document = match granularity {
             RoutineGranularity::App => None,
             RoutineGranularity::AppDocument => {
@@ -399,7 +403,11 @@ fn try_match_routine(
     let minutes_from_mean =
         circular_distance(started_minute_of_day, routine.record.mean_minute_of_day);
     let within_tolerance = minutes_from_mean <= routine.record.tolerance_minutes;
-    let dow_factor = if dow_match { 1.0 } else { config.off_dow_factor };
+    let dow_factor = if dow_match {
+        1.0
+    } else {
+        config.off_dow_factor
+    };
     let schedule_factor = dow_factor
         * time_factor(
             minutes_from_mean,
@@ -491,9 +499,7 @@ pub fn match_intents(
         .filter(|episode| {
             (config.include_agent_activity || matches!(episode.actor, TimelineActor::Human))
                 && episode.app.as_deref().is_some_and(|app| !app.is_empty())
-                && episode
-                    .end_ts_ns
-                    .saturating_sub(episode.start_ts_ns)
+                && episode.end_ts_ns.saturating_sub(episode.start_ts_ns)
                     >= config.min_episode_duration_ns
         })
         .collect();
@@ -632,7 +638,11 @@ mod tests {
         let morning = routine(
             "rt1-0000000000000001",
             RoutineGranularity::App,
-            vec![step("outlook.exe", None), step("teams.exe", None), step("code.exe", None)],
+            vec![
+                step("outlook.exe", None),
+                step("teams.exe", None),
+                step("code.exe", None),
+            ],
             RoutineDowClass::Weekdays,
             540,
             20,
@@ -650,8 +660,13 @@ mod tests {
             RoutineLifecycle::Confirmed,
         );
         let now = now_at(base + 21 * MIN + MIN, 0); // just after teams ended
-        let out = match_intents(&eps, &[morning, unrelated], now, &IntentMatchConfig::default())
-            .expect("match");
+        let out = match_intents(
+            &eps,
+            &[morning, unrelated],
+            now,
+            &IntentMatchConfig::default(),
+        )
+        .expect("match");
         assert_eq!(out.len(), 1, "only the morning routine should match");
         let top = &out[0];
         assert_eq!(top.routine_id, "rt1-0000000000000001");
@@ -677,7 +692,11 @@ mod tests {
             routine(
                 "rt1-0000000000000001",
                 RoutineGranularity::App,
-                vec![step("outlook.exe", None), step("teams.exe", None), step("code.exe", None)],
+                vec![
+                    step("outlook.exe", None),
+                    step("teams.exe", None),
+                    step("code.exe", None),
+                ],
                 RoutineDowClass::Weekdays,
                 540,
                 20,
@@ -831,7 +850,13 @@ mod tests {
     fn app_document_granularity_distinguishes_documents() {
         let base = 100 * DAY + 9 * 60 * MIN;
         // Browser on github.com.
-        let eps = vec![episode("ep1-a", base, 10 * MIN, "chrome.exe", Some("github.com"))];
+        let eps = vec![episode(
+            "ep1-a",
+            base,
+            10 * MIN,
+            "chrome.exe",
+            Some("github.com"),
+        )];
         let github = routine(
             "rt1-0000000000000001",
             RoutineGranularity::AppDocument,
@@ -853,8 +878,8 @@ mod tests {
             RoutineLifecycle::Confirmed,
         );
         let now = now_at(base + 11 * MIN, 0);
-        let out = match_intents(&eps, &[github, mail], now, &IntentMatchConfig::default())
-            .expect("m");
+        let out =
+            match_intents(&eps, &[github, mail], now, &IntentMatchConfig::default()).expect("m");
         assert_eq!(out.len(), 1, "only the matching document routine matches");
         assert_eq!(out[0].routine_id, "rt1-0000000000000001");
     }
@@ -905,7 +930,12 @@ mod tests {
             minute_of_day: 0,
         };
         assert!(matches!(
-            match_intents(&[], std::slice::from_ref(&r), bad_dow, &IntentMatchConfig::default()),
+            match_intents(
+                &[],
+                std::slice::from_ref(&r),
+                bad_dow,
+                &IntentMatchConfig::default()
+            ),
             Err(IntentMatchError::InvalidWeekday { weekday: 7 })
         ));
         let bad_min = NowContext {
@@ -914,7 +944,12 @@ mod tests {
             minute_of_day: MINUTES_PER_DAY,
         };
         assert!(matches!(
-            match_intents(&[], std::slice::from_ref(&r), bad_min, &IntentMatchConfig::default()),
+            match_intents(
+                &[],
+                std::slice::from_ref(&r),
+                bad_min,
+                &IntentMatchConfig::default()
+            ),
             Err(IntentMatchError::InvalidMinute { .. })
         ));
         let bad_cfg = IntentMatchConfig {

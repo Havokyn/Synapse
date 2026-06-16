@@ -240,7 +240,10 @@ fn resolve_model(model: &str) -> Result<(ActSpawnAgentCli, Option<String>), Erro
             "agent_template model must be <= {MAX_MODEL_BYTES} bytes"
         )));
     }
-    if trimmed.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
         return Err(params_error(
             "agent_template model must not contain whitespace or control characters",
         ));
@@ -598,7 +601,9 @@ impl SynapseService {
         db.flush().map_err(|error| {
             mcp_error(
                 error.code(),
-                format!("agent_template deleted template {key} but failed to flush to disk: {error}"),
+                format!(
+                    "agent_template deleted template {key} but failed to flush to disk: {error}"
+                ),
             )
         })?;
 
@@ -631,8 +636,8 @@ impl SynapseService {
             ));
         }
         let db = self.agent_template_db()?;
-        let template =
-            Self::read_template(&db, template_id)?.ok_or_else(|| template_not_found(template_id))?;
+        let template = Self::read_template(&db, template_id)?
+            .ok_or_else(|| template_not_found(template_id))?;
         render_spawn(&template)
     }
 }
@@ -680,9 +685,7 @@ impl SynapseService {
         self.agent_template_get_impl(params.0).map(Json)
     }
 
-    #[tool(
-        description = "List agent-spawn templates (one row per template id), sorted by id."
-    )]
+    #[tool(description = "List agent-spawn templates (one row per template id), sorted by id.")]
     pub async fn agent_template_list(
         &self,
         params: Parameters<AgentTemplateListParams>,
@@ -742,8 +745,14 @@ mod tests {
 
     #[test]
     fn resolve_model_maps_first_party_and_registered() {
-        assert_eq!(resolve_model("claude").expect("ok").0, ActSpawnAgentCli::Claude);
-        assert_eq!(resolve_model("codex").expect("ok").0, ActSpawnAgentCli::Codex);
+        assert_eq!(
+            resolve_model("claude").expect("ok").0,
+            ActSpawnAgentCli::Claude
+        );
+        assert_eq!(
+            resolve_model("codex").expect("ok").0,
+            ActSpawnAgentCli::Codex
+        );
         let (cli, model_ref) = resolve_model("deepseek-flash").expect("ok");
         assert_eq!(cli, ActSpawnAgentCli::LocalModel);
         assert_eq!(model_ref.as_deref(), Some("deepseek-flash"));
@@ -768,7 +777,11 @@ mod tests {
         let mut params = base_put("rev");
         params.prompt = "   ".to_owned();
         let err = validate_put_params(&params).expect_err("must reject");
-        assert!(err.message.contains("prompt must not be empty"), "{}", err.message);
+        assert!(
+            err.message.contains("prompt must not be empty"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

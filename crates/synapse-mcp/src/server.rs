@@ -31,13 +31,12 @@ use crate::{
         M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams, SetCaptureTargetResponse,
         SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam, SetTargetParams,
         SharedM1State, TargetResponse, TargetWire, WindowListEntry, WindowListParams,
-        WindowListResponse, apply_profile_runtime_config_in_state,
-        build_find_input, current_input, empty_input_schema, enrich_input_with_browser_ocr,
-        enrich_input_with_cdp_for_target, find_cdp_max_nodes, find_snapshot_depth,
-        match_find_input, mcp_error, observe_include, observe_input, populate_clipboard_summary,
-        populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
-        resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
-        set_target_input_schema,
+        WindowListResponse, apply_profile_runtime_config_in_state, build_find_input, current_input,
+        empty_input_schema, enrich_input_with_browser_ocr, enrich_input_with_cdp_for_target,
+        find_cdp_max_nodes, find_snapshot_depth, match_find_input, mcp_error, observe_include,
+        observe_input, populate_clipboard_summary, populate_detection_from_state,
+        populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
+        set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema,
     },
     m2::{
         ActClickParams, ActClickResponse, ActClipboardParams, ActClipboardResponse,
@@ -184,6 +183,7 @@ mod audit_context;
 pub(crate) mod command_audit;
 mod context;
 pub(crate) use context::AgentTranscriptSnapshotRow;
+mod background_router;
 mod data_cleaning;
 pub(crate) mod drain;
 pub(crate) mod escalation;
@@ -220,15 +220,14 @@ mod permission_gate;
 pub(crate) mod permission_policy;
 mod plan_tools;
 mod reality;
-mod background_router;
 mod routine_feedback;
 mod routine_labeling;
 mod schema_sanitize;
-mod suggestions;
 pub(crate) mod session_continuity;
 pub(crate) mod session_lifecycle;
 pub(crate) mod session_registry;
 mod session_tools;
+mod suggestions;
 pub(crate) mod target_claims;
 mod target_policy;
 pub(crate) mod terminal_capture;

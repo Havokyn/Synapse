@@ -1547,9 +1547,8 @@ pub fn export_routine_label(
     if let Some(label) = &current_label {
         let _ = writeln!(prompt, "Current label: {label}");
     }
-    prompt.push_str(
-        "Reply with a short human name (<=120 chars) and a one-sentence description.\n",
-    );
+    prompt
+        .push_str("Reply with a short human name (<=120 chars) and a one-sentence description.\n");
 
     let writeback_hint = format!(
         "routine_update {{ \"routine_id\": \"{}\", \"action\": \"rename\", \
@@ -1791,7 +1790,8 @@ pub fn record_routine_feedback(
             state.consecutive_declines = state.consecutive_declines.saturating_add(1);
             state.cooldown_level = state.consecutive_declines;
             let cooldown = feedback_cooldown_secs(state.consecutive_declines);
-            state.cooldown_until_ts_ns = Some(now.saturating_add(cooldown.saturating_mul(1_000_000_000)));
+            state.cooldown_until_ts_ns =
+                Some(now.saturating_add(cooldown.saturating_mul(1_000_000_000)));
         }
         RoutineFeedbackOutcome::Abandoned => {
             state.abandon_count = state.abandon_count.saturating_add(1);
@@ -2158,14 +2158,22 @@ mod tests {
         );
         assert_eq!(
             feedback_cooldown_secs(3),
-            FEEDBACK_COOLDOWN_BASE_SECS * FEEDBACK_COOLDOWN_MULTIPLIER * FEEDBACK_COOLDOWN_MULTIPLIER
+            FEEDBACK_COOLDOWN_BASE_SECS
+                * FEEDBACK_COOLDOWN_MULTIPLIER
+                * FEEDBACK_COOLDOWN_MULTIPLIER
         );
         // Monotonic non-decreasing and never above the cap, even for a huge streak.
         let mut prev = 0;
         for streak in 0..40 {
             let secs = feedback_cooldown_secs(streak);
-            assert!(secs >= prev, "cooldown must not decrease as the streak grows");
-            assert!(secs <= FEEDBACK_COOLDOWN_CAP_SECS, "cooldown must respect the cap");
+            assert!(
+                secs >= prev,
+                "cooldown must not decrease as the streak grows"
+            );
+            assert!(
+                secs <= FEEDBACK_COOLDOWN_CAP_SECS,
+                "cooldown must respect the cap"
+            );
             prev = secs;
         }
         assert_eq!(feedback_cooldown_secs(40), FEEDBACK_COOLDOWN_CAP_SECS);
@@ -2184,8 +2192,14 @@ mod tests {
         state.cooldown_until_ts_ns = Some(10_000);
         let lb = feedback_acceptance_lower_bound(&state).expect("trials exist");
         assert!(lb.abs() < 1e-9, "0/1 accepts -> ~0 lower bound, got {lb}");
-        assert!(feedback_suppressed(&state, 9_999), "before deadline -> suppressed");
-        assert!(!feedback_suppressed(&state, 10_000), "at deadline -> not suppressed");
+        assert!(
+            feedback_suppressed(&state, 9_999),
+            "before deadline -> suppressed"
+        );
+        assert!(
+            !feedback_suppressed(&state, 10_000),
+            "at deadline -> not suppressed"
+        );
 
         // Accepts recover: the lower bound rises monotonically with successes.
         let lb_1_of_2 = {
@@ -2199,7 +2213,10 @@ mod tests {
             s.decline_count = 1;
             feedback_acceptance_lower_bound(&s).unwrap()
         };
-        assert!(lb_5_of_6 > lb_1_of_2, "more accepts -> higher acceptance bound");
+        assert!(
+            lb_5_of_6 > lb_1_of_2,
+            "more accepts -> higher acceptance bound"
+        );
         assert!(lb_1_of_2 > lb, "any accept lifts the bound off zero");
     }
 

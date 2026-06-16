@@ -1561,7 +1561,10 @@ mod tests {
         assert_eq!(transitions.len(), 1, "{transitions:?}");
         assert_eq!(transitions[0].state_to, AgentLifecycleState::Dead);
         assert_eq!(transitions[0].reason_code, "unprobeable_silent_ended");
-        assert!(transitions[0].evidence["silent_ms"].as_u64().unwrap() >= DEFAULT_UNPROBEABLE_DEAD_AFTER_MS);
+        assert!(
+            transitions[0].evidence["silent_ms"].as_u64().unwrap()
+                >= DEFAULT_UNPROBEABLE_DEAD_AFTER_MS
+        );
 
         // Resurrection guard: the session resumes (appends again) and the
         // ingester re-registers it. A fresh SpawnRequested must revive the same

@@ -566,7 +566,7 @@ async fn run_stdio(
     )
     .context("initialize Synapse service state")?;
     synapse_action::install_panic_hook();
-    let _operator_hotkey_guard = safety::install_operator_hotkey(service.m3_state_handle())
+    let _operator_hotkey_guard = safety::install_operator_hotkey(service.clone())
         .context("install operator panic hotkey")?;
     let m2_emitter_done = service.m2_emitter_done_receiver();
     let (stdin, stdout) = rmcp::transport::stdio();

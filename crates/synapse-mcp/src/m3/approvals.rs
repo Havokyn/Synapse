@@ -594,7 +594,9 @@ pub fn request_approval(
         decided_by_session: None,
         decided_at_unix_ms: None,
         decision_note: None,
-        allow: params.allow.unwrap_or_else(|| ApprovalAllow::for_kind(params.kind)),
+        allow: params
+            .allow
+            .unwrap_or_else(|| ApprovalAllow::for_kind(params.kind)),
         edited_args_json: None,
         operator_response: None,
         toast: ApprovalToastState {
@@ -1810,12 +1812,18 @@ mod tests {
 
     // ---- #1030 approve-with-edits / respond / reject-requires-note ----
 
-    fn request_kind(title: &str, kind: ApprovalKind, allow: Option<ApprovalAllow>) -> ApprovalRequestParams {
+    fn request_kind(
+        title: &str,
+        kind: ApprovalKind,
+        allow: Option<ApprovalAllow>,
+    ) -> ApprovalRequestParams {
         ApprovalRequestParams {
             kind,
             title: title.to_owned(),
             body: "body".to_owned(),
-            payload_json: Some(r#"{"tool_name":"act_set_field_text","input":{"text":"hi"}}"#.to_owned()),
+            payload_json: Some(
+                r#"{"tool_name":"act_set_field_text","input":{"text":"hi"}}"#.to_owned(),
+            ),
             dedupe_key: None,
             timeout_ms: None,
             timeout_decision: None,
@@ -1858,9 +1866,16 @@ mod tests {
         )
         .expect("request");
         // Default agent_permission affordances must allow editing.
-        assert!(created.item.allow.edit, "agent_permission must allow edit by default");
+        assert!(
+            created.item.allow.edit,
+            "agent_permission must allow edit by default"
+        );
         let id = created.item.approval_id.clone();
-        println!("before: status={} edited_args={:?}", created.item.status.as_str(), created.item.edited_args_json);
+        println!(
+            "before: status={} edited_args={:?}",
+            created.item.status.as_str(),
+            created.item.edited_args_json
+        );
 
         let edited = r#"{"text":"EDITED by operator"}"#;
         let decided = decide(&db, &id, ApprovalDecision::Accept, None, Some(edited), None)
@@ -1869,7 +1884,11 @@ mod tests {
 
         // FSV: re-read the physical CF_KV row — not the return value.
         let stored = get_approval(&db, &id).expect("get").expect("row").item;
-        println!("after: status={} edited_args={:?}", stored.status.as_str(), stored.edited_args_json);
+        println!(
+            "after: status={} edited_args={:?}",
+            stored.status.as_str(),
+            stored.edited_args_json
+        );
         assert_eq!(stored.status, ApprovalStatus::Accepted);
         assert_eq!(stored.edited_args_json.as_deref(), Some(edited));
         assert!(stored.operator_response.is_none());
@@ -1884,16 +1903,23 @@ mod tests {
             "agent",
         )
         .expect("request");
-        assert!(created.item.allow.respond, "agent_question must allow respond by default");
+        assert!(
+            created.item.allow.respond,
+            "agent_question must allow respond by default"
+        );
         let id = created.item.approval_id.clone();
 
         let answer = "use the staging bucket, not prod";
-        let decided = decide(&db, &id, ApprovalDecision::Accept, None, None, Some(answer))
-            .expect("respond");
+        let decided =
+            decide(&db, &id, ApprovalDecision::Accept, None, None, Some(answer)).expect("respond");
         assert_eq!(decided.after_status, ApprovalStatus::Accepted);
 
         let stored = get_approval(&db, &id).expect("get").expect("row").item;
-        println!("after: status={} operator_response={:?}", stored.status.as_str(), stored.operator_response);
+        println!(
+            "after: status={} operator_response={:?}",
+            stored.status.as_str(),
+            stored.operator_response
+        );
         assert_eq!(stored.operator_response.as_deref(), Some(answer));
     }
 
@@ -1913,11 +1939,22 @@ mod tests {
         let err = decide(&db, &id, ApprovalDecision::Decline, None, None, None).unwrap_err();
         println!("reject-no-note err: {}", err.message);
         let still = get_approval(&db, &id).expect("get").expect("row").item;
-        assert_eq!(still.status, ApprovalStatus::Pending, "must not decline without a note");
+        assert_eq!(
+            still.status,
+            ApprovalStatus::Pending,
+            "must not decline without a note"
+        );
 
         // With a note → declines and feeds the note back.
-        let ok = decide(&db, &id, ApprovalDecision::Decline, Some("unsafe in prod"), None, None)
-            .expect("decline-with-note");
+        let ok = decide(
+            &db,
+            &id,
+            ApprovalDecision::Decline,
+            Some("unsafe in prod"),
+            None,
+            None,
+        )
+        .expect("decline-with-note");
         assert_eq!(ok.after_status, ApprovalStatus::Declined);
         let stored = get_approval(&db, &id).expect("get").expect("row").item;
         assert_eq!(stored.decision_note.as_deref(), Some("unsafe in prod"));
@@ -1931,8 +1968,15 @@ mod tests {
             .expect("request")
             .item
             .approval_id;
-        let err = decide(&db, &id, ApprovalDecision::Accept, None, Some(r#"{"x":1}"#), None)
-            .unwrap_err();
+        let err = decide(
+            &db,
+            &id,
+            ApprovalDecision::Accept,
+            None,
+            Some(r#"{"x":1}"#),
+            None,
+        )
+        .unwrap_err();
         println!("edit-not-allowed err: {}", err.message);
         assert!(err.message.contains("allow.edit=false"));
         // Fail closed: row untouched.
@@ -1952,11 +1996,27 @@ mod tests {
         .item
         .approval_id;
         // A JSON array is valid JSON but not a tool argument map.
-        let err = decide(&db, &id, ApprovalDecision::Accept, None, Some("[1,2,3]"), None).unwrap_err();
+        let err = decide(
+            &db,
+            &id,
+            ApprovalDecision::Accept,
+            None,
+            Some("[1,2,3]"),
+            None,
+        )
+        .unwrap_err();
         println!("bad-edit err: {}", err.message);
         assert!(err.message.contains("must be a JSON object"));
         // And outright garbage.
-        let err2 = decide(&db, &id, ApprovalDecision::Accept, None, Some("not json"), None).unwrap_err();
+        let err2 = decide(
+            &db,
+            &id,
+            ApprovalDecision::Accept,
+            None,
+            Some("not json"),
+            None,
+        )
+        .unwrap_err();
         assert!(err2.message.contains("valid JSON object"));
         let still = get_approval(&db, &id).expect("get").expect("row").item;
         assert_eq!(still.status, ApprovalStatus::Pending);
@@ -1974,16 +2034,30 @@ mod tests {
         .item
         .approval_id;
         assert!(
-            decide(&db, &id, ApprovalDecision::Decline, Some("n"), Some(r#"{"x":1}"#), None)
-                .unwrap_err()
-                .message
-                .contains("edited_args is valid only when decision=\"accept\"")
+            decide(
+                &db,
+                &id,
+                ApprovalDecision::Decline,
+                Some("n"),
+                Some(r#"{"x":1}"#),
+                None
+            )
+            .unwrap_err()
+            .message
+            .contains("edited_args is valid only when decision=\"accept\"")
         );
         assert!(
-            decide(&db, &id, ApprovalDecision::Decline, Some("n"), None, Some("hi"))
-                .unwrap_err()
-                .message
-                .contains("response is valid only when decision=\"accept\"")
+            decide(
+                &db,
+                &id,
+                ApprovalDecision::Decline,
+                Some("n"),
+                None,
+                Some("hi")
+            )
+            .unwrap_err()
+            .message
+            .contains("response is valid only when decision=\"accept\"")
         );
     }
 

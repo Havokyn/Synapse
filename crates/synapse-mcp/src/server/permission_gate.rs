@@ -213,7 +213,6 @@ impl SynapseService {
         self.block_for_decision(&db, &approval_id, input, now).await
     }
 
-
     async fn block_for_decision(
         &self,
         db: &Arc<synapse_storage::Db>,
@@ -275,7 +274,8 @@ impl SynapseService {
                     edited_args: None,
                     response: None,
                 };
-                if let Err(error) = approvals::decide_approval(db, &decline, "approval_gate_timeout")
+                if let Err(error) =
+                    approvals::decide_approval(db, &decline, "approval_gate_timeout")
                 {
                     tracing::error!(
                         code = "APPROVAL_GATE_TIMEOUT_DECLINE_FAILED",
@@ -311,8 +311,9 @@ fn build_request(
         "input": input_repr,
         "destructive": decision.destructive(),
     });
-    let payload_json = serde_json::to_string(&payload)
-        .map_err(|error| mcp_internal(format!("approval_gate failed to encode payload: {error}")))?;
+    let payload_json = serde_json::to_string(&payload).map_err(|error| {
+        mcp_internal(format!("approval_gate failed to encode payload: {error}"))
+    })?;
     let title = {
         let mut title = format!("Approval needed: {}", display_tool_name(tool_name));
         title.truncate(160);
@@ -356,7 +357,10 @@ fn build_body(tool_name: &str, input: &Value) -> String {
         }
     } else {
         let rendered = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_owned());
-        format!("Agent wants to use {tool_name} with input: {}", single_line(&rendered))
+        format!(
+            "Agent wants to use {tool_name} with input: {}",
+            single_line(&rendered)
+        )
     };
     body.truncate(4_000);
     body
@@ -504,7 +508,8 @@ mod tests {
     async fn await_pending_id(service: &SynapseService) -> String {
         let db = service.m3_storage().expect("storage");
         for _ in 0..200 {
-            let pending = approval_snapshot(&db, Some(ApprovalKind::AgentPermission)).expect("snap");
+            let pending =
+                approval_snapshot(&db, Some(ApprovalKind::AgentPermission)).expect("snap");
             if let Some(item) = pending.into_iter().next() {
                 return item.item.approval_id;
             }
@@ -518,7 +523,13 @@ mod tests {
         let dir = TempDir::new().expect("tmp");
         let service = service_with_db(dir.path());
         let result = service
-            .run_gate("Read", &json!({"file":"x"}), Some("t1"), "sess", Some("agent-spawn-a"))
+            .run_gate(
+                "Read",
+                &json!({"file":"x"}),
+                Some("t1"),
+                "sess",
+                Some("agent-spawn-a"),
+            )
             .await
             .expect("gate");
         let verdict = verdict_of(&result);
@@ -526,7 +537,10 @@ mod tests {
         // Physical SoT: no approval row was created for an auto-allowed call.
         let db = service.m3_storage().expect("storage");
         let pending = approval_snapshot(&db, Some(ApprovalKind::AgentPermission)).expect("snap");
-        assert!(pending.is_empty(), "auto-allow must not enqueue an approval");
+        assert!(
+            pending.is_empty(),
+            "auto-allow must not enqueue an approval"
+        );
     }
 
     #[tokio::test]
@@ -535,7 +549,13 @@ mod tests {
         let service = service_with_db(dir.path());
         let input = json!({ "command": "git push origin main" });
 
-        let gate = service.run_gate("Bash", &input, Some("tuse-1"), "sess", Some("agent-spawn-b"));
+        let gate = service.run_gate(
+            "Bash",
+            &input,
+            Some("tuse-1"),
+            "sess",
+            Some("agent-spawn-b"),
+        );
         let decide = async {
             let id = await_pending_id(&service).await;
             // Physical SoT before deciding: row is Pending, destructive, gate kind.
@@ -611,7 +631,14 @@ mod tests {
                 item.dedupe_key
             );
             service
-                .approval_decide_from_dashboard(&id, ApprovalDecision::Accept, None, None, None, "tester")
+                .approval_decide_from_dashboard(
+                    &id,
+                    ApprovalDecision::Accept,
+                    None,
+                    None,
+                    None,
+                    "tester",
+                )
                 .expect("decide");
         };
         let (result, ()) = tokio::join!(gate, decide);
@@ -626,7 +653,13 @@ mod tests {
         let service = service_with_db(dir.path());
         let input = json!({ "command": "rm -rf /important" });
 
-        let gate = service.run_gate("Bash", &input, Some("tuse-edit"), "sess", Some("agent-spawn-e"));
+        let gate = service.run_gate(
+            "Bash",
+            &input,
+            Some("tuse-edit"),
+            "sess",
+            Some("agent-spawn-e"),
+        );
         let decide = async {
             let id = await_pending_id(&service).await;
             service
@@ -665,7 +698,13 @@ mod tests {
         let service = service_with_db(dir.path());
         let input = json!({ "command": "rm -rf build" });
 
-        let gate = service.run_gate("Bash", &input, Some("tuse-2"), "sess", Some("agent-spawn-c"));
+        let gate = service.run_gate(
+            "Bash",
+            &input,
+            Some("tuse-2"),
+            "sess",
+            Some("agent-spawn-c"),
+        );
         let decide = async {
             let id = await_pending_id(&service).await;
             service
@@ -718,12 +757,18 @@ mod tests {
         let verdict = verdict_of(&result);
         assert_eq!(verdict["behavior"], "deny");
         assert!(
-            verdict["message"].as_str().unwrap_or_default().contains("timed out"),
+            verdict["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("timed out"),
             "timeout deny must explain itself: {verdict}"
         );
         // Physical SoT: the gate recorded its own timeout decline.
         let db = service.m3_storage().expect("storage");
         let pending = approval_snapshot(&db, Some(ApprovalKind::AgentPermission)).expect("snap");
-        assert!(pending.is_empty(), "timed-out approval must no longer be pending");
+        assert!(
+            pending.is_empty(),
+            "timed-out approval must no longer be pending"
+        );
     }
 }

@@ -214,14 +214,18 @@ fn classify_git(tokens: &[&str]) -> GateDecision {
         // Read-only history/state inspection.
         "status" | "diff" | "log" | "show" | "branch" | "remote" | "rev-parse" | "describe"
         | "blame" | "ls-files" | "ls-tree" | "cat-file" | "shortlog" | "reflog" | "whatchanged"
-        | "name-rev" | "symbolic-ref" | "var" | "help" | "version" | "show-ref" | "for-each-ref"
-        | "rev-list" | "merge-base" | "cherry" | "grep" => GateDecision::AutoAllow,
+        | "name-rev" | "symbolic-ref" | "var" | "help" | "version" | "show-ref"
+        | "for-each-ref" | "rev-list" | "merge-base" | "cherry" | "grep" => GateDecision::AutoAllow,
         // Local, reversible mutations — allowed under "risky only".
         // (fetch/pull/clone are network and fall through to the gate below.)
         "add" | "commit" | "stash" | "tag" => GateDecision::AutoAllow,
         // Irreversible / history-rewriting / working-tree-clobbering / network.
         "push" => GateDecision::DESTRUCTIVE,
-        "reset" if tokens.iter().any(|t| matches!(*t, "--hard" | "--merge" | "--keep")) => {
+        "reset"
+            if tokens
+                .iter()
+                .any(|t| matches!(*t, "--hard" | "--merge" | "--keep")) =>
+        {
             GateDecision::DESTRUCTIVE
         }
         "clean" => GateDecision::DESTRUCTIVE,
@@ -272,17 +276,90 @@ fn is_readonly_mcp_suffix(tool: &str) -> bool {
 }
 
 const SAFE_READONLY_PROGRAMS: &[&str] = &[
-    "ls", "dir", "pwd", "echo", "printf", "cat", "type", "head", "tail", "wc", "grep", "rg",
-    "ripgrep", "find", "fd", "which", "where", "whoami", "hostname", "date", "env", "printenv",
-    "true", "false", "test", "stat", "file", "du", "df", "tree", "basename", "dirname", "realpath",
-    "readlink", "sort", "uniq", "cut", "tr", "comm", "diff", "cmp", "jq", "yq", "column", "tac",
-    "nl", "od", "xxd", "sleep", "seq", "expr", "uname", "id", "groups", "less", "more", "tee",
-    "wc", "md5sum", "sha256sum", "cksum",
+    "ls",
+    "dir",
+    "pwd",
+    "echo",
+    "printf",
+    "cat",
+    "type",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "rg",
+    "ripgrep",
+    "find",
+    "fd",
+    "which",
+    "where",
+    "whoami",
+    "hostname",
+    "date",
+    "env",
+    "printenv",
+    "true",
+    "false",
+    "test",
+    "stat",
+    "file",
+    "du",
+    "df",
+    "tree",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "comm",
+    "diff",
+    "cmp",
+    "jq",
+    "yq",
+    "column",
+    "tac",
+    "nl",
+    "od",
+    "xxd",
+    "sleep",
+    "seq",
+    "expr",
+    "uname",
+    "id",
+    "groups",
+    "less",
+    "more",
+    "tee",
+    "wc",
+    "md5sum",
+    "sha256sum",
+    "cksum",
 ];
 
 const DESTRUCTIVE_PROGRAMS: &[&str] = &[
-    "rm", "rmdir", "del", "erase", "remove-item", "ri", "rd", "unlink", "shred", "format", "mkfs",
-    "dd", "shutdown", "reboot", "halt", "poweroff", "fdisk", "diskpart", "mkfs.ext4", "wipefs",
+    "rm",
+    "rmdir",
+    "del",
+    "erase",
+    "remove-item",
+    "ri",
+    "rd",
+    "unlink",
+    "shred",
+    "format",
+    "mkfs",
+    "dd",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "fdisk",
+    "diskpart",
+    "mkfs.ext4",
+    "wipefs",
 ];
 
 const SAFE_MCP_TOOLS: &[&str] = &[
@@ -367,8 +444,14 @@ mod tests {
         assert_eq!(bash("git status"), GateDecision::AutoAllow);
         assert_eq!(bash("git diff HEAD~1"), GateDecision::AutoAllow);
         assert_eq!(bash("cargo build --release"), GateDecision::AutoAllow);
-        assert_eq!(bash("cat foo.txt | grep bar | wc -l"), GateDecision::AutoAllow);
-        assert_eq!(bash("git add . && git commit -m x"), GateDecision::AutoAllow);
+        assert_eq!(
+            bash("cat foo.txt | grep bar | wc -l"),
+            GateDecision::AutoAllow
+        );
+        assert_eq!(
+            bash("git add . && git commit -m x"),
+            GateDecision::AutoAllow
+        );
     }
 
     #[test]

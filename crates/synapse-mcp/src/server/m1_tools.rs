@@ -9,11 +9,10 @@ use super::{
     SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
     SetPerceptionModeResponse, SetTargetParam, SetTargetParams, SynapseService, TargetResponse,
     TargetWire, WindowListEntry, WindowListParams, WindowListResponse, empty_input_schema,
-    mcp_error, observe_include, observe_input,
-    populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
-    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
-    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
-    tool_router,
+    mcp_error, observe_include, observe_input, populate_audio_summary, populate_clipboard_summary,
+    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
+    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
+    set_target_input_schema, tool, tool_router,
 };
 use crate::m1::{
     ClipboardTimelineSample, FsTimelineEvent, effective_ocr_backend,
@@ -735,8 +734,9 @@ impl SynapseService {
                 format!("window_list could not enumerate top-level windows: {error}"),
             )
         })?;
-        let human_os_foreground_hwnd =
-            synapse_a11y::current_foreground_context().ok().map(|c| c.hwnd);
+        let human_os_foreground_hwnd = synapse_a11y::current_foreground_context()
+            .ok()
+            .map(|c| c.hwnd);
 
         // Annotate each window with its owning session from the durable
         // target-claim registry. A CDP claim still pins a window_hwnd, so both

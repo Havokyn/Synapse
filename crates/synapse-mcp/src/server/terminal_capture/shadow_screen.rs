@@ -149,8 +149,8 @@ impl ShadowScreen {
     fn erase_in_display(&mut self, mode: usize) {
         let cursor_index = self.cursor_row * self.cols + self.cursor_col;
         let (from, to) = match mode {
-            1 => (0, cursor_index + 1),       // start to cursor
-            2 | 3 => (0, self.cells.len()),   // entire display
+            1 => (0, cursor_index + 1),            // start to cursor
+            2 | 3 => (0, self.cells.len()),        // entire display
             _ => (cursor_index, self.cells.len()), // cursor to end
         };
         let end = to.min(self.cells.len());

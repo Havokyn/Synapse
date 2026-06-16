@@ -56,6 +56,7 @@ use super::command_audit::CommandAuditInput;
 use super::session_lifecycle::{SessionTeardownOptions, SessionTeardownReport};
 use super::session_registry::{SpawnedAgentControlRead, unix_time_ms_now};
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
+use crate::safety::OperatorHotkeyImmediateReport;
 use futures_util::future::join_all;
 
 // ----------------------------------------------------------------------------
@@ -294,6 +295,26 @@ pub struct FleetStopResponse {
     /// fleet).
     pub all_stopped: bool,
     pub agents: Vec<FleetStopAgentOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OperatorPanicKillAllResponse {
+    pub immediate: OperatorHotkeyImmediateReport,
+    pub prior_lease_owner_session_id: Option<String>,
+    pub prior_lease_row_cleanup: Option<super::session_continuity::LeaseContinuityCleanupReadback>,
+    pub prior_lease_row_cleanup_error: Option<String>,
+    pub matched_sessions_before: Vec<String>,
+    pub matched_sessions_before_error: Option<String>,
+    pub fleet_stop: Option<FleetStopResponse>,
+    pub fleet_stop_error: Option<String>,
+    pub operator_lease_cleared: Option<synapse_action::LeaseStatus>,
+    pub lease_after: synapse_action::LeaseStatus,
+    pub live_sessions_after: Vec<String>,
+    pub live_sessions_after_error: Option<String>,
+    pub all_stopped: bool,
+    pub audit_intent_error: Option<String>,
+    pub audit_final_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -594,7 +615,8 @@ impl SynapseService {
             "tool.invocation kind=agent_resume"
         );
         let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
-        self.agent_resume_impl(params.0, caller.as_deref()).map(Json)
+        self.agent_resume_impl(params.0, caller.as_deref())
+            .map(Json)
     }
 
     #[tool(
@@ -1066,8 +1088,13 @@ impl SynapseService {
             .with_target(json!({ "spawn_id": target.spawn_id, "agent_kind": target.agent_kind })),
         )?;
 
-        let response =
-            self.steer_core(&lookup, &target, instruction, params.request_receipt, caller_session)?;
+        let response = self.steer_core(
+            &lookup,
+            &target,
+            instruction,
+            params.request_receipt,
+            caller_session,
+        )?;
 
         let after = json!({
             "delivered": response.delivered,
@@ -1194,7 +1221,8 @@ impl SynapseService {
         });
 
         // Rank 3: cooperative steering mailbox — the one wired channel.
-        let mailbox = self.deliver_mailbox_steer(target, instruction, request_receipt, caller_session);
+        let mailbox =
+            self.deliver_mailbox_steer(target, instruction, request_receipt, caller_session);
         if mailbox.status == "delivered" {
             record_first_delivered_channel(&mut delivered_via, &mailbox);
         }
@@ -1204,9 +1232,10 @@ impl SynapseService {
             channel: "pty_stdin".to_owned(),
             rank: 4,
             status: "unavailable".to_owned(),
-            reason: "channel_not_wired: writing an instruction to the agent's terminal stdin needs \
+            reason:
+                "channel_not_wired: writing an instruction to the agent's terminal stdin needs \
                      owned-PTY capture (#902), which is not implemented yet"
-                .to_owned(),
+                    .to_owned(),
             message_id: None,
             row_key: None,
         });
@@ -1343,9 +1372,11 @@ impl SynapseService {
 
         // Physical state BEFORE acting.
         let states_before = crate::m4::process_tree_suspend_state(&process.live_process_ids);
-        let was_suspended_before = !states_before.is_empty()
-            && states_before.iter().all(|state| state.fully_suspended);
-        let any_suspended_before = states_before.iter().any(|state| state.suspended_threads > 0);
+        let was_suspended_before =
+            !states_before.is_empty() && states_before.iter().all(|state| state.fully_suspended);
+        let any_suspended_before = states_before
+            .iter()
+            .any(|state| state.suspended_threads > 0);
         // Idempotency: pause is a no-op when already fully suspended (stacking a
         // second suspend would need a second resume); resume is a no-op when no
         // thread is suspended at all.
@@ -1528,7 +1559,11 @@ impl SynapseService {
                  The prior instance was {}. Resume its work from where it left off.\n",
                 target.spawn_id.as_deref().unwrap_or(&target.session_id),
                 target.session_id,
-                if target.dead { "no longer running" } else { "stopped to respawn it" },
+                if target.dead {
+                    "no longer running"
+                } else {
+                    "stopped to respawn it"
+                },
             ));
             if let Some(message) = final_message {
                 effective_prompt.push_str("\nPrior final message:\n");
@@ -1611,7 +1646,9 @@ impl SynapseService {
         // Kill the prior instance first when it is still live; an already-dead
         // prior is simply re-launched.
         let prior_already_dead = target.dead
-            || process_readback_for_target(&target).live_process_ids.is_empty();
+            || process_readback_for_target(&target)
+                .live_process_ids
+                .is_empty();
         let prior_killed = if prior_already_dead {
             false
         } else {
@@ -1635,9 +1672,7 @@ impl SynapseService {
                     format!("AGENT_RESPAWN_REQUEST_BUILD_FAILED: {error}"),
                 )
             })?;
-        let spawned = self
-            .spawn_agent_journaled(request, request_context)
-            .await?;
+        let spawned = self.spawn_agent_journaled(request, request_context).await?;
 
         // Lineage: record on the prior agent that it was respawned into the new
         // spawn, so agent_query/the journal can trace the chain.
@@ -1688,7 +1723,9 @@ impl SynapseService {
                 after,
                 "ok",
             )
-            .with_target(json!({ "spawn_id": response.prior_spawn_id, "agent_kind": target.agent_kind })),
+            .with_target(
+                json!({ "spawn_id": response.prior_spawn_id, "agent_kind": target.agent_kind }),
+            ),
         )?;
 
         Ok(response)
@@ -1698,8 +1735,8 @@ impl SynapseService {
     /// (kind/model/model_ref) and folds in the journaled working_dir. Errors if
     /// no manifest exists — respawn never fabricates a spawn identity.
     fn read_respawn_manifest(&self, target: &ResolvedAgent) -> Result<RespawnManifest, ErrorData> {
-        let manifest_path = PathBuf::from(&target.log_dir)
-            .join(super::m4_tools::AGENT_SPAWN_MANIFEST_FILENAME);
+        let manifest_path =
+            PathBuf::from(&target.log_dir).join(super::m4_tools::AGENT_SPAWN_MANIFEST_FILENAME);
         let bytes = fs::read(&manifest_path).map_err(|error| {
             mcp_error(
                 error_codes::TOOL_PARAMS_INVALID,
@@ -1769,6 +1806,163 @@ impl SynapseService {
             }
         }
         None
+    }
+
+    // ------------------------------------------------------------------
+    // operator panic hotkey
+    // ------------------------------------------------------------------
+
+    pub(crate) async fn operator_panic_kill_all(
+        &self,
+        immediate: OperatorHotkeyImmediateReport,
+    ) -> Result<OperatorPanicKillAllResponse, ErrorData> {
+        let prior_lease_owner_session_id = immediate
+            .preempted_lease
+            .as_ref()
+            .and_then(|status| status.owner_session_id.clone())
+            .filter(|session_id| {
+                session_id.as_str() != synapse_action::OPERATOR_LEASE_OWNER_SESSION_ID
+            });
+        let (matched_sessions_before, matched_sessions_before_error) =
+            match self.live_spawned_agent_sessions(&[]) {
+                Ok(sessions) => (sessions, None),
+                Err(error) => (Vec::new(), Some(error.message.to_string())),
+            };
+        let payload = json!({
+            "reason": "operator_hotkey",
+            "mode": "kill",
+            "grace_ms": 0,
+            "prior_lease_owner_session_id": prior_lease_owner_session_id,
+        });
+        let before = json!({
+            "source_of_truth": "synapse_action::lease + CF_SESSIONS session lease row + session registry/agent_state + OS process table + CF_ACTION_LOG",
+            "immediate": &immediate,
+            "matched_sessions_before": &matched_sessions_before,
+            "matched_sessions_before_error": &matched_sessions_before_error,
+        });
+        let audit_intent_error = self
+            .command_audit_intent(
+                CommandAuditInput::mcp(
+                    "operator_hotkey",
+                    "panic_kill_all",
+                    Some(synapse_action::OPERATOR_LEASE_OWNER_SESSION_ID.to_owned()),
+                    None,
+                    payload.clone(),
+                    before.clone(),
+                    Value::Null,
+                    "pending",
+                )
+                .with_channel("operator_hotkey"),
+            )
+            .err()
+            .map(|error| error.message.to_string());
+
+        let (prior_lease_row_cleanup, prior_lease_row_cleanup_error) =
+            match prior_lease_owner_session_id.as_deref() {
+                Some(owner) => match super::session_continuity::delete_persisted_session_lease_row(
+                    &self.m3_state_handle(),
+                    owner,
+                ) {
+                    Ok(readback) => (Some(readback), None),
+                    Err(error) => (None, Some(error)),
+                },
+                None => (None, None),
+            };
+
+        let fleet_stop_result = self
+            .fleet_stop_impl(
+                FleetStopParams {
+                    mode: "kill".to_owned(),
+                    confirm: FLEET_STOP_CONFIRM.to_owned(),
+                    agent_kinds: Vec::new(),
+                    grace_ms: 0,
+                },
+                Some(synapse_action::OPERATOR_LEASE_OWNER_SESSION_ID),
+            )
+            .await;
+        let (fleet_stop, fleet_stop_error) = match fleet_stop_result {
+            Ok(response) => (Some(response), None),
+            Err(error) => (None, Some(error.message.to_string())),
+        };
+
+        let operator_lease_cleared = synapse_action::lease::force_clear_if_owner(
+            synapse_action::OPERATOR_LEASE_OWNER_SESSION_ID,
+            "operator_hotkey_k2_complete",
+        );
+        let lease_after = synapse_action::lease::status();
+        let (live_sessions_after, live_sessions_after_error) =
+            match self.live_spawned_agent_sessions(&[]) {
+                Ok(sessions) => (sessions, None),
+                Err(error) => (Vec::new(), Some(error.message.to_string())),
+            };
+        let all_stopped = fleet_stop
+            .as_ref()
+            .is_some_and(|response| response.all_stopped)
+            && live_sessions_after.is_empty()
+            && prior_lease_row_cleanup_error.is_none()
+            && fleet_stop_error.is_none()
+            && live_sessions_after_error.is_none();
+
+        let mut response = OperatorPanicKillAllResponse {
+            immediate,
+            prior_lease_owner_session_id,
+            prior_lease_row_cleanup,
+            prior_lease_row_cleanup_error,
+            matched_sessions_before,
+            matched_sessions_before_error,
+            fleet_stop,
+            fleet_stop_error,
+            operator_lease_cleared,
+            lease_after,
+            live_sessions_after,
+            live_sessions_after_error,
+            all_stopped,
+            audit_intent_error,
+            audit_final_error: None,
+        };
+
+        let after = json!({
+            "source_of_truth": "synapse_action::lease + CF_SESSIONS session lease row + session registry/agent_state + OS process table + CF_ACTION_LOG",
+            "response": &response,
+        });
+        response.audit_final_error = self
+            .command_audit_final(
+                CommandAuditInput::mcp(
+                    "operator_hotkey",
+                    "panic_kill_all",
+                    Some(synapse_action::OPERATOR_LEASE_OWNER_SESSION_ID.to_owned()),
+                    None,
+                    payload,
+                    before,
+                    after,
+                    if response.all_stopped { "ok" } else { "error" },
+                )
+                .with_channel("operator_hotkey"),
+            )
+            .err()
+            .map(|error| error.message.to_string());
+
+        if response.audit_intent_error.is_some() || response.audit_final_error.is_some() {
+            tracing::error!(
+                code = error_codes::SAFETY_OPERATOR_HOTKEY_FIRED,
+                audit_intent_error = ?response.audit_intent_error,
+                audit_final_error = ?response.audit_final_error,
+                "operator hotkey panic audit write had errors"
+            );
+        }
+        tracing::warn!(
+            code = error_codes::SAFETY_OPERATOR_HOTKEY_FIRED,
+            matched_before = response.matched_sessions_before.len(),
+            matched_after = response.live_sessions_after.len(),
+            fleet_all_stopped = response
+                .fleet_stop
+                .as_ref()
+                .is_some_and(|fleet| fleet.all_stopped),
+            lease_after_held = response.lease_after.held,
+            all_stopped = response.all_stopped,
+            "operator hotkey K2 fleet kill completed"
+        );
+        Ok(response)
     }
 
     // ------------------------------------------------------------------

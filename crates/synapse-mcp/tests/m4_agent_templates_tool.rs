@@ -78,7 +78,10 @@ async fn agent_templates_crud_round_trips_against_physical_cf_rows() -> anyhow::
         .await?;
     let created = structured(&created)?;
     println!("readback=agent_template_put edge=create state={created}");
-    ensure!(created["created"] == json!(true), "first put must be created");
+    ensure!(
+        created["created"] == json!(true),
+        "first put must be created"
+    );
     let hash_v1 = created["template"]["config_hash"]
         .as_str()
         .context("config_hash missing")?

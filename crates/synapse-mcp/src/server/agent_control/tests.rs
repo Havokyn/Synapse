@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::m2::M2ServiceConfig;
 use crate::m3::M3ServiceConfig;
 use crate::m4::M4ServiceConfig;
+use crate::safety::{DisableReport, OperatorHotkeyImmediateReport, ReleaseAllReport};
 use crate::server::session_lifecycle::SessionProcessResource;
 use crate::server::session_registry::SpawnedAgentRead;
 
@@ -128,6 +129,84 @@ async fn wait_for_tree_exit_reports_survivors_after_grace() {
         vec![me],
         "a live pid must be reported as a survivor after the grace window"
     );
+}
+
+#[tokio::test]
+async fn operator_panic_empty_fleet_deletes_prior_lease_row_and_audits() -> anyhow::Result<()> {
+    let _serial = crate::test_support::lease_serial("operator_panic_test_reset");
+    let temp = TempDir::new()?;
+    let service = regression_service(temp.path());
+    let owner = "session-operator-panic-prior";
+    let acquired = match synapse_action::lease::try_acquire(
+        owner,
+        synapse_action::input_lease_ttl_from_ms(5_000),
+    ) {
+        synapse_action::LeaseOutcome::Acquired(status)
+        | synapse_action::LeaseOutcome::Renewed(status) => status,
+        other => anyhow::bail!("owner lease acquire failed unexpectedly: {other:?}"),
+    };
+    service
+        .persist_session_lease(owner, &acquired)
+        .map_err(|error| anyhow::anyhow!("persist lease failed: {}", error.message))?;
+
+    let lease_before = synapse_action::lease::status();
+    let preempted_lease = synapse_action::force_preempt_input_lease("operator_panic_test");
+    let lease_after_preempt = synapse_action::lease::status();
+    let immediate = OperatorHotkeyImmediateReport {
+        hotkey: synapse_action::hotkey::DEFAULT_OPERATOR_HOTKEY,
+        lease_before,
+        preempted_lease,
+        lease_after_preempt,
+        disable_report: DisableReport {
+            result: "not_initialized",
+            disabled_ids: Vec::new(),
+            error_code: None,
+            detail: None,
+        },
+        release_all_report: ReleaseAllReport {
+            result: "missing_handle",
+            error_code: Some(error_codes::ACTION_BACKEND_UNAVAILABLE),
+            detail: Some("synthetic no release handle in unit test".to_owned()),
+        },
+        elapsed_ms: 1,
+        within_budget: true,
+    };
+
+    let response = service
+        .operator_panic_kill_all(immediate)
+        .await
+        .map_err(|error| anyhow::anyhow!("operator panic failed: {}", error.message))?;
+
+    assert!(response.all_stopped, "empty fleet should stop vacuously");
+    assert_eq!(
+        response.prior_lease_owner_session_id.as_deref(),
+        Some(owner)
+    );
+    let cleanup = response
+        .prior_lease_row_cleanup
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing prior lease row cleanup readback"))?;
+    assert!(cleanup.row_existed_before);
+    assert!(cleanup.row_deleted);
+    assert!(!cleanup.row_exists_after);
+    assert!(
+        !synapse_action::lease::status().held,
+        "operator panic must release the operator lease after K2"
+    );
+
+    let audit = service
+        .command_audit_snapshot()
+        .map_err(|error| anyhow::anyhow!("audit snapshot failed: {}", error.message))?;
+    let operator_rows = audit
+        .rows
+        .iter()
+        .filter(|row| row.tool == "operator_hotkey")
+        .count();
+    assert!(
+        operator_rows >= 2,
+        "operator panic must write intent+final command-audit rows, found {operator_rows}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -706,9 +785,8 @@ fn steer_params_default_requests_receipt() {
 
 #[test]
 fn steer_params_reject_unknown_fields() {
-    let result: Result<AgentSteerParams, _> = serde_json::from_value(
-        json!({ "session_id": "s-1", "instruction": "x", "grace_ms": 10 }),
-    );
+    let result: Result<AgentSteerParams, _> =
+        serde_json::from_value(json!({ "session_id": "s-1", "instruction": "x", "grace_ms": 10 }));
     assert!(
         result.is_err(),
         "agent_steer takes no grace_ms; unknown fields must be rejected"
@@ -783,7 +861,11 @@ async fn agent_steer_delivers_cooperative_mailbox_and_journals_message_sent() {
     assert!(response.delivered, "steer must be delivered");
     assert_eq!(response.delivered_via.as_deref(), Some("mailbox_steer"));
     assert_eq!(response.instruction_chars, instruction.chars().count());
-    assert_eq!(response.channels.len(), 4, "all four ranked channels reported");
+    assert_eq!(
+        response.channels.len(),
+        4,
+        "all four ranked channels reported"
+    );
     let delivered: Vec<&str> = response
         .channels
         .iter()
@@ -822,8 +904,14 @@ async fn agent_steer_delivers_cooperative_mailbox_and_journals_message_sent() {
     let (rows, _more) = db
         .scan_cf_from(cf::CF_KV, row_key.as_bytes(), 1)
         .expect("scan CF_KV for the mailbox row");
-    let (key, value) = rows.first().expect("the durable steer mailbox row must exist");
-    assert_eq!(key.as_slice(), row_key.as_bytes(), "row key matches at {row_key}");
+    let (key, value) = rows
+        .first()
+        .expect("the durable steer mailbox row must exist");
+    assert_eq!(
+        key.as_slice(),
+        row_key.as_bytes(),
+        "row key matches at {row_key}"
+    );
     let stored: Value = serde_json::from_slice(value).expect("steer row is JSON");
     let stored_instruction = stored
         .pointer("/payload/instruction")
@@ -929,7 +1017,10 @@ fn respawn_final_message_is_trimmed_and_bounded() {
 fn respawn_params_reject_unknown_fields() {
     let result: Result<AgentRespawnParams, _> =
         serde_json::from_value(json!({ "session_id": "s-1", "prompt": "go", "bogus": true }));
-    assert!(result.is_err(), "deny_unknown_fields must reject extra keys");
+    assert!(
+        result.is_err(),
+        "deny_unknown_fields must reject extra keys"
+    );
 }
 
 #[test]
@@ -1023,7 +1114,10 @@ async fn respawn_plan_reconstructs_identity_from_physical_manifest() {
     assert!(plan.effective_prompt.contains("Respawn continuity"));
     assert!(plan.effective_prompt.contains(spawn));
     assert!(plan.effective_prompt.contains("halfway through step 3"));
-    assert!(plan.effective_prompt.contains("finish step 3 and write the test"));
+    assert!(
+        plan.effective_prompt
+            .contains("finish step 3 and write the test")
+    );
 
     // Cleanup.
     let _ = service
@@ -1089,7 +1183,9 @@ async fn agent_pause_resume_freezes_real_process_tree_and_is_idempotent() {
     // Independent physical readback of the OS thread table confirms suspension.
     let observed = crate::m4::process_tree_suspend_state(&paused.suspend.live_process_ids);
     assert!(
-        observed.iter().all(|s| s.total_threads > 0 && s.fully_suspended),
+        observed
+            .iter()
+            .all(|s| s.total_threads > 0 && s.fully_suspended),
         "independent thread-table read must show the tree frozen: {observed:?}"
     );
 

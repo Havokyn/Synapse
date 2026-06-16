@@ -255,8 +255,12 @@ mod tests {
     fn resize_and_exit_events_use_correct_codes() {
         let mut buf = Vec::new();
         let mut writer = AsciicastWriter::start(&mut buf, &header()).expect("start");
-        writer.record_resize(Duration::from_millis(10), 120, 40).expect("resize");
-        writer.record_exit(Duration::from_millis(20), 0).expect("exit");
+        writer
+            .record_resize(Duration::from_millis(10), 120, 40)
+            .expect("resize");
+        writer
+            .record_exit(Duration::from_millis(20), 0)
+            .expect("exit");
         let rows = lines(&buf);
         let resize: Value = serde_json::from_str(&rows[1]).expect("resize json");
         assert_eq!(resize[1], "r");
@@ -282,7 +286,11 @@ mod tests {
         let written_total: f64 = lines(&buf)
             .iter()
             .skip(1)
-            .map(|line| serde_json::from_str::<Value>(line).unwrap()[0].as_f64().unwrap())
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()[0]
+                    .as_f64()
+                    .unwrap()
+            })
             .sum();
         assert!(
             (written_total - true_total).abs() <= 0.001,
@@ -295,11 +303,17 @@ mod tests {
         // '✓' is U+2713 -> 0xE2 0x9C 0x93. Split across two output chunks.
         let buf = SharedBuf::default();
         let mut writer = AsciicastWriter::start(buf.clone(), &header()).expect("start");
-        writer.record_output(Duration::from_millis(5), &[b'a', 0xE2, 0x9C]).expect("part1");
+        writer
+            .record_output(Duration::from_millis(5), &[b'a', 0xE2, 0x9C])
+            .expect("part1");
         // After the first chunk only "a" is emitted; the partial '✓' is held.
         assert_eq!(lines(&buf.snapshot()).len(), 2, "only header + 'a' so far");
-        writer.record_output(Duration::from_millis(9), &[0x93, b'b']).expect("part2");
-        writer.record_exit(Duration::from_millis(10), 0).expect("exit");
+        writer
+            .record_output(Duration::from_millis(9), &[0x93, b'b'])
+            .expect("part2");
+        writer
+            .record_exit(Duration::from_millis(10), 0)
+            .expect("exit");
 
         let rows = lines(&buf.snapshot());
         let first: Value = serde_json::from_str(&rows[1]).unwrap();
@@ -325,9 +339,17 @@ mod tests {
         let buf = SharedBuf::default();
         let mut writer = AsciicastWriter::start(buf.clone(), &header()).expect("start");
         // A lone lead byte that never completes before EOF.
-        writer.record_output(Duration::from_millis(1), &[0xE2]).expect("partial");
-        assert_eq!(lines(&buf.snapshot()).len(), 1, "nothing emitted while incomplete");
-        writer.record_exit(Duration::from_millis(2), 1).expect("exit");
+        writer
+            .record_output(Duration::from_millis(1), &[0xE2])
+            .expect("partial");
+        assert_eq!(
+            lines(&buf.snapshot()).len(),
+            1,
+            "nothing emitted while incomplete"
+        );
+        writer
+            .record_exit(Duration::from_millis(2), 1)
+            .expect("exit");
         let rows = lines(&buf.snapshot());
         // The truncated byte is surfaced lossily (U+FFFD), not silently dropped.
         let flushed: Value = serde_json::from_str(&rows[1]).unwrap();

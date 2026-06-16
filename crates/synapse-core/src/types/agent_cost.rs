@@ -125,7 +125,9 @@ impl ModelPrice {
             );
         }
         if self.updated_ts_ns == 0 {
-            return Err("MODEL_PRICE_INVALID: updated_ts_ns must be a positive timestamp".to_owned());
+            return Err(
+                "MODEL_PRICE_INVALID: updated_ts_ns must be a positive timestamp".to_owned(),
+            );
         }
         Ok(())
     }
@@ -409,7 +411,12 @@ mod tests {
         // the aggregate rate, preserving pre-#949 behavior.
         let p = price(0, 0, 0, 3_750_000);
         let usage = BillableUsage::from_claude(0, 0, 0, 1000);
-        assert_eq!(p.cost_micro_usd(&usage).expect("ok").cache_creation_micro_usd, 3_750);
+        assert_eq!(
+            p.cost_micro_usd(&usage)
+                .expect("ok")
+                .cache_creation_micro_usd,
+            3_750
+        );
     }
 
     #[test]
@@ -417,7 +424,12 @@ mod tests {
         // 1h tokens present but no 1h rate set -> aggregate rate used, never 0.
         let p = price(0, 0, 0, 3_750_000);
         let usage = BillableUsage::from_claude_with_ttl(0, 0, 0, 1000, 0, 1000);
-        assert_eq!(p.cost_micro_usd(&usage).expect("ok").cache_creation_micro_usd, 3_750);
+        assert_eq!(
+            p.cost_micro_usd(&usage)
+                .expect("ok")
+                .cache_creation_micro_usd,
+            3_750
+        );
     }
 
     #[test]
@@ -484,6 +496,9 @@ mod tests {
 
     #[test]
     fn normalize_id_trims_and_lowercases() {
-        assert_eq!(ModelPrice::normalize_id("  Claude-Fable-5 "), "claude-fable-5");
+        assert_eq!(
+            ModelPrice::normalize_id("  Claude-Fable-5 "),
+            "claude-fable-5"
+        );
     }
 }
