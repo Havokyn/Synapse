@@ -11,6 +11,7 @@
 //! drive a background target through this router but cannot escalate to the
 //! human foreground, which the delegate refuses before any mutation.
 
+use super::browser_field::BrowserSetValueParams;
 use super::{ErrorData, Json, Parameters, SynapseService, tool, tool_router};
 use crate::m1::{
     CaptureScreenshotParams, CdpNavigateAction, CdpNavigateTabParams, ObserveParams, mcp_error,
@@ -62,9 +63,15 @@ pub struct TargetActParams {
     /// `screenshot`: output file path.
     #[serde(default)]
     pub path: Option<String>,
-    /// `set_field`: target element id (from observe/find).
+    /// `set_field`: target element id (from observe/find), for the UIA/CDP-id
+    /// background tiers. Mutually exclusive with `selector`.
     #[serde(default)]
     pub element_id: Option<String>,
+    /// `set_field`: strict CSS selector for the field, routed to the safe
+    /// normal-Chrome bridge (background, no foreground, no debugger). Takes
+    /// precedence over `element_id` when both are present.
+    #[serde(default)]
+    pub selector: Option<String>,
     /// `set_field`: full replacement text (empty clears the field).
     #[serde(default)]
     pub text: Option<String>,
@@ -103,7 +110,7 @@ pub struct TargetActResponse {
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "High-level background-first computer-use router (#1005/#1033). One verb, routed to the correct background-capable, session-targeted primitive — never the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via background tiers; verb=click clicks a target element by semantic/background tiers with verify_delta enabled; verb=run_shell runs a command in the session workspace. Prefer this over raw act_* primitives: it inherits each delegate's target resolution, action audit, and lease/foreground guards, so a normal (leaseless) session can drive a background target but cannot seize the human foreground (the delegate fails closed before input). Mutating delegated failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list)."
+        description = "High-level background-first computer-use router (#1005/#1033). One verb, routed to the correct background-capable, session-targeted primitive — never the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text — by element id via background tiers, or by CSS `selector` routed to the safe normal-Chrome bridge (background, no foreground, no debugger) which is the right path for a web form perceived UIA-only; verb=click clicks a target element by semantic/background tiers with verify_delta enabled; verb=run_shell runs a command in the session workspace. Prefer this over raw act_* primitives: it inherits each delegate's target resolution, action audit, and lease/foreground guards, so a normal (leaseless) session can drive a background target but cannot seize the human foreground (the delegate fails closed before input). Mutating delegated failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list)."
     )]
     pub async fn target_act(
         &self,
@@ -174,24 +181,43 @@ impl SynapseService {
                 )
             }
             "set_field" => {
-                let element_id = require_param(params.element_id, "set_field", "element_id")?;
-                let element_id = ElementId::parse(&element_id).map_err(|error| {
-                    mcp_error(
-                        error_codes::TOOL_PARAMS_INVALID,
-                        format!("target_act verb=set_field element_id is invalid: {error}"),
-                    )
-                })?;
-                let response = self
-                    .act_set_field_text(
-                        Parameters(ActSetFieldTextParams {
-                            element_id,
-                            text: params.text.unwrap_or_default(),
-                            verify_timeout_ms: default_verify_timeout_ms(),
-                        }),
-                        request_context,
-                    )
-                    .await;
-                target_act_delegate_response("act_set_field_text", response)?
+                if let Some(selector) = params.selector.filter(|value| !value.trim().is_empty()) {
+                    // Background-safe web field replace in the user's normal Chrome
+                    // via the safe bridge (no foreground, no debugger, no UIA) — the
+                    // #1000/#1005 path for forms perceived UIA-only.
+                    let response = self
+                        .browser_set_value(
+                            Parameters(BrowserSetValueParams {
+                                text: params.text.unwrap_or_default(),
+                                selector: Some(selector),
+                                active_element: false,
+                                cdp_target_id: None,
+                                window_hwnd: None,
+                            }),
+                            request_context,
+                        )
+                        .await;
+                    target_act_delegate_response("browser_set_value", response)?
+                } else {
+                    let element_id = require_param(params.element_id, "set_field", "element_id")?;
+                    let element_id = ElementId::parse(&element_id).map_err(|error| {
+                        mcp_error(
+                            error_codes::TOOL_PARAMS_INVALID,
+                            format!("target_act verb=set_field element_id is invalid: {error}"),
+                        )
+                    })?;
+                    let response = self
+                        .act_set_field_text(
+                            Parameters(ActSetFieldTextParams {
+                                element_id,
+                                text: params.text.unwrap_or_default(),
+                                verify_timeout_ms: default_verify_timeout_ms(),
+                            }),
+                            request_context,
+                        )
+                        .await;
+                    target_act_delegate_response("act_set_field_text", response)?
+                }
             }
             "click" => {
                 let element_id = require_param(params.element_id, "click", "element_id")?;
@@ -388,6 +414,21 @@ mod tests {
 
         assert_eq!(params.verb.as_str(), "click");
         assert_eq!(params.clicks, Some(2));
+    }
+
+    #[test]
+    fn target_act_set_field_accepts_selector() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "set_field",
+            "selector": "input[name=\"q\"]",
+            "text": "hello"
+        }))
+        .expect("set_field selector params should deserialize");
+
+        assert_eq!(params.verb.as_str(), "set_field");
+        assert_eq!(params.selector.as_deref(), Some("input[name=\"q\"]"));
+        assert_eq!(params.text.as_deref(), Some("hello"));
+        assert!(params.element_id.is_none());
     }
 
     #[test]
