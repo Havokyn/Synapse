@@ -39,9 +39,9 @@ const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecg
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-17-hwnd-bounds-open-tab-v1";
+    "synapse-chrome-bridge-2026-06-17-hwnd-nonmin-open-tab-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "922a68569c4bdf9f75c822b4af02b385af522a3c97f4e4339c6814877f94a179";
+    "5a242bed1c70ae3f13a0b97867319335b1494d7eb42a8b3414c7c22f6c64526e";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "activateTab",
     "closeTab",

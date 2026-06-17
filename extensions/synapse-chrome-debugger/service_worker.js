@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-hwnd-bounds-open-tab-v1";
-const BRIDGE_BUILD_SHA256 = "922a68569c4bdf9f75c822b4af02b385af522a3c97f4e4339c6814877f94a179";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-hwnd-nonmin-open-tab-v1";
+const BRIDGE_BUILD_SHA256 = "5a242bed1c70ae3f13a0b97867319335b1494d7eb42a8b3414c7c22f6c64526e";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
@@ -1169,6 +1169,18 @@ async function selectOpenWindowForHwndHint(params) {
     }
   }
   const nonFocused = candidates.filter((windowInfo) => !windowInfo.focused);
+  const nonFocusedNonMinimized = nonFocused.filter((windowInfo) => windowInfo.state !== "minimized");
+  if (nonFocusedNonMinimized.length === 1) {
+    const selected = nonFocusedNonMinimized[0];
+    return {
+      windowId: selected.id,
+      focused: selected.focused,
+      state: selected.state,
+      selectionReason: "single_non_focused_non_minimized_chrome_window_for_hwnd_hint",
+      candidateCount: candidates.length,
+      nonFocusedCount: nonFocused.length
+    };
+  }
   if (nonFocused.length === 1) {
     return {
       windowId: nonFocused[0].id,
@@ -1189,9 +1201,18 @@ async function selectOpenWindowForHwndHint(params) {
       nonFocusedCount: nonFocused.length
     };
   }
+  const candidateSummary = candidates
+    .map((windowInfo) => {
+      const score = expectedBounds
+        ? windowBoundsDeltaScore(windowInfo.bounds, expectedBounds)
+        : Number.POSITIVE_INFINITY;
+      const scoreText = Number.isFinite(score) ? String(score) : "na";
+      return `id=${windowInfo.id}/focused=${windowInfo.focused}/state=${windowInfo.state || "unknown"}/score=${scoreText}`;
+    })
+    .join(",");
   throw bridgeError(
     ERROR_AXTREE_FAILED,
-    `openTab refused hwnd hint ${String(params.hwnd)}: candidate_count=${candidates.length} non_focused_count=${nonFocused.length}; OS HWND cannot be mapped inside the normal extension bridge`
+    `openTab refused hwnd hint ${String(params.hwnd)}: candidate_count=${candidates.length} non_focused_count=${nonFocused.length} non_focused_non_minimized_count=${nonFocusedNonMinimized.length} candidates=[${candidateSummary}]; OS HWND cannot be mapped inside the normal extension bridge`
   );
 }
 
