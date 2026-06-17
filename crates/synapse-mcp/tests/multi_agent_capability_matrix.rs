@@ -18,9 +18,10 @@ const TOOL_PROFILES_SOURCE: &str = include_str!("../src/server/tool_profiles.rs"
 // completeness this test enforces against the live surface) and the
 // `m4_tools_list` insta snapshot — never a magic `[&str; N]` array. See #1062.
 
-const ALLOWED_STATUS: [&str; 7] = [
+const ALLOWED_STATUS: [&str; 8] = [
     "background-pass",
     "conditional-pass",
+    "foreground-capable-targeted",
     "foreground-lease",
     "gap-linked",
     "control",
@@ -289,7 +290,10 @@ fn assert_row_complete(row: &MatrixRow) -> anyhow::Result<()> {
             row.tool
         );
     }
-    if matches!(row.status.as_str(), "background-pass" | "conditional-pass") {
+    if matches!(
+        row.status.as_str(),
+        "background-pass" | "conditional-pass" | "foreground-capable-targeted"
+    ) {
         ensure!(
             !row.background_path.to_ascii_lowercase().starts_with("none"),
             "{} pass row must name a real background path",

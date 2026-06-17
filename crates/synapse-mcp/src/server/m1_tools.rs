@@ -421,7 +421,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Capture a PNG/JPEG screenshot. With an active session CDP target, captures that exact browser tab through raw CDP Page.captureScreenshot or the safe normal Chrome bridge Page.captureScreenshot path; it never downgrades to the browser HWND, and the normal bridge refuses an active/highlighted tab in the focused human Chrome window. With window_hwnd or a window target, captures that window in the background using passive per-window WGC and interprets region as client-relative. With no target, preserves legacy foreground-window or absolute screen-region capture. PrintWindow is disabled for normal targets because it executes target-process WM_PRINT/WM_PRINTCLIENT handlers, but session-owned hidden-desktop targets use an explicit per-desktop worker PrintWindow path."
+        description = "Capture a PNG/JPEG screenshot. With an active session CDP target, captures that exact browser tab through raw CDP Page.captureScreenshot or the safe normal Chrome bridge Page.captureScreenshot path; it never downgrades to the browser HWND, does not reject a session-owned tab merely because it is active/highlighted in a focused Chrome window, and verifies target/window readback before writing bytes. With window_hwnd or a window target, captures that window in the background using passive per-window WGC and interprets region as client-relative. With no target, preserves legacy foreground-window or absolute screen-region capture. PrintWindow is disabled for normal targets because it executes target-process WM_PRINT/WM_PRINTCLIENT handlers, but session-owned hidden-desktop targets use an explicit per-desktop worker PrintWindow path."
     )]
     pub async fn capture_screenshot(
         &self,
@@ -1096,19 +1096,6 @@ impl SynapseService {
                     format!(
                         "capture_screenshot Chrome bridge captured Chrome window {:?} for requested target {:?}, expected Chrome window {}",
                         captured.chrome_window_id, cdp_target_id, expected_window_id
-                    ),
-                ));
-            }
-            if chrome_tab_screenshot_hits_visible_human_tab(
-                captured.chrome_window_focused,
-                captured.before_active || captured.before_highlighted,
-                captured.active_for_capture || captured.highlighted_for_capture,
-            ) {
-                return Err(mcp_error(
-                    error_codes::CAPTURE_TARGET_INVALID,
-                    format!(
-                        "capture_screenshot Chrome bridge refused target {cdp_target_id:?}: target tab is active/highlighted in focused Chrome window {:?}",
-                        captured.chrome_window_id
                     ),
                 ));
             }
@@ -4985,14 +4972,6 @@ fn capture_target_window_screenshot_to_file(
     )
 }
 
-fn chrome_tab_screenshot_hits_visible_human_tab(
-    chrome_window_focused: Option<bool>,
-    before_visible_tab: bool,
-    after_visible_tab: bool,
-) -> bool {
-    chrome_window_focused == Some(true) && (before_visible_tab || after_visible_tab)
-}
-
 #[cfg(windows)]
 fn chrome_capture_visible_tab_data_url_to_bgra(
     data_url: &str,
@@ -7159,11 +7138,10 @@ mod tests {
         TargetWire, attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
         cdp_activate_resolution_request_details, cdp_target_info_resolution_request_details,
         chrome_capture_visible_tab_data_url_to_bgra, chrome_page_vitals_info,
-        chrome_tab_screenshot_hits_visible_human_tab, hidden_desktop_pip_ended_response,
-        hidden_worker_target_miss, mcp_error, ocr_cache_key, page_text_info_from_parts,
-        perception_window_hwnd, resolve_capture_target_window_context, sha256_hex, target_wire,
-        template_value, unavailable_page_vitals_info, validate_browser_evaluate_params,
-        validate_target_window,
+        hidden_desktop_pip_ended_response, hidden_worker_target_miss, mcp_error, ocr_cache_key,
+        page_text_info_from_parts, perception_window_hwnd, resolve_capture_target_window_context,
+        sha256_hex, target_wire, template_value, unavailable_page_vitals_info,
+        validate_browser_evaluate_params, validate_target_window,
     };
     use crate::m1::{
         BrowserEvaluateParams, CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult,
@@ -7465,34 +7443,6 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(code, Some(error_codes::A11Y_CDP_AXTREE_FAILED));
         println!("readback=capture_screenshot edge=non_image_data_url code={code:?}");
-    }
-
-    #[test]
-    fn chrome_tab_screenshot_refuses_visible_human_tab_only() {
-        assert!(chrome_tab_screenshot_hits_visible_human_tab(
-            Some(true),
-            true,
-            false
-        ));
-        assert!(chrome_tab_screenshot_hits_visible_human_tab(
-            Some(true),
-            false,
-            true
-        ));
-        assert!(!chrome_tab_screenshot_hits_visible_human_tab(
-            Some(true),
-            false,
-            false
-        ));
-        assert!(!chrome_tab_screenshot_hits_visible_human_tab(
-            Some(false),
-            true,
-            true
-        ));
-        assert!(!chrome_tab_screenshot_hits_visible_human_tab(
-            None, true, true
-        ));
-        println!("readback=capture_screenshot edge=visible_human_tab_predicate ok=true");
     }
 
     #[test]

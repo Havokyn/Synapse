@@ -89,14 +89,16 @@ available; if the profile exposes only the focused human Chrome window, it
 creates only an inactive background tab in that existing window and returns the
 actual `chrome_window_id` plus active/highlighted readback. It never creates a
 helper Chrome window. Multiple non-focused windows are ambiguous and fail
-closed. `capturePageScreenshot` refuses a tab that is active/highlighted in a
-focused Chrome window, attaches the debugger only to the requested synthetic
-`chrome-tab:<id>` target, calls `Page.captureScreenshot`, and detaches in a
-`finally` path. `evaluateScript` attaches only to the requested session-owned
-`chrome-tab:<id>` target, calls `Runtime.evaluate` with the Chrome DevTools
-Protocol CSP bypass flag, and detaches in a `finally` path so CSP-hardened pages
-do not require `unsafe-eval`. It does not refuse a target merely because that
-owned target is active/highlighted in a focused Chrome window.
+closed. `capturePageScreenshot` attaches the debugger only to the requested
+synthetic `chrome-tab:<id>` target, verifies the Chrome window/target readback,
+calls `Page.captureScreenshot`, and detaches in a `finally` path. It does not
+refuse a session-owned target merely because that target is active/highlighted
+in a focused Chrome window. `evaluateScript` attaches only to the requested
+session-owned `chrome-tab:<id>` target, calls `Runtime.evaluate` with the Chrome
+DevTools Protocol CSP bypass flag, and detaches in a `finally` path so
+CSP-hardened pages do not require `unsafe-eval`. It does not refuse a target
+merely because that owned target is active/highlighted in a focused Chrome
+window.
 `evaluateScript` is page-scoped only and returns CDP-like value metadata;
 `pageVitals` and `targetInfoPageText` read the page Performance Timeline for LCP
 plus document visibility state. Other commands do not call

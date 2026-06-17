@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-csp-evaluate-debugger-v2";
-const BRIDGE_BUILD_SHA256 = "79ea872303b48bf8e2690bc1d078b66e68c85a60ae49f86bd62f615893ea3b0e";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-csp-evaluate-debugger-v3";
+const BRIDGE_BUILD_SHA256 = "de1c08fc48f48763f93b4f64296556b8401e575ec0e39356a3e69a51c8d1b12c";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
@@ -569,12 +569,6 @@ async function handleCapturePageScreenshot(params) {
     );
   }
   const captureWindow = await chromeWindowState(windowId);
-  if (captureWindow?.focused === true && (before.active || before.highlighted)) {
-    throw bridgeError(
-      ERROR_AXTREE_FAILED,
-      `capturePageScreenshot refused target ${selected.target.id}: tab is active/highlighted in focused Chrome window ${windowId}`
-    );
-  }
   if (!chrome.debugger || typeof chrome.debugger.attach !== "function" || typeof chrome.debugger.sendCommand !== "function") {
     throw bridgeError(
       ERROR_AXTREE_FAILED,
