@@ -1169,6 +1169,66 @@ pub struct BrowserInspectResponse {
     pub required_foreground: bool,
 }
 
+/// Selector strategy for `browser_locate` (#1110).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserLocateStrategy {
+    /// CSS selector via `DOM.querySelectorAll`.
+    #[default]
+    Css,
+    /// XPath query via `DOM.performSearch`.
+    Xpath,
+}
+
+/// Parameters for `browser_locate` (#1111/#1112/#1119): resolve a selector to
+/// element ids in the calling session's owned CDP page target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocateParams {
+    /// CSS selector (default) or XPath query, per `strategy`.
+    pub selector: String,
+    /// Resolution strategy: "css" (default) or "xpath".
+    #[serde(default)]
+    pub strategy: BrowserLocateStrategy,
+    /// CDP TargetID to query. Defaults to the active session CDP target. Must be
+    /// owned by this session; the human foreground tab is never a fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Maximum element ids to return (default 50, capped at 500). `match_count`
+    /// always reports the full number of matches.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Response for `browser_locate`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocateResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub strategy: String,
+    pub selector: String,
+    /// Total matches before the `limit` cap (this is the Playwright `count()`).
+    pub match_count: usize,
+    /// Number of element ids returned (== `element_ids.len()`).
+    pub returned_count: usize,
+    /// True when `match_count` exceeded the returned cap.
+    pub truncated: bool,
+    /// Resolved element ids — feed directly into `browser_inspect`, `act_*`, etc.
+    pub element_ids: Vec<String>,
+    pub url: String,
+    pub title: String,
+    pub readback_backend: String,
+    pub required_foreground: bool,
+}
+
 pub fn empty_input_schema() -> Arc<JsonObject> {
     common::schema_for_type::<EmptyParams>()
 }

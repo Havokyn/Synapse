@@ -23,7 +23,8 @@ use crate::{
     http::sse::SseState,
     m1::{
         BrowserContentParams, BrowserContentResponse, BrowserEvaluateParams, BrowserEvaluateResponse,
-        BrowserInspectParams, BrowserInspectResponse, CaptureScreenshotFormat, ElementInspection,
+        BrowserInspectParams, BrowserInspectResponse, BrowserLocateParams, BrowserLocateResponse,
+        BrowserLocateStrategy, CaptureScreenshotFormat, ElementInspection,
         CaptureScreenshotParams, CaptureScreenshotResponse,
         CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
         CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse,

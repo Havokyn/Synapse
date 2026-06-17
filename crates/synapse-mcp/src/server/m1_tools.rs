@@ -1,6 +1,7 @@
 use super::{
     BrowserContentParams, BrowserContentResponse, BrowserEvaluateParams, BrowserEvaluateResponse,
-    BrowserInspectParams, BrowserInspectResponse, CaptureScreenshotFormat, ElementInspection,
+    BrowserInspectParams, BrowserInspectResponse, BrowserLocateParams, BrowserLocateResponse,
+    BrowserLocateStrategy, CaptureScreenshotFormat, ElementInspection,
     CaptureScreenshotParams, CaptureScreenshotResponse,
     CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
@@ -1677,6 +1678,90 @@ impl SynapseService {
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
+
+    #[tool(
+        description = "Resolve a CSS or XPath selector to element ids in the calling session's owned background browser tab via raw CDP (DOM.querySelectorAll / DOM.performSearch). Returns match_count (the Playwright count()), the resolved element_ids (capped at limit) that feed directly into browser_inspect / act_* / etc., and url/title. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe. Raw CDP only; the popup-safe extension bridge fails closed."
+    )]
+    pub async fn browser_locate(
+        &self,
+        params: Parameters<BrowserLocateParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserLocateResponse>, ErrorData> {
+        const TOOL: &str = "browser_locate";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_locate"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        if params.0.selector.trim().is_empty() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "browser_locate requires a non-empty selector",
+            ));
+        }
+        if params.0.selector.len() > BROWSER_LOCATE_MAX_SELECTOR_BYTES {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "browser_locate selector is {} bytes; the maximum is {BROWSER_LOCATE_MAX_SELECTOR_BYTES}",
+                    params.0.selector.len()
+                ),
+            ));
+        }
+        if let Some(target_id) = params.0.cdp_target_id.as_deref() {
+            validate_cdp_target_id(target_id)?;
+        }
+        let limit = params
+            .0
+            .limit
+            .unwrap_or(DEFAULT_BROWSER_LOCATE_LIMIT)
+            .clamp(1, MAX_BROWSER_LOCATE_LIMIT);
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "strategy": params.0.strategy,
+            "selector_len": params.0.selector.len(),
+            "limit": limit,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "strategy": params.0.strategy,
+            "selector_len": params.0.selector.len(),
+            "limit": limit,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_locate_impl(
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                params.0.strategy,
+                &params.0.selector,
+                limit,
+            )
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
 }
 
 /// Resolves the calling session id for target tools, failing loud when absent
@@ -2887,6 +2972,87 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_locate_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        strategy: BrowserLocateStrategy,
+        selector: &str,
+        limit: usize,
+    ) -> Result<BrowserLocateResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error("browser_locate", window_hwnd));
+        };
+        let a11y_strategy = match strategy {
+            BrowserLocateStrategy::Css => synapse_a11y::CdpLocateStrategy::Css,
+            BrowserLocateStrategy::Xpath => synapse_a11y::CdpLocateStrategy::Xpath,
+        };
+        let located =
+            synapse_a11y::cdp_locate(&endpoint, cdp_target_id, a11y_strategy, selector, limit)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("browser_locate raw CDP selector resolution failed: {error}"),
+                    )
+                })?;
+        let element_ids: Vec<String> = located
+            .backend_node_ids
+            .iter()
+            .map(|backend| {
+                synapse_a11y::cdp_element_id_for_target(window_hwnd, &located.target_id, *backend)
+                    .to_string()
+            })
+            .collect();
+        tracing::info!(
+            code = "CDP_BACKGROUND_LOCATE",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %located.target_id,
+            strategy = %located.strategy,
+            match_count = located.match_count,
+            returned_count = element_ids.len(),
+            target_url = %located.url,
+            "readback=DOM.querySelectorAll/performSearch outcome=located"
+        );
+        Ok(BrowserLocateResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: located.target_id,
+            strategy: located.strategy,
+            selector: located.selector,
+            match_count: located.match_count,
+            returned_count: element_ids.len(),
+            truncated: located.truncated,
+            element_ids,
+            url: located.url,
+            title: located.title,
+            readback_backend: "DOM.querySelectorAll/performSearch + DOM.describeNode".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_locate_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _strategy: BrowserLocateStrategy,
+        _selector: &str,
+        _limit: usize,
+    ) -> Result<BrowserLocateResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_locate is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
     async fn cdp_open_tab_raw_impl(
         &self,
         session_id: &str,
@@ -3700,6 +3866,10 @@ fn validate_browser_evaluate_params(params: &BrowserEvaluateParams) -> Result<()
 }
 
 const BROWSER_EVALUATE_MAX_ARGS: usize = 64;
+
+const DEFAULT_BROWSER_LOCATE_LIMIT: usize = 50;
+const MAX_BROWSER_LOCATE_LIMIT: usize = 500;
+const BROWSER_LOCATE_MAX_SELECTOR_BYTES: usize = 16 * 1024;
 
 const DEFAULT_BROWSER_CONTENT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BROWSER_CONTENT_BYTES: usize = 8 * 1024 * 1024;

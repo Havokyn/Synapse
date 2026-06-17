@@ -188,6 +188,41 @@ pub struct CdpEvaluateResult {
     pub unserializable_value: Option<String>,
 }
 
+/// Selector resolution strategy for [`cdp_locate`] (#1111/#1112).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CdpLocateStrategy {
+    /// `DOM.querySelectorAll` (CSS selector).
+    Css,
+    /// `DOM.performSearch` with an XPath query.
+    Xpath,
+}
+
+impl CdpLocateStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Css => "css",
+            Self::Xpath => "xpath",
+        }
+    }
+}
+
+/// Result of resolving a selector to live DOM nodes in a CDP page target
+/// (#1110). `backend_node_ids` are the matched nodes (capped at the caller's
+/// limit); `match_count` is the total number of matches before the cap.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpLocateResult {
+    pub target_id: String,
+    pub url: String,
+    pub title: String,
+    pub strategy: String,
+    pub selector: String,
+    pub match_count: usize,
+    pub backend_node_ids: Vec<i64>,
+    pub returned_count: usize,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CdpPageNavigationResult {
     pub target_id: String,
@@ -913,6 +948,108 @@ pub async fn cdp_evaluate_on_element(
             return_by_value,
             returns.result,
         ))
+    })
+    .await
+}
+
+/// Resolves a CSS or XPath `selector` to live DOM nodes in a CDP page target,
+/// returning their `backendNodeId`s (capped at `limit`) plus the total match
+/// count (#1111/#1112/#1119). Background-safe: read-only, no tab activation, no
+/// OS foreground input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the document/query/search/describe commands fail
+/// (an invalid selector surfaces the protocol error verbatim).
+pub async fn cdp_locate(
+    endpoint: &str,
+    target_id: &str,
+    strategy: CdpLocateStrategy,
+    selector: &str,
+    limit: usize,
+) -> A11yResult<CdpLocateResult> {
+    use chromiumoxide::cdp::browser_protocol::dom::{
+        DescribeNodeParams, DiscardSearchResultsParams, GetDocumentParams, GetSearchResultsParams,
+        PerformSearchParams, QuerySelectorAllParams,
+    };
+    let selector = selector.to_owned();
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        let state = read_page_state(&page).await?;
+        let (node_ids, match_count) = match strategy {
+            CdpLocateStrategy::Css => {
+                let document = page
+                    .execute(GetDocumentParams::builder().depth(0).build())
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("DOM.getDocument: {err}"),
+                    })?;
+                let root = document.result.root.node_id;
+                let found = page
+                    .execute(QuerySelectorAllParams::new(root, selector.clone()))
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("DOM.querySelectorAll({selector:?}): {err}"),
+                    })?;
+                let ids = found.result.node_ids.clone();
+                let total = ids.len();
+                (ids.into_iter().take(limit).collect::<Vec<_>>(), total)
+            }
+            CdpLocateStrategy::Xpath => {
+                let search = page
+                    .execute(PerformSearchParams::new(selector.clone()))
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("DOM.performSearch({selector:?}): {err}"),
+                    })?;
+                let search_id = search.result.search_id.clone();
+                let total = usize::try_from(search.result.result_count).unwrap_or(0);
+                let want = total.min(limit);
+                let ids = if want > 0 {
+                    let got = page
+                        .execute(GetSearchResultsParams::new(
+                            search_id.clone(),
+                            0,
+                            i64::try_from(want).unwrap_or(i64::MAX),
+                        ))
+                        .await
+                        .map_err(|err| A11yError::CdpAxtreeFailed {
+                            detail: format!("DOM.getSearchResults({selector:?}): {err}"),
+                        })?;
+                    got.result.node_ids.clone()
+                } else {
+                    Vec::new()
+                };
+                // Best-effort cleanup of the search session; failure is non-fatal.
+                let _ = page
+                    .execute(DiscardSearchResultsParams::new(search_id))
+                    .await;
+                (ids, total)
+            }
+        };
+        let mut backend_node_ids = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            let described = page
+                .execute(DescribeNodeParams::builder().node_id(node_id).build())
+                .await
+                .map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("DOM.describeNode: {err}"),
+                })?;
+            backend_node_ids.push(*described.result.node.backend_node_id.inner());
+        }
+        let returned_count = backend_node_ids.len();
+        Ok(CdpLocateResult {
+            target_id,
+            url: state.url,
+            title: state.title,
+            strategy: strategy.as_str().to_owned(),
+            selector,
+            match_count,
+            backend_node_ids,
+            returned_count,
+            truncated: match_count > returned_count,
+        })
     })
     .await
 }
