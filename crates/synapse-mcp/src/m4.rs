@@ -117,6 +117,8 @@ const SHELL_REMOTE_CLEANUP_TRACKED: &str = "remote_process_tracked";
 const SHELL_REMOTE_CLEANUP_VERIFIED: &str = "remote_cleanup_verified";
 const SHELL_REMOTE_CLEANUP_UNVERIFIED: &str = "remote_cleanup_unverified";
 const SHELL_REMOTE_CLEANUP_FAILED: &str = "remote_cleanup_failed";
+const SHELL_REMOTE_CLEANUP_PRE_MARKER_TERMINAL: &str =
+    "remote_process_never_started_or_untracked_pre_marker";
 const SHELL_REMOTE_PROCESS_MARKER: &str = "SYNAPSE_REMOTE_PROCESS_V1";
 const SHELL_REMOTE_CLEANUP_MARKER: &str = "SYNAPSE_REMOTE_CLEANUP_V1";
 const SHELL_REMOTE_METADATA_PREFIX_BYTES: usize = 128 * 1024;
@@ -2386,6 +2388,11 @@ pub fn cancel_shell_job(
         if job.remote_process_scope.remote_cleanup_required
             && !job.remote_process_scope.remote_cleanup_verified
             && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
+            && !mark_shell_job_remote_pre_marker_terminal_if_detected(
+                &mut job,
+                &paths,
+                "act_run_shell_cancel",
+            )?
         {
             mark_shell_job_remote_cleanup_unverified(
                 &mut job,
@@ -2404,6 +2411,11 @@ pub fn cancel_shell_job(
             attempt_shell_job_remote_cleanup(&mut job, &paths, "act_run_shell_cancel", None);
         if !job.remote_process_scope.remote_cleanup_verified
             && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
+            && !mark_shell_job_remote_pre_marker_terminal_if_detected(
+                &mut job,
+                &paths,
+                "act_run_shell_cancel",
+            )?
         {
             mark_shell_job_remote_cleanup_unverified(
                 &mut job,
@@ -6865,6 +6877,135 @@ fn mark_shell_job_remote_cleanup_unverified(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct RemotePreMarkerTerminalEvidence {
+    reason: &'static str,
+    pattern: &'static str,
+}
+
+fn mark_shell_job_remote_pre_marker_terminal(
+    job: &mut ActRunShellJobStatus,
+    trigger: &'static str,
+    terminal_status: &str,
+    evidence: RemotePreMarkerTerminalEvidence,
+) {
+    if !job.remote_process_scope.remote_cleanup_required
+        || job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_TRACKING_PENDING
+        || job.remote_process_scope.remote_process_id.is_some()
+        || job.remote_process_scope.remote_process_group_id.is_some()
+    {
+        return;
+    }
+    let remote_identity = job
+        .remote_process_scope
+        .remote_identity
+        .as_deref()
+        .unwrap_or("unknown_remote");
+    let suggested_readback = shell_remote_pre_marker_readback_hint(job);
+    let message = format!(
+        "{trigger} classified SSH remote tracking as pre-marker terminal failure for '{remote_identity}'; terminal_status='{terminal_status}'; reason={}; no {SHELL_REMOTE_PROCESS_MARKER} pid/process-group marker was found, so Synapse did not acquire a remote cleanup handle and will not report remote cleanup as unresolved. suggested_safe_readback={suggested_readback}",
+        evidence.reason
+    );
+    job.remote_process_scope.remote_cleanup_required = false;
+    job.remote_process_scope.remote_cleanup_verified = false;
+    job.remote_process_scope.remote_cleanup_status =
+        SHELL_REMOTE_CLEANUP_PRE_MARKER_TERMINAL.to_owned();
+    job.remote_process_scope.remote_cleanup_error_code = None;
+    job.remote_process_scope.remote_cleanup_message = Some(message);
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        format!("remote_tracking_pre_marker_terminal:{}", evidence.reason),
+    );
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        format!("remote_tracking_pre_marker_pattern:{}", evidence.pattern),
+    );
+    if job.error_code.as_deref() == Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED) {
+        job.error_code = None;
+        job.error_message = None;
+    }
+}
+
+fn mark_shell_job_remote_pre_marker_terminal_if_detected(
+    job: &mut ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+    trigger: &'static str,
+) -> Result<bool, ErrorData> {
+    if job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH
+        || job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_TRACKING_PENDING
+        || job.remote_process_scope.remote_process_id.is_some()
+        || job.remote_process_scope.remote_process_group_id.is_some()
+    {
+        return Ok(false);
+    }
+    let stderr_prefix =
+        read_file_prefix_lossy(&paths.stderr_path, SHELL_REMOTE_METADATA_PREFIX_BYTES)?;
+    let stderr_tail = tail_file_lossy(&paths.stderr_path, SHELL_JOB_TAIL_DEFAULT_BYTES as usize)?;
+    let evidence = remote_pre_marker_terminal_evidence(&stderr_prefix)
+        .or_else(|| remote_pre_marker_terminal_evidence(&stderr_tail));
+    let Some(evidence) = evidence else {
+        return Ok(false);
+    };
+    let terminal_status = job.status.clone();
+    mark_shell_job_remote_pre_marker_terminal(job, trigger, &terminal_status, evidence);
+    Ok(true)
+}
+
+fn remote_pre_marker_terminal_evidence(stderr: &str) -> Option<RemotePreMarkerTerminalEvidence> {
+    let lower = stderr.to_ascii_lowercase();
+    let patterns = [
+        (
+            "remote_shell_unmatched_quote",
+            "unexpected eof while looking for matching",
+        ),
+        (
+            "remote_shell_unexpected_end",
+            "syntax error: unexpected end of file",
+        ),
+        (
+            "remote_shell_unterminated_quote",
+            "syntax error: unterminated quoted string",
+        ),
+        (
+            "remote_shell_unterminated_quote",
+            "unterminated quoted string",
+        ),
+        ("remote_shell_parse_error", "parse error near"),
+    ];
+    patterns
+        .iter()
+        .find(|(_, pattern)| lower.contains(pattern))
+        .map(|(reason, pattern)| RemotePreMarkerTerminalEvidence { reason, pattern })
+}
+
+fn shell_remote_pre_marker_readback_hint(job: &ActRunShellJobStatus) -> String {
+    let remote_identity = job
+        .remote_process_scope
+        .remote_identity
+        .as_deref()
+        .unwrap_or("<remote>");
+    let remote_command = format!(
+        "ps -eo pid,pgid,stat,args | grep -F {} | grep -F {} | grep -v grep",
+        shell_word_for_double_quoted_grep(SHELL_REMOTE_PROCESS_MARKER),
+        shell_word_for_double_quoted_grep(&job.job_id)
+    );
+    if let Some(invocation) = shell_job_ssh_command_invocation(&job.command, &job.args) {
+        if let Some(parts) = ssh_direct_command_parts(&invocation.args) {
+            let mut args = parts.control_args;
+            args.push(remote_command);
+            return shell_command_line_from_parts(&invocation.command, &args);
+        }
+    }
+    format!(
+        "ssh {remote_identity} {}",
+        posix_single_quote(&remote_command)
+    )
+}
+
+fn shell_word_for_double_quoted_grep(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RemoteProcessMetadata {
     job_id: String,
     pid: String,
@@ -6947,6 +7088,19 @@ fn verify_shell_job_remote_cleanup_after_terminal(
     }
 
     if job.remote_process_scope.remote_cleanup_status == SHELL_REMOTE_CLEANUP_TRACKING_PENDING {
+        match mark_shell_job_remote_pre_marker_terminal_if_detected(job, paths, trigger) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                mark_shell_job_remote_cleanup_failed(
+                    job,
+                    trigger,
+                    "pre_marker_stderr_read_failed",
+                    &format!("{error:?}"),
+                );
+                return;
+            }
+        }
         let terminal_status = job.status.clone();
         mark_shell_job_remote_cleanup_unverified(job, trigger, &terminal_status);
     }
@@ -11096,6 +11250,94 @@ mod tests {
             Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED)
         );
         assert!(!status.remote_process_scope.remote_cleanup_verified);
+    }
+
+    #[test]
+    fn shell_terminal_pre_marker_parse_failure_is_classified_without_cleanup_unverified() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+            remote_cleanup_path: temp.path().join("remote-cleanup.json"),
+        };
+        let stderr = "bash: -c: line 1: unexpected EOF while looking for matching `''\n";
+        std::fs::write(&paths.stdout_path, b"")
+            .unwrap_or_else(|error| panic!("write stdout log: {error}"));
+        std::fs::write(&paths.stderr_path, stderr)
+            .unwrap_or_else(|error| panic!("write stderr log: {error}"));
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec![
+                "-p".to_owned(),
+                "22231".to_owned(),
+                "-i".to_owned(),
+                "issue1231_key".to_owned(),
+                "aiwonder".to_owned(),
+                "bash -lc 'echo issue1231".to_owned(),
+            ],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue1231-pre-marker-parse".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe -p 22231 -i issue1231_key aiwonder \"bash -lc 'echo issue1231\""
+                .to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+        };
+        let mut status = shell_job_status_record(
+            "issue1231-pre-marker-parse",
+            "exit_nonzero",
+            &params,
+            &paths,
+            "request-sha",
+            &authorization,
+            "2026-06-17T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        );
+        status.exit_code = Some(2);
+
+        verify_shell_job_remote_cleanup_after_terminal(
+            &mut status,
+            &paths,
+            "regression_terminal_readback",
+            None,
+        );
+
+        println!(
+            "readback=act_run_shell_remote_cleanup edge=pre_marker_parse before=tracking_pending stderr={stderr:?} after={:?}",
+            status.remote_process_scope
+        );
+        assert_eq!(
+            status.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_PRE_MARKER_TERMINAL
+        );
+        assert!(!status.remote_process_scope.remote_cleanup_required);
+        assert!(!status.remote_process_scope.remote_cleanup_verified);
+        assert_eq!(status.remote_process_scope.remote_cleanup_error_code, None);
+        assert_eq!(status.error_code, None);
+        assert!(
+            status
+                .remote_process_scope
+                .remote_cleanup_message
+                .as_deref()
+                .is_some_and(|message| message.contains(
+                    "suggested_safe_readback=ssh.exe -p 22231 -i issue1231_key aiwonder"
+                ))
+        );
+        assert!(
+            status
+                .remote_process_scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence
+                    == "remote_tracking_pre_marker_terminal:remote_shell_unmatched_quote")
+        );
     }
 
     #[test]
