@@ -183,9 +183,14 @@ not accepted as live session proof.
   `%LOCALAPPDATA%\synapse\codex-start-snapshots`. If setup later sees the live
   daemon schema hash differ from `SYNAPSE_TOOL_SURFACE_HASH_AT_CODEX_START`, it
   fails with `SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE` and reports
-  added/removed/schema-changed tools. Restart Codex through the patched launcher
-  so the real wired `mcp__synapse` client loads the new schema. Direct HTTP or
-  stdio probes remain diagnostics only and are not D1/client-parity FSV.
+  added/removed/schema-changed tools. It also writes a same-agent restart
+  handoff under `%LOCALAPPDATA%\synapse\codex-restart-handoffs` in JSON and
+  Markdown. The handoff names the stale Codex PID, daemon PID/bind, current
+  snapshot, start snapshot, required wake-up files, GitHub issue reads, and
+  post-restart verification steps. Restart Codex through the patched launcher
+  so the real wired `mcp__synapse` client loads the new schema, then read the
+  handoff plus `STATE/RECOVERY_NOTES.md` before resuming. Direct HTTP or stdio
+  probes remain diagnostics only and are not D1/client-parity FSV.
 - **WSL Codex/Claude leaves `synapse-mcp --mode connect` children under
   `wsl.exe`** — this is a configuration error. Reconfigure the WSL client to
   HTTP transport with bearer auth. The bridge now refuses direct WSL interop

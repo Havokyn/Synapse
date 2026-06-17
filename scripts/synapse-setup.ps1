@@ -1806,13 +1806,202 @@ function Get-SynapseToolSurfaceDiffSummary {
         (Format-SynapseLimitedList -Items $changed))
 }
 
+function Write-SynapseUtf8NoBomFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Text
+    )
+
+    $dir = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $Text, $encoding)
+}
+
+function Get-SynapseHandoffGitReadback {
+    param([AllowNull()][string]$SourceDir)
+
+    if ([string]::IsNullOrWhiteSpace($SourceDir) -or -not (Test-Path -LiteralPath $SourceDir)) {
+        return [ordered]@{
+            available = $false
+            reason = 'source_dir_missing_or_not_supplied'
+            source_dir = $SourceDir
+        }
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        return [ordered]@{
+            available = $false
+            reason = 'git_not_found'
+            source_dir = $SourceDir
+        }
+    }
+
+    try {
+        $status = @(& git -C $SourceDir status --short --branch 2>&1)
+        $head = @(& git -C $SourceDir rev-parse HEAD 2>&1)
+        $origin = @(& git -C $SourceDir rev-parse origin/main 2>&1)
+        $branch = @(& git -C $SourceDir branch --show-current 2>&1)
+        return [ordered]@{
+            available = $true
+            source_dir = $SourceDir
+            branch = (($branch | Select-Object -First 1) -join '').Trim()
+            head = (($head | Select-Object -First 1) -join '').Trim()
+            origin_main = (($origin | Select-Object -First 1) -join '').Trim()
+            status_short_branch = @($status)
+        }
+    } catch {
+        return [ordered]@{
+            available = $false
+            reason = 'git_readback_failed'
+            source_dir = $SourceDir
+            error = $_.Exception.Message
+        }
+    }
+}
+
+function New-SynapseCodexRestartHandoff {
+    param(
+        [Parameter(Mandatory=$true)]$CodexAncestor,
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [Parameter(Mandatory=$true)]$CurrentSurface,
+        [AllowNull()]$StartSurface,
+        [AllowNull()][string]$ProcessHashAtStart,
+        [AllowNull()][string]$ProcessSnapshotAtStart,
+        [Parameter(Mandatory=$true)][string]$SnapshotPath,
+        [Parameter(Mandatory=$true)][string]$DiffSummary,
+        [AllowNull()][string]$SourceDir,
+        [AllowNull()][string]$Bind,
+        [AllowNull()][string]$TokenPath
+    )
+
+    $handoffRoot = Join-Path $env:LOCALAPPDATA 'synapse\codex-restart-handoffs'
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
+    $codexPid = try { [int]$CodexAncestor.ProcessId } catch { 0 }
+    $baseName = "codex-restart-handoff-$codexPid-$stamp"
+    $jsonPath = Join-Path $handoffRoot "$baseName.json"
+    $markdownPath = Join-Path $handoffRoot "$baseName.md"
+    $startSnapshotStatus = if ($null -eq $StartSurface) {
+        'missing'
+    } elseif ($StartSurface.unreadable) {
+        'unreadable'
+    } else {
+        'read'
+    }
+
+    $repoRoot = if ([string]::IsNullOrWhiteSpace($SourceDir)) { 'C:\code\Synapse' } else { $SourceDir }
+    $requiredReads = @(
+        (Join-Path $repoRoot 'docs2\AICodingAgentSuperPrompt.md'),
+        'C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md',
+        (Join-Path $repoRoot 'docs\compressionprompt.md'),
+        (Join-Path $repoRoot 'AGENTS.md'),
+        (Join-Path $repoRoot 'STATE\ACTIVE_OBJECTIVE.md'),
+        (Join-Path $repoRoot 'STATE\CURRENT_STATE.md'),
+        (Join-Path $repoRoot 'STATE\RECOVERY_NOTES.md'),
+        (Join-Path $repoRoot 'STATE\DECISION_LOG.md'),
+        (Join-Path $repoRoot 'STATE\HEARTBEAT.md')
+    )
+
+    $handoff = [ordered]@{
+        schema_version = 1
+        artifact_kind = 'synapse_codex_restart_handoff'
+        created_at_utc = [DateTime]::UtcNow.ToString('o')
+        reason_code = 'SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE'
+        reason = $Reason
+        required_restart = $true
+        no_in_process_hot_refresh = $true
+        explanation = 'The already-running Codex process cannot mutate its loaded MCP callable metadata; restart through the patched Codex launcher is the only same-agent recovery boundary.'
+        codex_process = [ordered]@{
+            pid = $codexPid
+            name = [string]$CodexAncestor.Name
+            command_line = [string]$CodexAncestor.CommandLine
+        }
+        daemon = [ordered]@{
+            bind = $Bind
+            pid = $CurrentSurface.daemon_pid
+            tool_count = $CurrentSurface.tool_count
+            tool_surface_sha256 = [string]$CurrentSurface.tool_surface_sha256
+            snapshot_path = $SnapshotPath
+        }
+        current_process_start_surface = [ordered]@{
+            env_hash_present = -not [string]::IsNullOrWhiteSpace($ProcessHashAtStart)
+            env_hash = $ProcessHashAtStart
+            env_snapshot_path = $ProcessSnapshotAtStart
+            snapshot_status = $startSnapshotStatus
+        }
+        diff = [ordered]@{
+            summary = $DiffSummary
+        }
+        post_restart_required_reads = $requiredReads
+        github_reads = @(
+            'gh issue view 351 --repo ChrisRoyse/Synapse --comments',
+            'gh issue view 1213 --repo ChrisRoyse/Synapse --comments',
+            'gh issue view 1212 --repo ChrisRoyse/Synapse --comments',
+            'gh issue view 1211 --repo ChrisRoyse/Synapse --comments',
+            'gh issue list --repo ChrisRoyse/Synapse --state open --limit 50'
+        )
+        post_restart_verification = @(
+            'Run git status --short --branch and confirm the working tree matches STATE/RECOVERY_NOTES.md.',
+            'Call real mcp__synapse.health and verify daemon pid/tool_surface_sha256 matches or intentionally supersedes this handoff.',
+            'Run tool discovery for the previously missing tool, for example tool_search browser_evaluate.',
+            'If the callable tool is exposed, resume the issue recorded in STATE/RECOVERY_NOTES.md and perform manual real-MCP FSV; do not use direct helper calls as acceptance.'
+        )
+        restart_command_hint = 'Close this Codex session, start a new Codex session through the patched Codex launcher, then say: continue your work, you are the only agent working.'
+        repo_readback = Get-SynapseHandoffGitReadback -SourceDir $SourceDir
+        token_path = $TokenPath
+    }
+
+    $jsonText = $handoff | ConvertTo-Json -Depth 12
+    Write-SynapseUtf8NoBomFile -Path $jsonPath -Text $jsonText
+
+    $markdownLines = @(
+        '# Synapse Codex Restart Handoff',
+        '',
+        "- Reason: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE ($Reason)",
+        "- Created UTC: $($handoff.created_at_utc)",
+        "- Codex PID: $codexPid",
+        "- Daemon: pid=$($CurrentSurface.daemon_pid) bind=$Bind tool_count=$($CurrentSurface.tool_count) tool_surface_sha256=$($CurrentSurface.tool_surface_sha256)",
+        "- Current process start snapshot: status=$startSnapshotStatus hash=$ProcessHashAtStart path=$ProcessSnapshotAtStart",
+        "- Current daemon snapshot: $SnapshotPath",
+        "- Diff: $DiffSummary",
+        '',
+        '## Required Restart',
+        'The running Codex process cannot hot-add newly installed MCP tools or mutate cached tool schemas. Restart Codex through the patched launcher, then read the files and issues below before continuing.',
+        '',
+        '## Read After Restart'
+    )
+    $markdownLines += ($requiredReads | ForEach-Object { "- $_" })
+    $markdownLines += @(
+        '',
+        '## GitHub Reads'
+    )
+    $markdownLines += ($handoff.github_reads | ForEach-Object { "- $_" })
+    $markdownLines += @(
+        '',
+        '## Verification'
+    )
+    $markdownLines += ($handoff.post_restart_verification | ForEach-Object { "- $_" })
+    $markdownLines += @(
+        '',
+        "JSON artifact: $jsonPath"
+    )
+    Write-SynapseUtf8NoBomFile -Path $markdownPath -Text ($markdownLines -join "`n")
+
+    return [pscustomobject]@{
+        JsonPath = $jsonPath
+        MarkdownPath = $markdownPath
+    }
+}
+
 function Assert-CodexCurrentProcessToolSurfaceFresh {
     param(
         [AllowNull()]$CodexAncestor,
         [Parameter(Mandatory=$true)]$CurrentSurface,
         [AllowNull()][string]$ProcessHashAtStart,
         [AllowNull()][string]$ProcessSnapshotAtStart,
-        [Parameter(Mandatory=$true)][string]$SnapshotPath
+        [Parameter(Mandatory=$true)][string]$SnapshotPath,
+        [AllowNull()][string]$SourceDir,
+        [AllowNull()][string]$Bind,
+        [AllowNull()][string]$TokenPath
     )
 
     if ($null -eq $CodexAncestor) {
@@ -1823,18 +2012,44 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
     $startSurface = Read-SynapseCodexToolSurfaceSnapshotOrNull -Path $ProcessSnapshotAtStart
     $diffSummary = Get-SynapseToolSurfaceDiffSummary -StartSurface $startSurface -CurrentSurface $CurrentSurface
     if ([string]::IsNullOrWhiteSpace($ProcessHashAtStart)) {
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=missing current_tool_surface_sha256={1} tool_count={2} daemon_pid={3} snapshot={4} start_snapshot={5} {6} remediation=restart Codex through the patched codex launcher; this current Codex process cannot prove it loaded the current tools/list schema and cannot hot-add newly installed MCP tools or schema changes." -f `
+        $handoff = New-SynapseCodexRestartHandoff `
+            -CodexAncestor $CodexAncestor `
+            -Reason 'missing_start_snapshot_env' `
+            -CurrentSurface $CurrentSurface `
+            -StartSurface $startSurface `
+            -ProcessHashAtStart $ProcessHashAtStart `
+            -ProcessSnapshotAtStart $ProcessSnapshotAtStart `
+            -SnapshotPath $SnapshotPath `
+            -DiffSummary $diffSummary `
+            -SourceDir $SourceDir `
+            -Bind $Bind `
+            -TokenPath $TokenPath
+        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=missing current_tool_surface_sha256={1} tool_count={2} daemon_pid={3} snapshot={4} start_snapshot={5} handoff_json={6} handoff_md={7} {8} remediation=restart Codex through the patched codex launcher; this current Codex process cannot prove it loaded the current tools/list schema and cannot hot-add newly installed MCP tools or schema changes." -f `
             $CodexAncestor.ProcessId,
             $currentHash,
             $CurrentSurface.tool_count,
             $CurrentSurface.daemon_pid,
             $SnapshotPath,
             $ProcessSnapshotAtStart,
+            $handoff.JsonPath,
+            $handoff.MarkdownPath,
             $diffSummary)
     }
 
     if ($ProcessHashAtStart -ne $currentHash) {
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=mismatch start_tool_surface_sha256={1} current_tool_surface_sha256={2} tool_count={3} daemon_pid={4} snapshot={5} start_snapshot={6} {7} remediation=restart Codex through the patched codex launcher; Windows cannot update this already-running Codex process's MCP tool namespace or cached tool schemas after daemon tools/list changes." -f `
+        $handoff = New-SynapseCodexRestartHandoff `
+            -CodexAncestor $CodexAncestor `
+            -Reason 'start_snapshot_hash_mismatch' `
+            -CurrentSurface $CurrentSurface `
+            -StartSurface $startSurface `
+            -ProcessHashAtStart $ProcessHashAtStart `
+            -ProcessSnapshotAtStart $ProcessSnapshotAtStart `
+            -SnapshotPath $SnapshotPath `
+            -DiffSummary $diffSummary `
+            -SourceDir $SourceDir `
+            -Bind $Bind `
+            -TokenPath $TokenPath
+        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=mismatch start_tool_surface_sha256={1} current_tool_surface_sha256={2} tool_count={3} daemon_pid={4} snapshot={5} start_snapshot={6} handoff_json={7} handoff_md={8} {9} remediation=restart Codex through the patched codex launcher; Windows cannot update this already-running Codex process's MCP tool namespace or cached tool schemas after daemon tools/list changes." -f `
             $CodexAncestor.ProcessId,
             $ProcessHashAtStart,
             $currentHash,
@@ -1842,6 +2057,8 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
             $CurrentSurface.daemon_pid,
             $SnapshotPath,
             $ProcessSnapshotAtStart,
+            $handoff.JsonPath,
+            $handoff.MarkdownPath,
             $diffSummary)
     }
 
@@ -2793,7 +3010,10 @@ if (-not $SkipClientWiring) {
         -CurrentSurface $toolSurface `
         -ProcessHashAtStart $processToolSurfaceHashAtStart `
         -ProcessSnapshotAtStart $processToolSurfaceSnapshotAtStart `
-        -SnapshotPath $CodexToolSurfaceSnapshotPath
+        -SnapshotPath $CodexToolSurfaceSnapshotPath `
+        -SourceDir $SourceDir `
+        -Bind $Bind `
+        -TokenPath $TokenPath
 } else {
     Info "Skipped Codex current-process freshness check because -SkipClientWiring was set; daemon health and tools/list were still verified."
 }
