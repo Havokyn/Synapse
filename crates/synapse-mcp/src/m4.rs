@@ -7975,6 +7975,9 @@ fn shell_job_latest_terminal_should_win(
     ) {
         return true;
     }
+    if latest.status == "ok" && latest.exit_code == Some(0) && candidate.exit_code != Some(0) {
+        return true;
+    }
     candidate.exit_code.is_none() && latest.exit_code.is_some()
 }
 
@@ -11142,6 +11145,90 @@ mod tests {
             SHELL_REMOTE_CLEANUP_TRACKED
         );
         assert!(!readback.remote_process_scope.remote_cleanup_verified);
+    }
+
+    #[test]
+    fn shell_reconciliation_preserves_successful_terminal_status_against_late_nonzero_candidate() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+            remote_cleanup_path: temp.path().join("remote-cleanup.json"),
+        };
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec!["aiwonder".to_owned(), "printf issue1251-ok".to_owned()],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue1251-preserve-ok".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe aiwonder 'printf issue1251-ok'".to_owned(),
+            matched_pattern: "__any_permitted__".to_owned(),
+        };
+        let request_sha = run_shell_start_request_sha256(&params)
+            .unwrap_or_else(|error| panic!("start request should hash: {error}"));
+        let mut latest_ok = shell_job_status_record(
+            "issue1251-preserve-ok",
+            "ok",
+            &params,
+            &paths,
+            &request_sha,
+            &authorization,
+            "2026-06-18T00:00:00Z".to_owned(),
+            Some(4242),
+            None,
+        );
+        let metadata =
+            parse_remote_process_metadata(
+                "SYNAPSE_REMOTE_PROCESS_V1 job_id=issue1251-preserve-ok pid=12345 pgid=12345 sid=12345\n",
+                "issue1251-preserve-ok",
+            )
+            .unwrap_or_else(|| panic!("remote marker should parse"));
+        apply_remote_process_metadata(&mut latest_ok, metadata);
+        latest_ok.remote_process_scope.remote_cleanup_verified = true;
+        latest_ok.remote_process_scope.remote_cleanup_status =
+            SHELL_REMOTE_CLEANUP_VERIFIED.to_owned();
+        latest_ok.exit_code = Some(0);
+        latest_ok.completed_at = Some("2026-06-18T00:00:01Z".to_owned());
+        latest_ok.duration_ms = Some(1000);
+        write_shell_job_status(&paths.status_path, &latest_ok)
+            .unwrap_or_else(|error| panic!("latest ok status should write: {error}"));
+
+        let mut late_nonzero = latest_ok.clone();
+        late_nonzero.status = "exit_nonzero".to_owned();
+        late_nonzero.exit_code = Some(1);
+        late_nonzero.completed_at = Some("2026-06-18T00:00:02Z".to_owned());
+        late_nonzero.duration_ms = Some(2000);
+        late_nonzero.remote_process_scope.remote_cleanup_message = Some(
+            "late cleanup/readback candidate must not downgrade the remote command verdict"
+                .to_owned(),
+        );
+
+        let persisted = write_shell_job_reconciliation_status(&paths, late_nonzero)
+            .unwrap_or_else(|error| panic!("status readback should preserve success: {error}"));
+        let readback = read_shell_job_status(&paths.status_path, "issue1251-preserve-ok")
+            .unwrap_or_else(|error| panic!("status should read after reconciliation: {error}"));
+
+        println!(
+            "readback=act_run_shell_status edge=preserve_successful_terminal before=file_status:ok exit_code:0 candidate:exit_nonzero/1 after=file_status:{} exit_code:{:?} remote:{}",
+            readback.status,
+            readback.exit_code,
+            readback.remote_process_scope.remote_cleanup_status
+        );
+        assert_eq!(persisted.status, "ok");
+        assert_eq!(persisted.exit_code, Some(0));
+        assert_eq!(readback.status, "ok");
+        assert_eq!(readback.exit_code, Some(0));
+        assert_eq!(
+            readback.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_VERIFIED
+        );
     }
 
     #[test]
