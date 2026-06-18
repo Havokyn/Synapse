@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -273,6 +274,14 @@ impl SynapseService {
         }
         decoded.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(decoded)
+    }
+
+    pub(super) fn persisted_cdp_target_owner_session_ids(
+        &self,
+    ) -> Result<BTreeSet<String>, ErrorData> {
+        let db = self.session_continuity_db()?;
+        read_persisted_cdp_target_owner_session_ids_from_db(&db)
+            .map_err(|error| mcp_error(error_codes::STORAGE_CORRUPTED, error))
     }
 
     pub(super) fn persist_session_lease(
@@ -785,6 +794,14 @@ pub(crate) fn delete_persisted_cdp_target_owner_row(
     delete_persisted_cdp_target_owner_from_db(&db, owner_key, cdp_target_id)
 }
 
+pub(crate) fn read_persisted_cdp_target_owners_for_session(
+    m3_state: &SharedM3State,
+    session_id: &str,
+) -> Result<Vec<(String, PersistedCdpTargetOwner)>, String> {
+    let db = session_continuity_db_from_state(m3_state)?;
+    read_persisted_cdp_target_owners_for_session_from_db(&db, session_id)
+}
+
 fn delete_persisted_cdp_target_owner_from_db(
     db: &Db,
     owner_key: &str,
@@ -808,6 +825,66 @@ fn delete_persisted_cdp_target_owner_from_db(
         "readback=CF_SESSIONS after=cdp_target_owner_deleted"
     );
     Ok(existed_before)
+}
+
+fn read_persisted_cdp_target_owners_for_session_from_db(
+    db: &Db,
+    session_id: &str,
+) -> Result<Vec<(String, PersistedCdpTargetOwner)>, String> {
+    let rows = db
+        .scan_cf_prefix(cf::CF_SESSIONS, SESSION_CDP_TARGET_OWNER_PREFIX.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut decoded = Vec::new();
+    for (row_key, value) in rows {
+        let row = synapse_storage::decode_json::<PersistedCdpTargetOwner>(&value)
+            .map_err(|error| format!("decode persisted CDP target owner failed: {error}"))?;
+        validate_persisted_cdp_target_owner(&row.owner.cdp_target_id, &row)
+            .map_err(|error| error.message.to_string())?;
+        let expected_key = cdp_target_owner_row_key(&row.owner_key, &row.owner.cdp_target_id);
+        if row_key != expected_key {
+            return Err(format!(
+                "persisted CDP target owner row key mismatch: row_key={} owner_key={}",
+                String::from_utf8_lossy(&row_key),
+                row.owner_key
+            ));
+        }
+        if row.owner_session_id == session_id {
+            decoded.push((row.owner_key.clone(), row));
+        }
+    }
+    decoded.sort_by(|left, right| {
+        left.1
+            .owner
+            .cdp_target_id
+            .cmp(&right.1.owner.cdp_target_id)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    Ok(decoded)
+}
+
+fn read_persisted_cdp_target_owner_session_ids_from_db(
+    db: &Db,
+) -> Result<BTreeSet<String>, String> {
+    let rows = db
+        .scan_cf_prefix(cf::CF_SESSIONS, SESSION_CDP_TARGET_OWNER_PREFIX.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut session_ids = BTreeSet::new();
+    for (row_key, value) in rows {
+        let row = synapse_storage::decode_json::<PersistedCdpTargetOwner>(&value)
+            .map_err(|error| format!("decode persisted CDP target owner failed: {error}"))?;
+        validate_persisted_cdp_target_owner(&row.owner.cdp_target_id, &row)
+            .map_err(|error| error.message.to_string())?;
+        let expected_key = cdp_target_owner_row_key(&row.owner_key, &row.owner.cdp_target_id);
+        if row_key != expected_key {
+            return Err(format!(
+                "persisted CDP target owner row key mismatch: row_key={} owner_key={}",
+                String::from_utf8_lossy(&row_key),
+                row.owner_key
+            ));
+        }
+        session_ids.insert(row.owner_session_id);
+    }
+    Ok(session_ids)
 }
 
 fn validate_persisted_cdp_target_owner(
@@ -904,6 +981,39 @@ mod tests {
 
     use synapse_core::SCHEMA_VERSION;
 
+    fn persisted_owner_row(
+        session_id: &str,
+        target_id: &str,
+        hwnd: i64,
+    ) -> PersistedCdpTargetOwner {
+        let endpoint = "chrome-extension://synapse-test/chrome.tabs".to_owned();
+        let owner_key = format!(
+            "cdp:0x{hwnd:x}:{}:{}",
+            endpoint,
+            target_id.trim().to_ascii_lowercase()
+        );
+        PersistedCdpTargetOwner {
+            schema_version: 1,
+            owner_key,
+            stored_at_unix_ms: 1_000,
+            owner_session_id: session_id.to_owned(),
+            owner_client_name: Some("claude-code".to_owned()),
+            owner_agent_kind: "claude".to_owned(),
+            owner_started_at_unix_ms: Some(900),
+            owner: CdpTargetOwner {
+                session_id: session_id.to_owned(),
+                window_hwnd: hwnd,
+                endpoint,
+                chrome_window_id: Some(42),
+                capture_window_hwnd: Some(hwnd),
+                cdp_target_id: target_id.to_owned(),
+                requested_url: "http://127.0.0.1/test".to_owned(),
+                target_url: "http://127.0.0.1/test".to_owned(),
+                created_at_unix_ms: 950,
+            },
+        }
+    }
+
     #[test]
     fn continuity_delete_removes_exact_session_rows_and_keeps_neighbors() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
@@ -977,6 +1087,82 @@ mod tests {
         let decoded = synapse_storage::decode_json::<PersistedSessionTarget>(&neighbor_row.1)?;
         assert_eq!(decoded.session_id, neighbor_session_id);
         assert_eq!(decoded.target, SessionTarget::Window { hwnd: 0x5678 });
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_cdp_owner_scan_filters_session_and_keeps_neighbors() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Db::open(&temp.path().join("db"), SCHEMA_VERSION)?;
+        let session_id = "stale-claude-session";
+        let neighbor_session_id = "neighbor-session";
+        let owned = persisted_owner_row(session_id, "chrome-tab:Owned", 0x1000);
+        let neighbor = persisted_owner_row(neighbor_session_id, "chrome-tab:Neighbor", 0x2000);
+        db.put_batch_pressure_bypass(
+            cf::CF_SESSIONS,
+            [
+                (
+                    cdp_target_owner_row_key(&owned.owner_key, &owned.owner.cdp_target_id),
+                    synapse_storage::encode_json(&owned)?,
+                ),
+                (
+                    cdp_target_owner_row_key(&neighbor.owner_key, &neighbor.owner.cdp_target_id),
+                    synapse_storage::encode_json(&neighbor)?,
+                ),
+            ],
+        )?;
+
+        let rows = read_persisted_cdp_target_owners_for_session_from_db(&db, session_id)
+            .map_err(anyhow::Error::msg)?;
+
+        println!(
+            "readback=CF_SESSIONS test=persisted_cdp_owner_scan before_total=2 selected={} selected_target={}",
+            rows.len(),
+            rows.first()
+                .map(|(_key, row)| row.owner.cdp_target_id.as_str())
+                .unwrap_or("<none>")
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, owned.owner_key);
+        assert_eq!(rows[0].1.owner_session_id, session_id);
+        assert_eq!(rows[0].1.owner.cdp_target_id, "chrome-tab:Owned");
+
+        let neighbor_rows =
+            read_persisted_cdp_target_owners_for_session_from_db(&db, neighbor_session_id)
+                .map_err(anyhow::Error::msg)?;
+        assert_eq!(neighbor_rows.len(), 1);
+        assert_eq!(neighbor_rows[0].1.owner_session_id, neighbor_session_id);
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_cdp_owner_session_ids_include_orphan_owner_rows() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Db::open(&temp.path().join("db"), SCHEMA_VERSION)?;
+        let first = persisted_owner_row("orphan-session-a", "chrome-tab:100", 0x1000);
+        let second = persisted_owner_row("orphan-session-b", "chrome-tab:200", 0x2000);
+        db.put_batch_pressure_bypass(
+            cf::CF_SESSIONS,
+            [
+                (
+                    cdp_target_owner_row_key(&first.owner_key, &first.owner.cdp_target_id),
+                    synapse_storage::encode_json(&first)?,
+                ),
+                (
+                    cdp_target_owner_row_key(&second.owner_key, &second.owner.cdp_target_id),
+                    synapse_storage::encode_json(&second)?,
+                ),
+            ],
+        )?;
+
+        let ids =
+            read_persisted_cdp_target_owner_session_ids_from_db(&db).map_err(anyhow::Error::msg)?;
+
+        println!("readback=CF_SESSIONS test=persisted_cdp_owner_session_ids selected={ids:?}");
+        assert_eq!(
+            ids,
+            BTreeSet::from(["orphan-session-a".to_owned(), "orphan-session-b".to_owned()])
+        );
         Ok(())
     }
 }

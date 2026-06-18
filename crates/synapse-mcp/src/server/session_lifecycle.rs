@@ -292,10 +292,15 @@ pub struct SessionClipboardCleanupReport {
 #[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCdpCleanupReport {
+    pub memory_owned_before: usize,
+    pub persisted_owned_before: usize,
     pub owned_before: usize,
     pub closed: usize,
+    pub already_absent: usize,
+    pub persisted_rows_deleted: usize,
     pub failed: usize,
     pub target_ids: Vec<String>,
+    pub error_messages: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, JsonSchema)]
@@ -1789,7 +1794,7 @@ async fn cleanup_session_cdp_targets(
     cdp_target_owners: &SharedCdpTargetOwners,
     session_id: &str,
 ) -> SessionCdpCleanupReport {
-    let owned = match remove_session_cdp_target_owners(cdp_target_owners, session_id) {
+    let mut owned = match remove_session_cdp_target_owners(cdp_target_owners, session_id) {
         Ok(owned) => owned,
         Err(detail) => {
             tracing::error!(
@@ -1800,11 +1805,53 @@ async fn cleanup_session_cdp_targets(
             );
             return SessionCdpCleanupReport {
                 failed: 1,
+                error_messages: vec![detail],
                 ..SessionCdpCleanupReport::default()
             };
         }
     };
+    let memory_owned_before = owned.len();
+    let persisted = match super::session_continuity::read_persisted_cdp_target_owners_for_session(
+        m3_state, session_id,
+    ) {
+        Ok(persisted) => persisted,
+        Err(detail) => {
+            tracing::error!(
+                code = error_codes::STORAGE_CORRUPTED,
+                session_id,
+                detail = %detail,
+                "session lifecycle could not read persisted CDP target owner rows"
+            );
+            return SessionCdpCleanupReport {
+                memory_owned_before,
+                owned_before: memory_owned_before,
+                failed: 1,
+                target_ids: owned
+                    .iter()
+                    .map(|(_owner_key, owner)| owner.cdp_target_id.clone())
+                    .collect(),
+                error_messages: vec![detail],
+                ..SessionCdpCleanupReport::default()
+            };
+        }
+    };
+    let persisted_owned_before = persisted.len();
+    let mut seen = owned
+        .iter()
+        .map(|(owner_key, owner)| {
+            cdp_cleanup_owner_identity(owner_key, &owner.endpoint, &owner.cdp_target_id)
+        })
+        .collect::<BTreeSet<_>>();
+    for (owner_key, row) in persisted {
+        let identity =
+            cdp_cleanup_owner_identity(&owner_key, &row.owner.endpoint, &row.owner.cdp_target_id);
+        if seen.insert(identity) {
+            owned.push((owner_key, row.owner));
+        }
+    }
     let mut report = SessionCdpCleanupReport {
+        memory_owned_before,
+        persisted_owned_before,
         owned_before: owned.len(),
         target_ids: owned
             .iter()
@@ -1814,38 +1861,54 @@ async fn cleanup_session_cdp_targets(
     };
     for (owner_key, owner) in owned {
         match close_cdp_target_for_cleanup(&owner.cdp_target_id, &owner).await {
-            Ok(()) => {
-                if let Err(detail) =
-                    super::session_continuity::delete_persisted_cdp_target_owner_row(
-                        m3_state,
-                        &owner_key,
-                        &owner.cdp_target_id,
-                    )
-                {
-                    report.failed = report.failed.saturating_add(1);
-                    tracing::error!(
-                        code = error_codes::STORAGE_CORRUPTED,
-                        session_id,
-                        hwnd = owner.window_hwnd,
-                        endpoint = %owner.endpoint,
-                        cdp_target_id = %owner.cdp_target_id,
-                        detail = %detail,
-                        "session lifecycle closed CDP target but failed to delete persisted owner row"
-                    );
-                    continue;
+            Ok(close_outcome) => {
+                match super::session_continuity::delete_persisted_cdp_target_owner_row(
+                    m3_state,
+                    &owner_key,
+                    &owner.cdp_target_id,
+                ) {
+                    Ok(deleted) => {
+                        if deleted {
+                            report.persisted_rows_deleted =
+                                report.persisted_rows_deleted.saturating_add(1);
+                        }
+                    }
+                    Err(detail) => {
+                        report.failed = report.failed.saturating_add(1);
+                        report.error_messages.push(detail.clone());
+                        tracing::error!(
+                            code = error_codes::STORAGE_CORRUPTED,
+                            session_id,
+                            hwnd = owner.window_hwnd,
+                            endpoint = %owner.endpoint,
+                            cdp_target_id = %owner.cdp_target_id,
+                            detail = %detail,
+                            "session lifecycle closed CDP target but failed to delete persisted owner row"
+                        );
+                        continue;
+                    }
                 }
-                report.closed = report.closed.saturating_add(1);
+                match close_outcome {
+                    CdpCleanupCloseOutcome::Closed => {
+                        report.closed = report.closed.saturating_add(1);
+                    }
+                    CdpCleanupCloseOutcome::AlreadyAbsent => {
+                        report.already_absent = report.already_absent.saturating_add(1);
+                    }
+                }
                 tracing::info!(
                     code = "MCP_SESSION_CDP_TARGET_CLEANUP",
                     session_id,
                     hwnd = owner.window_hwnd,
                     endpoint = %owner.endpoint,
                     cdp_target_id = %owner.cdp_target_id,
-                    "readback=Target.closeTarget edge=session_cleanup after=closed"
+                    close_outcome = close_outcome.as_str(),
+                    "readback=Target.closeTarget edge=session_cleanup after=resolved"
                 );
             }
             Err(detail) => {
                 report.failed = report.failed.saturating_add(1);
+                report.error_messages.push(detail.clone());
                 tracing::error!(
                     code = error_codes::A11Y_CDP_AXTREE_FAILED,
                     session_id,
@@ -1859,6 +1922,30 @@ async fn cleanup_session_cdp_targets(
         }
     }
     report
+}
+
+fn cdp_cleanup_owner_identity(owner_key: &str, endpoint: &str, target_id: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        owner_key.trim(),
+        endpoint.trim(),
+        target_id.trim().to_ascii_lowercase()
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CdpCleanupCloseOutcome {
+    Closed,
+    AlreadyAbsent,
+}
+
+impl CdpCleanupCloseOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::AlreadyAbsent => "already_absent",
+        }
+    }
 }
 
 fn remove_session_cdp_target_owners(
@@ -1884,18 +1971,43 @@ fn remove_session_cdp_target_owners(
 async fn close_cdp_target_for_cleanup(
     target_id: &str,
     owner: &CdpTargetOwner,
-) -> Result<(), String> {
+) -> Result<CdpCleanupCloseOutcome, String> {
+    if is_chrome_bridge_endpoint(&owner.endpoint) {
+        return crate::chrome_debugger_bridge::close_tab(owner.window_hwnd, target_id)
+            .await
+            .map(|_closed| CdpCleanupCloseOutcome::Closed)
+            .or_else(|error| {
+                if chrome_bridge_close_target_already_absent(error.detail(), target_id) {
+                    Ok(CdpCleanupCloseOutcome::AlreadyAbsent)
+                } else {
+                    Err(error.detail().to_owned())
+                }
+            });
+    }
     synapse_a11y::cdp_close_target(&owner.endpoint, target_id)
         .await
-        .map(|_closed| ())
+        .map(|_closed| CdpCleanupCloseOutcome::Closed)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn is_chrome_bridge_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("chrome-extension://")
+        && (endpoint.ends_with("/chrome.tabs") || endpoint.ends_with("/chrome.debugger"))
+}
+
+#[cfg(windows)]
+fn chrome_bridge_close_target_already_absent(detail: &str, target_id: &str) -> bool {
+    detail.contains("targetIdHint")
+        && detail.contains(target_id)
+        && detail.contains("did not match any chrome.tabs tab id")
 }
 
 #[cfg(not(windows))]
 async fn close_cdp_target_for_cleanup(
     target_id: &str,
     owner: &CdpTargetOwner,
-) -> Result<(), String> {
+) -> Result<CdpCleanupCloseOutcome, String> {
     Err(format!(
         "CDP target cleanup is only available on Windows; target_id={target_id:?} endpoint={:?}",
         owner.endpoint
@@ -2260,6 +2372,19 @@ mod tests {
         let (live, exited) = partition_spawned_sessions(&reads, &|_pid| true);
         assert!(live.is_empty());
         assert!(exited.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn chrome_bridge_missing_tab_detail_is_already_absent_cleanup() {
+        assert!(chrome_bridge_close_target_already_absent(
+            "targetIdHint chrome-tab:600751161 did not match any chrome.tabs tab id",
+            "chrome-tab:600751161"
+        ));
+        assert!(!chrome_bridge_close_target_already_absent(
+            "targetIdHint chrome-tab:600751161 did not match any chrome.tabs tab id",
+            "chrome-tab:other"
+        ));
     }
 
     #[test]

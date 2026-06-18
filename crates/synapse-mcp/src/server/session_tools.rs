@@ -623,6 +623,7 @@ impl SynapseService {
             self.session_registry_reads(now_unix_ms)?;
         let memory_targets = self.session_targets()?;
         let persisted_target_session_ids = self.persisted_session_target_session_ids()?;
+        let persisted_cdp_owner_session_ids = self.persisted_cdp_target_owner_session_ids()?;
         let all_target_claims = self.target_claim_status_snapshot()?.claims;
         let target_claims_by_owner = target_claim_reads_by_owner(&all_target_claims);
         let lease_status = lease::status();
@@ -630,6 +631,7 @@ impl SynapseService {
             .keys()
             .chain(memory_targets.keys())
             .chain(persisted_target_session_ids.iter())
+            .chain(persisted_cdp_owner_session_ids.iter())
             .chain(target_claims_by_owner.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -656,6 +658,7 @@ impl SynapseService {
                 &lease_status,
                 now_unix_ms,
                 stale_after_ms,
+                persisted_cdp_owner_session_ids.contains(&session_id),
             ) else {
                 continue;
             };
@@ -757,6 +760,9 @@ impl SynapseService {
         let target_claims = target_claim_reads_by_owner(&all_target_claims)
             .remove(session_id)
             .unwrap_or_default();
+        let has_persisted_cdp_owner = self
+            .persisted_cdp_target_owner_session_ids()?
+            .contains(session_id);
         let lease_status = lease::status();
         let session = build_session_summary(
             session_id,
@@ -767,6 +773,7 @@ impl SynapseService {
             &lease_status,
             now_unix_ms,
             stale_after_ms,
+            has_persisted_cdp_owner,
         );
         Ok(SessionStatusResponse {
             now_unix_ms,
@@ -1551,13 +1558,15 @@ fn build_session_summary(
     lease_status: &synapse_action::LeaseStatus,
     now_unix_ms: u64,
     stale_after_ms: u64,
+    has_persisted_cdp_owner: bool,
 ) -> Option<SessionSummary> {
     let active_target_wire = active_target.as_ref().map(session_target_wire);
     let registry = registry.or_else(|| {
         (active_target_wire.is_some()
             || !target_claims.is_empty()
-            || lease_status.owner_session_id.as_deref() == Some(session_id))
-        .then(|| synthetic_registry_read(session_id, now_unix_ms, stale_after_ms))
+            || lease_status.owner_session_id.as_deref() == Some(session_id)
+            || has_persisted_cdp_owner)
+            .then(|| synthetic_registry_read(session_id, now_unix_ms, stale_after_ms))
     })?;
     let agent_state = super::agent_state::read_for_session(session_id, now_unix_ms);
     let lease = SessionLeaseReadback {
@@ -1575,6 +1584,7 @@ fn build_session_summary(
         &target_claims,
         &lease,
         agent_state.as_ref(),
+        has_persisted_cdp_owner,
     );
     Some(SessionSummary {
         registry,
@@ -1602,9 +1612,12 @@ fn session_attention_class(
     target_claims: &[TargetClaimRead],
     lease: &SessionLeaseReadback,
     agent_state: Option<&AgentStateRead>,
+    has_persisted_cdp_owner: bool,
 ) -> AgentAttentionClass {
-    let owns_cleanup_resource =
-        active_target.is_some() || !target_claims.is_empty() || lease.is_owner;
+    let owns_cleanup_resource = active_target.is_some()
+        || !target_claims.is_empty()
+        || lease.is_owner
+        || has_persisted_cdp_owner;
     if registry.lifecycle != "live" && owns_cleanup_resource {
         return AgentAttentionClass::CleanupRequired;
     }
@@ -1933,6 +1946,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .unwrap();
         assert_eq!(summary.registry.lifecycle, "unregistered");
@@ -1952,6 +1966,40 @@ mod tests {
         assert!(!summary.foreground_lane.capacity_exhausted);
         assert!(summary.foreground_lane.explicit_real_foreground_lease);
         assert!(summary.foreground_lane.no_human_os_foreground_fallback);
+    }
+
+    #[test]
+    fn persisted_cdp_owner_only_session_is_visible_cleanup_required() {
+        let session_id = "cdp-owner-only";
+        let lease_status = synapse_action::LeaseStatus::unheld();
+        let summary = build_session_summary(
+            session_id,
+            None,
+            None,
+            Vec::new(),
+            &[],
+            &lease_status,
+            1_000,
+            500,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(summary.registry.lifecycle, "unregistered");
+        assert_eq!(
+            summary.attention_class,
+            AgentAttentionClass::CleanupRequired
+        );
+        assert_eq!(summary.agent_logical_foreground.status, "missing");
+        assert_eq!(summary.foreground_lane.status, "missing");
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                session_id,
+                &status_response(Some(summary))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1982,6 +2030,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .unwrap();
 
@@ -2224,6 +2273,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .unwrap();
 
@@ -2271,6 +2321,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .unwrap();
 
@@ -2324,6 +2375,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .expect("cleanup summary");
         assert_eq!(
@@ -2350,6 +2402,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .expect("live summary");
         assert!(
@@ -2372,6 +2425,7 @@ mod tests {
             &lease_status,
             1_000,
             500,
+            false,
         )
         .expect("closed summary");
         assert!(
