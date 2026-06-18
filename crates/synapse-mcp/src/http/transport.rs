@@ -420,6 +420,9 @@ fn router(
         session_store_db(&health_service).context("open storage for agent-event ingress")?;
     // #898: install the live-event sink, rebuild agent states from the
     // journal, and start the heartbeat/process-probe liveness sweep.
+    crate::server::agent_events::install_session_registry_activity_sink(Arc::clone(
+        &session_registry,
+    ));
     crate::server::agent_state::install_event_bus(sse_state.event_bus());
     let liveness_config = crate::server::agent_state::load_liveness_config()
         .map_err(|detail| anyhow::anyhow!("agent liveness configuration invalid: {detail}"))?;

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -276,6 +276,51 @@ impl SessionRegistry {
         entry.spawned_agent = Some(spawned_agent);
     }
 
+    /// Refreshes liveness from real agent activity rows instead of MCP
+    /// request recency. This only updates existing, non-closed entries:
+    /// activity cannot fabricate a session row or resurrect a terminal
+    /// lifecycle state.
+    pub(crate) fn record_agent_activity(
+        &mut self,
+        session_id: Option<&str>,
+        spawn_id: Option<&str>,
+        now_unix_ms: u64,
+    ) -> Vec<String> {
+        let mut target_session_ids = BTreeSet::new();
+        if let Some(session_id) = session_id.filter(|value| !value.is_empty())
+            && self.entries.contains_key(session_id)
+        {
+            target_session_ids.insert(session_id.to_owned());
+        }
+        if let Some(spawn_id) = spawn_id.filter(|value| !value.is_empty()) {
+            for (entry_session_id, entry) in &self.entries {
+                if entry
+                    .spawned_agent
+                    .as_ref()
+                    .is_some_and(|spawned| spawned.spawn_id == spawn_id)
+                {
+                    target_session_ids.insert(entry_session_id.clone());
+                }
+            }
+        }
+
+        let mut refreshed = Vec::new();
+        for session_id in target_session_ids {
+            let Some(entry) = self.entries.get_mut(&session_id) else {
+                continue;
+            };
+            if entry.closed_at_unix_ms.is_some() {
+                continue;
+            }
+            let previous = entry.last_seen_unix_ms;
+            entry.last_seen_unix_ms = entry.last_seen_unix_ms.max(now_unix_ms);
+            if entry.last_seen_unix_ms != previous {
+                refreshed.push(session_id);
+            }
+        }
+        refreshed
+    }
+
     /// Returns the inferred agent kind for a live session (`"local-model"`,
     /// `"codex"`, `"claude"`, or `"unknown"`), or `None` if the session has no
     /// registry entry yet. Used by the MCP tool-profile resolver to grant the
@@ -421,5 +466,76 @@ mod tests {
         let read = registry.reads(2_001).remove(0);
         assert_eq!(read.last_seen_unix_ms, 2_000);
         assert_eq!(read.last_action.as_deref(), Some("tools/list"));
+    }
+
+    #[test]
+    fn registry_agent_activity_refreshes_existing_session_or_spawn() {
+        let mut registry = SessionRegistry::default();
+        registry.record_seen(
+            "session-direct",
+            Some("tools/call:get_target".to_owned()),
+            1_000,
+        );
+        registry.record_spawned_agent(
+            "session-spawn",
+            SpawnedAgentRead {
+                spawn_id: "agent-spawn-registry-activity".to_owned(),
+                cli: "codex".to_owned(),
+                launcher_process_id: 123,
+                agent_process_id: Some(456),
+                started_by_session_id: Some("parent".to_owned()),
+                launched_at_unix_ms: 990,
+                launch_target: "pwsh.exe".to_owned(),
+                log_dir: "C:\\temp\\agent-spawn-registry-activity".to_owned(),
+                template_id: None,
+                template_version: None,
+                control: None,
+            },
+            1_000,
+        );
+
+        let refreshed = registry.record_agent_activity(
+            Some("session-direct"),
+            Some("agent-spawn-registry-activity"),
+            2_000,
+        );
+        assert_eq!(refreshed, vec!["session-direct", "session-spawn"]);
+
+        let reads = registry.reads(2_001);
+        let direct = reads
+            .iter()
+            .find(|read| read.session_id == "session-direct")
+            .expect("direct session readback");
+        assert_eq!(direct.last_seen_unix_ms, 2_000);
+        assert_eq!(direct.last_action.as_deref(), Some("tools/call:get_target"));
+        let spawned = reads
+            .iter()
+            .find(|read| read.session_id == "session-spawn")
+            .expect("spawn session readback");
+        assert_eq!(spawned.last_seen_unix_ms, 2_000);
+    }
+
+    #[test]
+    fn registry_agent_activity_never_creates_or_reopens_sessions() {
+        let mut registry = SessionRegistry::default();
+        assert!(
+            registry
+                .record_agent_activity(Some("missing-session"), Some("agent-spawn-missing"), 1_000)
+                .is_empty()
+        );
+        assert!(registry.reads(1_001).is_empty());
+
+        registry.record_seen("closed-session", None, 2_000);
+        registry.record_closed("closed-session", 2_100);
+        assert!(
+            registry
+                .record_agent_activity(Some("closed-session"), None, 2_200)
+                .is_empty()
+        );
+
+        let read = registry.reads(2_300).remove(0);
+        assert_eq!(read.lifecycle, "closed");
+        assert_eq!(read.last_seen_unix_ms, 2_100);
+        assert_eq!(read.closed_at_unix_ms, Some(2_100));
     }
 }

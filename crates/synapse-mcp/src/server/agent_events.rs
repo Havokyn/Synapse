@@ -26,18 +26,23 @@
 //! `operation_committed` so callers know whether the primary effect stands.
 
 use std::{
-    sync::atomic::{AtomicU32, Ordering},
+    collections::BTreeSet,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use rmcp::model::ErrorCode;
 use serde_json::json;
-use synapse_core::AgentEventRecord;
+use synapse_core::{AgentEventKind, AgentEventRecord};
 use synapse_storage::{
     Db, StorageError, StorageResult, agent_events::agent_event_key, cf, encode_json,
 };
 
 use super::ErrorData;
+use super::session_registry::{SharedSessionRegistry, unix_time_ms_now};
 
 /// Hard cap on one encoded journal row. Agent events are bounded metadata;
 /// anything larger indicates a writer leaking content into the journal.
@@ -46,6 +51,9 @@ pub(crate) const MAX_AGENT_EVENT_VALUE_BYTES: usize = 16 * 1024;
 /// Process-wide tie-breaker for same-nanosecond events. Ordering authority
 /// within one clock tick; wraps harmlessly because `ts_ns` dominates the key.
 static NEXT_AGENT_EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
+
+static SESSION_REGISTRY_ACTIVITY_SINK: OnceLock<Mutex<Option<SharedSessionRegistry>>> =
+    OnceLock::new();
 
 /// Physical readback of one persisted journal row.
 #[derive(Clone, Debug)]
@@ -64,6 +72,25 @@ pub(crate) fn unix_time_ns_now() -> u64 {
         .ok()
         .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
         .unwrap_or_default()
+}
+
+pub(crate) fn install_session_registry_activity_sink(registry: SharedSessionRegistry) {
+    let slot = SESSION_REGISTRY_ACTIVITY_SINK.get_or_init(|| Mutex::new(None));
+    match slot.lock() {
+        Ok(mut guard) => {
+            *guard = Some(registry);
+            tracing::info!(
+                code = "AGENT_EVENT_SESSION_REGISTRY_ACTIVITY_SINK_INSTALLED",
+                "agent activity rows will refresh SessionRegistry last_seen"
+            );
+        }
+        Err(_poisoned) => {
+            tracing::error!(
+                code = "AGENT_EVENT_SESSION_LAST_SEEN_REFRESH_FAILED",
+                "could not install session-registry activity sink because the sink lock is poisoned"
+            );
+        }
+    }
 }
 
 /// Validates, encodes, and enqueues one event row (batched write path).
@@ -102,7 +129,91 @@ pub(crate) fn record_agent_events(
 ) -> StorageResult<Vec<AgentEventWriteReadback>> {
     let readbacks = record_agent_events_unobserved(db, records)?;
     super::agent_state::observe_recorded_events(db, records);
+    refresh_installed_session_registry_activity(records);
     Ok(readbacks)
+}
+
+fn refresh_installed_session_registry_activity(records: &[AgentEventRecord]) {
+    let Some(registry) = installed_session_registry_activity_sink() else {
+        return;
+    };
+    let refreshed =
+        refresh_session_registry_activity_from_agent_events(&registry, records, unix_time_ms_now());
+    if !refreshed.is_empty() {
+        tracing::debug!(
+            code = "AGENT_EVENT_SESSION_LAST_SEEN_REFRESHED",
+            refreshed_session_count = refreshed.len(),
+            session_ids = ?refreshed,
+            "readback=SessionRegistry edge=agent_activity_heartbeat"
+        );
+    }
+}
+
+fn installed_session_registry_activity_sink() -> Option<SharedSessionRegistry> {
+    let slot = SESSION_REGISTRY_ACTIVITY_SINK.get()?;
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_poisoned) => {
+            tracing::error!(
+                code = "AGENT_EVENT_SESSION_LAST_SEEN_REFRESH_FAILED",
+                "could not read session-registry activity sink because the sink lock is poisoned"
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn refresh_session_registry_activity_from_agent_events(
+    registry: &SharedSessionRegistry,
+    records: &[AgentEventRecord],
+    now_unix_ms: u64,
+) -> Vec<String> {
+    let mut guard = match registry.lock() {
+        Ok(guard) => guard,
+        Err(_poisoned) => {
+            tracing::error!(
+                code = "AGENT_EVENT_SESSION_LAST_SEEN_REFRESH_FAILED",
+                "could not lock session registry while refreshing activity heartbeat"
+            );
+            return Vec::new();
+        }
+    };
+    let mut refreshed = BTreeSet::new();
+    let mut activity_record_count = 0usize;
+    for record in records {
+        if !agent_event_counts_as_session_activity(record.kind) {
+            continue;
+        }
+        activity_record_count += 1;
+        refreshed.extend(guard.record_agent_activity(
+            record.session_id.as_deref(),
+            record.spawn_id.as_deref(),
+            now_unix_ms,
+        ));
+    }
+    let refreshed: Vec<String> = refreshed.into_iter().collect();
+    if activity_record_count > 0 {
+        tracing::debug!(
+            code = "AGENT_EVENT_SESSION_LAST_SEEN_REFRESH_READBACK",
+            activity_record_count,
+            refreshed_session_count = refreshed.len(),
+            session_ids = ?refreshed,
+            "readback=SessionRegistry edge=agent_activity_heartbeat"
+        );
+    }
+    refreshed
+}
+
+fn agent_event_counts_as_session_activity(kind: AgentEventKind) -> bool {
+    matches!(
+        kind,
+        AgentEventKind::ToolCallStarted
+            | AgentEventKind::ToolCallFinished
+            | AgentEventKind::TurnStarted
+            | AgentEventKind::TurnFinished
+            | AgentEventKind::MessageSent
+            | AgentEventKind::MessageReceived
+    )
 }
 
 /// The raw journal write path, without the state-machine projection. Only
@@ -246,11 +357,14 @@ pub(crate) fn agent_event_tool_error(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use serde_json::Value;
     use synapse_core::{AgentEventKind, GenAiOperationName};
     use synapse_storage::decode_json;
 
     use super::*;
+    use crate::server::session_registry::{SessionRegistry, SpawnedAgentRead};
 
     fn open_temp_db() -> (tempfile::TempDir, Db) {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -263,6 +377,22 @@ mod tests {
         let mut record = AgentEventRecord::new(unix_time_ns_now(), kind);
         record.session_id = Some(session_id.to_owned());
         record
+    }
+
+    fn spawned_agent(spawn_id: &str) -> SpawnedAgentRead {
+        SpawnedAgentRead {
+            spawn_id: spawn_id.to_owned(),
+            cli: "codex".to_owned(),
+            launcher_process_id: 123,
+            agent_process_id: Some(456),
+            started_by_session_id: Some("parent".to_owned()),
+            launched_at_unix_ms: 990,
+            launch_target: "pwsh.exe".to_owned(),
+            log_dir: format!("C:\\temp\\{spawn_id}"),
+            template_id: None,
+            template_version: None,
+            control: None,
+        }
     }
 
     #[test]
@@ -368,5 +498,73 @@ mod tests {
             "sequence must strictly increase within a tick: {readbacks:?}"
         );
         assert!(rows[0].0 < rows[1].0, "keys must iterate in seq order");
+    }
+
+    #[test]
+    fn activity_events_refresh_registry_last_seen_by_session_or_spawn() {
+        let registry = Arc::new(Mutex::new(SessionRegistry::default()));
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.record_seen(
+                "session-direct",
+                Some("tools/call:get_target".to_owned()),
+                1_000,
+            );
+            guard.record_spawned_agent(
+                "session-spawn",
+                spawned_agent("agent-spawn-event-heartbeat"),
+                1_000,
+            );
+        }
+
+        let mut direct = event("session-direct", AgentEventKind::ToolCallStarted);
+        direct.ts_ns = 2_000_000_000;
+        let mut spawn_only = AgentEventRecord::new(2_000_000_001, AgentEventKind::TurnFinished);
+        spawn_only.spawn_id = Some("agent-spawn-event-heartbeat".to_owned());
+
+        let refreshed = refresh_session_registry_activity_from_agent_events(
+            &registry,
+            &[direct, spawn_only],
+            2_000,
+        );
+        assert_eq!(refreshed, vec!["session-direct", "session-spawn"]);
+
+        let reads = registry.lock().expect("registry lock").reads(2_001);
+        let direct = reads
+            .iter()
+            .find(|read| read.session_id == "session-direct")
+            .expect("direct session");
+        assert_eq!(direct.last_seen_unix_ms, 2_000);
+        assert_eq!(direct.last_action.as_deref(), Some("tools/call:get_target"));
+        let spawned = reads
+            .iter()
+            .find(|read| read.session_id == "session-spawn")
+            .expect("spawn session");
+        assert_eq!(spawned.last_seen_unix_ms, 2_000);
+    }
+
+    #[test]
+    fn activity_refresh_ignores_terminal_unknown_and_closed_rows() {
+        let registry = Arc::new(Mutex::new(SessionRegistry::default()));
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.record_seen("closed-session", None, 1_000);
+            guard.record_closed("closed-session", 1_100);
+        }
+
+        let exited = event("closed-session", AgentEventKind::Exited);
+        let unknown = event("unknown-session", AgentEventKind::MessageReceived);
+        let refreshed = refresh_session_registry_activity_from_agent_events(
+            &registry,
+            &[exited, unknown],
+            2_000,
+        );
+        assert!(refreshed.is_empty());
+
+        let reads = registry.lock().expect("registry lock").reads(2_001);
+        assert_eq!(reads.len(), 1, "unknown activity must not create a row");
+        assert_eq!(reads[0].session_id, "closed-session");
+        assert_eq!(reads[0].lifecycle, "closed");
+        assert_eq!(reads[0].last_seen_unix_ms, 1_100);
     }
 }
