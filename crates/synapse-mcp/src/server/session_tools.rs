@@ -25,6 +25,8 @@ use super::{
 
 const ATTACHED_AGENT_REGISTRY_SOURCE_OF_TRUTH: &str = "session_registry spawned_agent rows + agent_state tracker rows + OS process table live-pid probe + visible top-level window enumeration";
 const SESSION_TARGET_ROW_PREFIX: &str = "mcp/session-target/v1/";
+const SESSION_LIST_DEFAULT_LIMIT: usize = 50;
+const SESSION_LIST_MAX_LIMIT: usize = 500;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +36,57 @@ pub struct SessionListParams {
     #[serde(default)]
     #[schemars(default)]
     pub include_closed: bool,
+    /// Return only sessions whose registry lifecycle is `live`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub live_only: bool,
+    /// Response projection. `compact` is the MCP default to keep orchestrator
+    /// reads under response limits; `full` preserves the verbose session rows.
+    #[serde(default = "default_session_list_view")]
+    #[schemars(default = "default_session_list_view")]
+    pub view: SessionListView,
+    /// Zero-based cursor into the filtered, sorted session list.
+    #[serde(default)]
+    #[schemars(default)]
+    pub cursor: usize,
+    /// Maximum sessions to return. Omit for the default compact page size.
+    /// Use `view=full` with an explicit higher limit only when needed.
+    #[serde(default)]
+    #[schemars(default)]
+    pub limit: Option<usize>,
+    /// Include verbose attached-agent registry rows. Counts are always present.
+    #[serde(default)]
+    #[schemars(default)]
+    pub include_attached_agent_rows: bool,
+    /// Include terminal/dead unbound agent history. Counts are always present.
+    #[serde(default)]
+    #[schemars(default)]
+    pub include_terminal_unbound_history: bool,
+}
+
+impl Default for SessionListParams {
+    fn default() -> Self {
+        Self {
+            include_closed: false,
+            live_only: false,
+            view: default_session_list_view(),
+            cursor: 0,
+            limit: None,
+            include_attached_agent_rows: false,
+            include_terminal_unbound_history: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionListView {
+    Compact,
+    Full,
+}
+
+const fn default_session_list_view() -> SessionListView {
+    SessionListView::Compact
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -96,6 +149,18 @@ pub struct SessionSummary {
 pub struct SessionListResponse {
     pub now_unix_ms: u64,
     pub stale_after_ms: u64,
+    pub view: SessionListView,
+    pub include_closed: bool,
+    pub live_only: bool,
+    pub cursor: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    pub total_count: usize,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted_sections: Vec<&'static str>,
     pub human_os_foreground: HumanOsForegroundReadback,
     pub foreground_lane_capacity: ForegroundLaneCapacityReadback,
     pub registry_entry_count: usize,
@@ -104,6 +169,9 @@ pub struct SessionListResponse {
     pub input_lease_held: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_lease_owner_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compact_sessions: Vec<SessionListCompactRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<SessionSummary>,
     /// #1035 K1: authoritative live attached-terminal/agent registry. The
     /// exact count is OS-probed live process rows only; observed ambient rows
@@ -120,6 +188,88 @@ pub struct SessionListResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terminal_unbound_agent_states: Vec<AgentStateRead>,
     pub unbound_agent_filter: SessionUnboundAgentFilterReadback,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListCompactRow {
+    pub session_id: String,
+    pub agent_kind: String,
+    pub lifecycle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    pub transport: String,
+    pub last_seen_ms_ago: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_agent_id: Option<String>,
+    pub agent_logical_foreground_status: String,
+    pub foreground_lane_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_lane_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_target_key: Option<String>,
+    pub target_claim_count: usize,
+    pub lease_is_owner: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "AgentAttentionClass::is_none")]
+    pub attention_class: AgentAttentionClass,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SessionListOptions {
+    include_closed: bool,
+    live_only: bool,
+    view: SessionListView,
+    cursor: usize,
+    limit: Option<usize>,
+    include_attached_agent_rows: bool,
+    include_terminal_unbound_history: bool,
+}
+
+impl SessionListOptions {
+    fn from_tool_params(params: SessionListParams) -> Result<Self, ErrorData> {
+        let limit = params.limit.unwrap_or(SESSION_LIST_DEFAULT_LIMIT);
+        if limit == 0 {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "session_list limit must be greater than zero",
+            ));
+        }
+        if limit > SESSION_LIST_MAX_LIMIT {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("session_list limit must be <= {SESSION_LIST_MAX_LIMIT}, got {limit}"),
+            ));
+        }
+        Ok(Self {
+            include_closed: params.include_closed,
+            live_only: params.live_only,
+            view: params.view,
+            cursor: params.cursor,
+            limit: Some(limit),
+            include_attached_agent_rows: params.include_attached_agent_rows,
+            include_terminal_unbound_history: params.include_terminal_unbound_history,
+        })
+    }
+
+    const fn full_internal(include_closed: bool) -> Self {
+        Self {
+            include_closed,
+            live_only: false,
+            view: SessionListView::Full,
+            cursor: 0,
+            limit: None,
+            include_attached_agent_rows: true,
+            include_terminal_unbound_history: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -142,6 +292,7 @@ pub struct AttachedAgentRegistryReadback {
     pub row_count: usize,
     pub killable_live_count: usize,
     pub unprobeable_observed_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<AttachedAgentRegistryRow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_lookup_error: Option<String>,
@@ -319,7 +470,7 @@ pub struct SessionEndResponse {
 #[tool_router(router = session_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "List all known MCP sessions as a non-blocking cross-session read model: session id, client kind, liveness, heartbeat, agent_logical_foreground, foreground_lane, foreground_lane_capacity, human_os_foreground, target claims, input-lease ownership, and last JSON-RPC tool action. Stale sessions are reported rather than hidden; agent logical foreground never falls back to the human OS foreground."
+        description = "List MCP sessions as a non-blocking cross-session read model. Defaults to a compact paginated projection for orchestrators; pass view=full and explicit include_* flags for verbose diagnostics. Supports include_closed, live_only, cursor, and limit. Stale sessions are reported unless filtered; agent logical foreground never falls back to the human OS foreground."
     )]
     pub async fn session_list(
         &self,
@@ -330,7 +481,8 @@ impl SynapseService {
             kind = "session_list",
             "tool.invocation kind=session_list"
         );
-        self.session_list_impl(params.0.include_closed).map(Json)
+        self.session_list_impl_with_options(SessionListOptions::from_tool_params(params.0)?)
+            .map(Json)
     }
 
     #[tool(
@@ -459,6 +611,13 @@ impl SynapseService {
         &self,
         include_closed: bool,
     ) -> Result<SessionListResponse, ErrorData> {
+        self.session_list_impl_with_options(SessionListOptions::full_internal(include_closed))
+    }
+
+    fn session_list_impl_with_options(
+        &self,
+        options: SessionListOptions,
+    ) -> Result<SessionListResponse, ErrorData> {
         let now_unix_ms = unix_time_ms_now();
         let (registry_reads, stale_after_ms, registry_entry_count) =
             self.session_registry_reads(now_unix_ms)?;
@@ -500,23 +659,76 @@ impl SynapseService {
             ) else {
                 continue;
             };
-            if !include_closed && summary.registry.lifecycle == "closed" {
+            if !options.include_closed && summary.registry.lifecycle == "closed" {
+                continue;
+            }
+            if options.live_only && summary.registry.lifecycle != "live" {
                 continue;
             }
             sessions.push(summary);
         }
         sessions.sort_by(|a, b| a.registry.session_id.cmp(&b.registry.session_id));
-        let returned_count = sessions.len();
+        let total_count = sessions.len();
+        let cursor = options.cursor.min(total_count);
+        let end = options
+            .limit
+            .map(|limit| cursor.saturating_add(limit).min(total_count))
+            .unwrap_or(total_count);
+        let page_sessions = sessions[cursor..end].to_vec();
+        let returned_count = page_sessions.len();
+        let has_more = end < total_count;
+        let next_cursor = has_more.then_some(end);
         let foreground_lane_capacity =
             build_foreground_lane_capacity(&sessions, &all_target_claims, &lease_status);
         let raw_unbound_agent_states = super::agent_state::unbound_reads(now_unix_ms);
         let (unbound_agent_states, terminal_unbound_agent_states, unbound_agent_filter) =
             split_unbound_agent_states(raw_unbound_agent_states);
-        let attached_agent_registry =
+        let mut attached_agent_registry =
             build_attached_agent_registry(&sessions, &unbound_agent_states, now_unix_ms);
+        if !options.include_attached_agent_rows {
+            attached_agent_registry.rows.clear();
+        }
+        let terminal_rows_omitted =
+            !options.include_terminal_unbound_history && !terminal_unbound_agent_states.is_empty();
+        let returned_terminal_unbound_agent_states = if options.include_terminal_unbound_history {
+            terminal_unbound_agent_states
+        } else {
+            Vec::new()
+        };
+        let compact_sessions = if options.view == SessionListView::Compact {
+            page_sessions.iter().map(compact_session_row).collect()
+        } else {
+            Vec::new()
+        };
+        let full_sessions = if options.view == SessionListView::Full {
+            page_sessions
+        } else {
+            Vec::new()
+        };
+        let mut omitted_sections = Vec::new();
+        if options.view == SessionListView::Compact {
+            omitted_sections.push("sessions");
+        } else {
+            omitted_sections.push("compact_sessions");
+        }
+        if !options.include_attached_agent_rows {
+            omitted_sections.push("attached_agent_registry.rows");
+        }
+        if terminal_rows_omitted {
+            omitted_sections.push("terminal_unbound_agent_states");
+        }
         Ok(SessionListResponse {
             now_unix_ms,
             stale_after_ms,
+            view: options.view,
+            include_closed: options.include_closed,
+            live_only: options.live_only,
+            cursor,
+            limit: options.limit,
+            total_count,
+            has_more,
+            next_cursor,
+            omitted_sections,
             human_os_foreground: self.human_os_foreground_readback(),
             foreground_lane_capacity,
             registry_entry_count,
@@ -524,10 +736,11 @@ impl SynapseService {
             returned_count,
             input_lease_held: lease_status.held,
             input_lease_owner_session_id: lease_status.owner_session_id.clone(),
-            sessions,
+            compact_sessions,
+            sessions: full_sessions,
             attached_agent_registry,
             unbound_agent_states,
-            terminal_unbound_agent_states,
+            terminal_unbound_agent_states: returned_terminal_unbound_agent_states,
             unbound_agent_filter,
         })
     }
@@ -654,6 +867,39 @@ impl SynapseService {
                 read_error_message: Some(error.message.to_string()),
             },
         }
+    }
+}
+
+fn compact_session_row(summary: &SessionSummary) -> SessionListCompactRow {
+    SessionListCompactRow {
+        session_id: summary.registry.session_id.clone(),
+        agent_kind: summary.registry.agent_kind.clone(),
+        lifecycle: summary.registry.lifecycle.clone(),
+        client_name: summary.registry.client_name.clone(),
+        transport: summary.registry.transport.clone(),
+        last_seen_ms_ago: summary.registry.last_seen_ms_ago,
+        last_action: summary.registry.last_action.clone(),
+        last_reason_code: summary.registry.last_reason_code.clone(),
+        spawned_agent_id: summary
+            .registry
+            .spawned_agent
+            .as_ref()
+            .map(|spawned| spawned.spawn_id.clone()),
+        agent_logical_foreground_status: summary.agent_logical_foreground.status.clone(),
+        foreground_lane_status: summary.foreground_lane.status.clone(),
+        foreground_lane_kind: summary.foreground_lane.lane_kind.clone(),
+        foreground_target_key: summary.foreground_lane.target_key.clone(),
+        target_claim_count: summary.target_claims.len(),
+        lease_is_owner: summary.lease.is_owner,
+        agent_state: summary
+            .agent_state
+            .as_ref()
+            .map(|state| state.state.as_str().to_owned()),
+        agent_reason_code: summary
+            .agent_state
+            .as_ref()
+            .and_then(|state| state.reason_code.clone()),
+        attention_class: summary.attention_class,
     }
 }
 
@@ -1650,6 +1896,8 @@ pub(crate) fn validate_session_id(session_id: &str) -> Result<(), ErrorData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
+    use rmcp::transport::streamable_http_server::session::SessionState;
     use std::num::NonZeroUsize;
     use synapse_core::AgentEventKind;
     use tempfile::TempDir;
@@ -1828,6 +2076,119 @@ mod tests {
             Some("window:0x1234")
         );
         Ok(())
+    }
+
+    #[test]
+    fn session_list_tool_defaults_to_compact_paginated_projection() -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        let service = test_service_with_profiles(profiles.path())?;
+        register_initialized_session(&service, "session-a", "codex-mcp-client", 1_000)?;
+        register_initialized_session(&service, "session-b", "codex-mcp-client", 1_100)?;
+        register_initialized_session(&service, "session-c", "codex-mcp-client", 1_200)?;
+
+        let first_page = service.session_list_impl_with_options(
+            SessionListOptions::from_tool_params(SessionListParams {
+                limit: Some(2),
+                ..SessionListParams::default()
+            })?,
+        )?;
+
+        assert_eq!(first_page.view, SessionListView::Compact);
+        assert_eq!(first_page.total_count, 3);
+        assert_eq!(first_page.returned_count, 2);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_cursor, Some(2));
+        assert!(first_page.sessions.is_empty());
+        assert_eq!(
+            first_page
+                .compact_sessions
+                .iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-a", "session-b"]
+        );
+        assert!(first_page.attached_agent_registry.rows.is_empty());
+        assert!(
+            first_page
+                .omitted_sections
+                .contains(&"attached_agent_registry.rows")
+        );
+
+        let second_page = service.session_list_impl_with_options(
+            SessionListOptions::from_tool_params(SessionListParams {
+                cursor: 2,
+                limit: Some(2),
+                ..SessionListParams::default()
+            })?,
+        )?;
+
+        assert_eq!(second_page.cursor, 2);
+        assert_eq!(second_page.total_count, 3);
+        assert_eq!(second_page.returned_count, 1);
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.next_cursor, None);
+        assert_eq!(second_page.compact_sessions[0].session_id, "session-c");
+        Ok(())
+    }
+
+    #[test]
+    fn session_list_full_view_and_live_only_filter_are_explicit() -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        let service = test_service_with_profiles(profiles.path())?;
+        let now = unix_time_ms_now();
+        register_initialized_session(&service, "session-live", "codex-mcp-client", now)?;
+        register_initialized_session(&service, "session-closed", "codex-mcp-client", now + 1)?;
+        {
+            let mut registry = service
+                .session_registry_ref()
+                .lock()
+                .map_err(|_error| anyhow::anyhow!("session registry lock poisoned"))?;
+            registry.record_closed("session-closed", now + 2);
+        }
+
+        let live_only = service.session_list_impl_with_options(
+            SessionListOptions::from_tool_params(SessionListParams {
+                include_closed: true,
+                live_only: true,
+                view: SessionListView::Full,
+                include_attached_agent_rows: true,
+                include_terminal_unbound_history: true,
+                ..SessionListParams::default()
+            })?,
+        )?;
+
+        assert_eq!(live_only.view, SessionListView::Full);
+        assert!(live_only.compact_sessions.is_empty());
+        assert_eq!(live_only.total_count, 1);
+        assert_eq!(live_only.returned_count, 1);
+        assert_eq!(live_only.sessions[0].registry.session_id, "session-live");
+        assert_eq!(live_only.sessions[0].registry.lifecycle, "live");
+        assert!(
+            !live_only
+                .omitted_sections
+                .contains(&"attached_agent_registry.rows")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_list_rejects_invalid_page_limits() {
+        let zero = SessionListOptions::from_tool_params(SessionListParams {
+            limit: Some(0),
+            ..SessionListParams::default()
+        })
+        .expect_err("zero limit should fail closed");
+        assert_eq!(error_code(&zero), Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let too_large = SessionListOptions::from_tool_params(SessionListParams {
+            limit: Some(SESSION_LIST_MAX_LIMIT + 1),
+            ..SessionListParams::default()
+        })
+        .expect_err("oversized limit should fail closed");
+        assert_eq!(
+            error_code(&too_large),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
     }
 
     #[test]
@@ -2233,6 +2594,32 @@ mod tests {
             ),
             M4ServiceConfig::default(),
         )
+    }
+
+    fn register_initialized_session(
+        service: &SynapseService,
+        session_id: &str,
+        client_name: &str,
+        now: u64,
+    ) -> anyhow::Result<()> {
+        let state = SessionState::new(InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new(client_name, "0.0.0-test"),
+        ));
+        let mut registry = service
+            .session_registry_ref()
+            .lock()
+            .map_err(|_error| anyhow::anyhow!("session registry lock poisoned"))?;
+        registry.record_initialized(session_id, &state, "http", now);
+        Ok(())
+    }
+
+    fn error_code(error: &ErrorData) -> Option<&str> {
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(Value::as_str)
     }
 
     fn status_response(session: Option<SessionSummary>) -> SessionStatusResponse {
