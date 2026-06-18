@@ -7111,9 +7111,10 @@ fn parse_remote_process_metadata(
     expected_job_id: &str,
 ) -> Option<RemoteProcessMetadata> {
     for line in stderr.lines() {
-        let Some(rest) = line.strip_prefix(SHELL_REMOTE_PROCESS_MARKER) else {
+        let Some(marker_index) = line.find(SHELL_REMOTE_PROCESS_MARKER) else {
             continue;
         };
+        let rest = &line[marker_index + SHELL_REMOTE_PROCESS_MARKER.len()..];
         let fields = parse_marker_fields(rest);
         let job_id = fields.get("job_id")?;
         if job_id != expected_job_id {
@@ -7755,6 +7756,7 @@ async fn monitor_shell_job(
             terminal_shell_job_status(status.exit_code, status.timed_out, status.cancel_requested)
                 .to_owned();
     }
+    persist_shell_job_local_terminal_status(&paths, &status);
     verify_shell_job_remote_cleanup_after_terminal(
         &mut status,
         &paths,
@@ -7778,6 +7780,31 @@ async fn monitor_shell_job(
             timed_out = status.timed_out,
             cancel_requested = status.cancel_requested,
             "readback=act_run_shell_start after=process_complete_status_persisted"
+        );
+    }
+}
+
+fn persist_shell_job_local_terminal_status(paths: &ShellJobPaths, status: &ActRunShellJobStatus) {
+    if let Err(error) = write_shell_job_reconciliation_status(paths, status.clone()) {
+        tracing::error!(
+            code = "M4_ACT_RUN_SHELL_JOB_LOCAL_TERMINAL_STATUS_WRITE_FAILED",
+            job_id = %status.job_id,
+            status = %status.status,
+            exit_code = ?status.exit_code,
+            error = ?error,
+            "act_run_shell_start monitor could not persist local terminal status before remote cleanup"
+        );
+    } else {
+        tracing::info!(
+            code = "M4_ACT_RUN_SHELL_JOB_LOCAL_TERMINAL_STATUS_PERSISTED",
+            job_id = %status.job_id,
+            pid = ?status.pid,
+            status = %status.status,
+            exit_code = ?status.exit_code,
+            timed_out = status.timed_out,
+            cancel_requested = status.cancel_requested,
+            remote_cleanup_status = %status.remote_process_scope.remote_cleanup_status,
+            "readback=act_run_shell_start after=local_process_complete_status_persisted_before_remote_cleanup"
         );
     }
 }
@@ -10989,6 +11016,87 @@ mod tests {
     }
 
     #[test]
+    fn shell_monitor_persists_terminal_status_before_remote_cleanup() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+            remote_cleanup_path: temp.path().join("remote-cleanup.json"),
+        };
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec!["aiwonder".to_owned(), "printf issue1244-ok".to_owned()],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue1244-local-terminal-before-cleanup".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe aiwonder 'printf issue1244-ok'".to_owned(),
+            matched_pattern: "__any_permitted__".to_owned(),
+        };
+        let request_sha = run_shell_start_request_sha256(&params)
+            .unwrap_or_else(|error| panic!("start request should hash: {error}"));
+        let mut terminal = shell_job_status_record(
+            "issue1244-local-terminal-before-cleanup",
+            "ok",
+            &params,
+            &paths,
+            &request_sha,
+            &authorization,
+            "2026-06-18T00:00:00Z".to_owned(),
+            Some(4242),
+            None,
+        );
+        let metadata =
+            parse_remote_process_metadata(
+                "SYNAPSE_REMOTE_PROCESS_V1 job_id=issue1244-local-terminal-before-cleanup pid=12345 pgid=12345 sid=12345\n",
+                "issue1244-local-terminal-before-cleanup",
+            )
+            .unwrap_or_else(|| panic!("remote marker should parse"));
+        apply_remote_process_metadata(&mut terminal, metadata);
+        terminal.exit_code = Some(0);
+        terminal.completed_at = Some("2026-06-18T00:00:01Z".to_owned());
+        terminal.duration_ms = Some(1000);
+
+        let mut stale_finalizing = terminal.clone();
+        stale_finalizing.status = "finalizing".to_owned();
+        stale_finalizing.exit_code = None;
+        stale_finalizing.completed_at = Some("2026-06-18T00:00:02Z".to_owned());
+        stale_finalizing.duration_ms = Some(2000);
+        write_shell_job_status(&paths.status_path, &stale_finalizing)
+            .unwrap_or_else(|error| panic!("stale finalizing status should write: {error}"));
+
+        persist_shell_job_local_terminal_status(&paths, &terminal);
+        let readback = read_shell_job_status(
+            &paths.status_path,
+            "issue1244-local-terminal-before-cleanup",
+        )
+        .unwrap_or_else(|error| {
+            panic!("status should read after local terminal prewrite: {error}")
+        });
+
+        println!(
+            "readback=act_run_shell_start edge=local_terminal_pre_remote_cleanup before=status:finalizing exit_code:None remote:{} after=status:{} exit_code:{:?} remote:{}",
+            stale_finalizing.remote_process_scope.remote_cleanup_status,
+            readback.status,
+            readback.exit_code,
+            readback.remote_process_scope.remote_cleanup_status
+        );
+        assert_eq!(readback.status, "ok");
+        assert_eq!(readback.exit_code, Some(0));
+        assert_eq!(
+            readback.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_TRACKED
+        );
+        assert!(!readback.remote_process_scope.remote_cleanup_verified);
+    }
+
+    #[test]
     fn shell_remote_scope_classifies_direct_ssh_with_destination() {
         let args = vec![
             "-o".to_owned(),
@@ -11643,6 +11751,16 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.contains("remote_session_id:12345"))
         );
+
+        let concatenated_stderr = "user-stderr-without-newlineSYNAPSE_REMOTE_PROCESS_V1 job_id=issue940-marker pid=54321 pgid=54321 sid=54321\n";
+        let concatenated_metadata =
+            parse_remote_process_metadata(concatenated_stderr, "issue940-marker")
+                .expect("marker concatenated after user stderr should parse");
+        println!(
+            "readback=act_run_shell_remote_tracking edge=marker_after_user_stderr before={concatenated_stderr:?} after={concatenated_metadata:?}"
+        );
+        assert_eq!(concatenated_metadata.pid, "54321");
+        assert_eq!(concatenated_metadata.pgid, "54321");
     }
 
     #[test]
