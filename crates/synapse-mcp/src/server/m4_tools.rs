@@ -5,13 +5,14 @@ use super::{
     ActRunShellStatusResponse, ActSpawnAgentCli, ActSpawnAgentLogPaths, ActSpawnAgentParams,
     ActSpawnAgentRequest, ActSpawnAgentResponse, ActSpawnAgentTarget, ErrorData, Json,
     LaunchWindowState, MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS, Parameters, RunShellAuthorization,
-    ShellExecutionContext, SynapseService, assign_owned_process_job, authorize_run_shell,
-    authorize_run_shell_start, cancel_shell_job, execute_combo, launch, launch_for_session,
-    launch_process_history_row, launch_process_history_row_key, launch_request_details, mcp_error,
-    prepare_run_shell_params_for_context, prepare_run_shell_start_params_for_context,
-    required_combo_permissions, run_authorized_shell, run_shell_idempotency_completed_row,
-    run_shell_idempotency_replay, run_shell_idempotency_reservation_row,
-    run_shell_idempotency_row_key, run_shell_request_details, run_shell_start_request_details,
+    SessionTarget, ShellExecutionContext, SynapseService, TargetWire, assign_owned_process_job,
+    authorize_run_shell, authorize_run_shell_start, cancel_shell_job, execute_combo, launch,
+    launch_for_session, launch_process_history_row, launch_process_history_row_key,
+    launch_request_details, mcp_error, prepare_run_shell_params_for_context,
+    prepare_run_shell_start_params_for_context, required_combo_permissions, run_authorized_shell,
+    run_shell_idempotency_completed_row, run_shell_idempotency_replay,
+    run_shell_idempotency_reservation_row, run_shell_idempotency_row_key,
+    run_shell_request_details, run_shell_start_request_details,
     shell_execution_context_for_session, shell_job_status, start_authorized_shell_job, tool,
     tool_router, validate_agent_spawn_params, validate_run_shell_execution_plan,
 };
@@ -20,6 +21,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -31,7 +33,9 @@ use crate::m3::local_models::{LocalModelApiShape, LocalModelRegistryRow, Resolve
 
 use super::{
     m1_tools::validate_target_window,
-    session_registry::{SpawnedAgentControlRead, SpawnedAgentRead, unix_time_ms_now},
+    session_registry::{
+        SessionRegistryRead, SpawnedAgentControlRead, SpawnedAgentRead, unix_time_ms_now,
+    },
 };
 
 const ACT_SPAWN_AGENT: &str = "act_spawn_agent";
@@ -72,6 +76,150 @@ const AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT: usize = 80;
 const AGENT_SPAWN_POLL_INTERVAL_MS: u64 = 250;
 const AGENT_SPAWN_LOG_TAIL_BYTES: usize = 8 * 1024;
 const AGENT_SPAWN_ORPHAN_RECOVERY_STALE_MS: u64 = 10 * 60 * 1000;
+static AGENT_SPAWN_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static AGENT_SPAWN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct AgentSpawnInFlightGuard {
+    spawn_id: String,
+    sequence: u64,
+    in_flight_at_start: u64,
+    started_at: Instant,
+}
+
+impl AgentSpawnInFlightGuard {
+    fn enter(spawn_id: &str, cli: ActSpawnAgentCli) -> Self {
+        let sequence = AGENT_SPAWN_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+        let in_flight_at_start = AGENT_SPAWN_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(
+            code = "AGENT_SPAWN_IN_FLIGHT_ENTER",
+            spawn_id,
+            cli = cli.as_str(),
+            sequence,
+            in_flight_at_start,
+            "act_spawn_agent entered provisioning"
+        );
+        Self {
+            spawn_id: spawn_id.to_owned(),
+            sequence,
+            in_flight_at_start,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn in_flight_now() -> u64 {
+        AGENT_SPAWN_IN_FLIGHT.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for AgentSpawnInFlightGuard {
+    fn drop(&mut self) {
+        let before = AGENT_SPAWN_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        let in_flight_after = before.saturating_sub(1);
+        tracing::info!(
+            code = "AGENT_SPAWN_IN_FLIGHT_EXIT",
+            spawn_id = %self.spawn_id,
+            sequence = self.sequence,
+            in_flight_after,
+            elapsed_ms = duration_ms_u64(self.started_at.elapsed()),
+            "act_spawn_agent left provisioning"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct AgentSpawnTiming {
+    request_started: Instant,
+    prelaunch_done: Option<Instant>,
+    launch_started: Option<Instant>,
+    launch_completed: Option<Instant>,
+    session_wait_started: Option<Instant>,
+    session_matched: Option<Instant>,
+    task_wait_started: Option<Instant>,
+    task_started: Option<Instant>,
+}
+
+impl AgentSpawnTiming {
+    fn new() -> Self {
+        Self {
+            request_started: Instant::now(),
+            prelaunch_done: None,
+            launch_started: None,
+            launch_completed: None,
+            session_wait_started: None,
+            session_matched: None,
+            task_wait_started: None,
+            task_started: None,
+        }
+    }
+
+    fn mark_prelaunch_done(&mut self) {
+        self.prelaunch_done = Some(Instant::now());
+    }
+
+    fn mark_launch_started(&mut self) {
+        self.launch_started = Some(Instant::now());
+    }
+
+    fn mark_launch_completed(&mut self) {
+        self.launch_completed = Some(Instant::now());
+    }
+
+    fn mark_session_wait_started(&mut self) {
+        self.session_wait_started = Some(Instant::now());
+    }
+
+    fn mark_session_matched(&mut self) {
+        self.session_matched = Some(Instant::now());
+    }
+
+    fn mark_task_wait_started(&mut self) {
+        self.task_wait_started = Some(Instant::now());
+    }
+
+    fn mark_task_started(&mut self) {
+        self.task_started = Some(Instant::now());
+    }
+
+    fn readback(&self, guard: &AgentSpawnInFlightGuard, wait_timeout_ms: u64) -> Value {
+        let now = Instant::now();
+        json!({
+            "source_of_truth": "act_spawn_agent in-process timing/in-flight counters plus per-spawn artifacts",
+            "spawn_sequence": guard.sequence,
+            "in_flight_at_start": guard.in_flight_at_start,
+            "in_flight_now": AgentSpawnInFlightGuard::in_flight_now(),
+            "wait_timeout_ms": wait_timeout_ms,
+            "queue_wait_ms": 0,
+            "queue_wait_source": "no_explicit_spawn_queue; readiness deadline starts after this spawn launches",
+            "request_elapsed_ms": elapsed_ms_between(self.request_started, now),
+            "prelaunch_elapsed_ms": self.prelaunch_done.map(|end| elapsed_ms_between(self.request_started, end)),
+            "launch_elapsed_ms": match (self.launch_started, self.launch_completed) {
+                (Some(start), Some(end)) => Some(elapsed_ms_between(start, end)),
+                (Some(start), None) => Some(elapsed_ms_between(start, now)),
+                _ => None,
+            },
+            "session_wait_elapsed_ms": match (self.session_wait_started, self.session_matched) {
+                (Some(start), Some(end)) => Some(elapsed_ms_between(start, end)),
+                (Some(start), None) => Some(elapsed_ms_between(start, now)),
+                _ => None,
+            },
+            "task_start_wait_elapsed_ms": match (self.task_wait_started, self.task_started) {
+                (Some(start), Some(end)) => Some(elapsed_ms_between(start, end)),
+                (Some(start), None) => Some(elapsed_ms_between(start, now)),
+                _ => None,
+            },
+            "deadline_policy": "per_spawn_phase_deadlines_started_after_launch_and_after_session_match",
+        })
+    }
+}
+
+fn duration_ms_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn elapsed_ms_between(start: Instant, end: Instant) -> u64 {
+    duration_ms_u64(end.saturating_duration_since(start))
+}
 
 #[cfg(windows)]
 const AGENT_SPAWN_WINDOWS_SHELL_CANDIDATES: &[(&str, &str)] = &[
@@ -1260,6 +1408,8 @@ impl SynapseService {
         } else {
             None
         };
+        let mut timing = AgentSpawnTiming::new();
+        let in_flight = AgentSpawnInFlightGuard::enter(&spawn_id, agent_kind);
 
         let orphan_recovery = recover_orphaned_agent_spawn_terminal_artifacts()?;
         if orphan_recovery.recovered_count > 0 {
@@ -1274,7 +1424,6 @@ impl SynapseService {
         let token = read_synapse_bearer_token()?;
         let before_session_ids = self.current_session_ids()?;
         let launched_at_unix_ms = unix_time_ms_now();
-        let wait_deadline = agent_spawn_wait_deadline(params.wait_timeout_ms)?;
         let files = prepare_agent_spawn_files(&spawn_id, &params, &working_dir)?;
         let script = agent_spawn_powershell_script(&params, &files, &working_dir)?;
         let launch_host = match resolve_agent_spawn_powershell_host() {
@@ -1366,6 +1515,8 @@ impl SynapseService {
             desktop: None,
         };
 
+        timing.mark_prelaunch_done();
+        timing.mark_launch_started();
         let launch_response = match launch(&self.m4_config, launch_params.clone()).await {
             Ok(response) => response,
             Err(error) => {
@@ -1380,6 +1531,7 @@ impl SynapseService {
                         "launch_host": launch_host.to_json(),
                         "source_error_message": error.message.clone(),
                         "source_error_data": error.data.clone(),
+                        "spawn_timing": timing.readback(&in_flight, params.wait_timeout_ms),
                     }),
                 );
                 return Err(augment_agent_spawn_error_with_artifacts(
@@ -1393,6 +1545,7 @@ impl SynapseService {
                 ));
             }
         };
+        timing.mark_launch_completed();
         let process_job = match assign_owned_process_job(
             launch_response.pid,
             ACT_SPAWN_AGENT,
@@ -1461,6 +1614,9 @@ impl SynapseService {
             ));
         }
 
+        timing.mark_session_wait_started();
+        let session_wait_deadline =
+            agent_spawn_wait_deadline_from(Instant::now(), params.wait_timeout_ms)?;
         let matched = match self
             .wait_for_spawned_agent_session(
                 &params,
@@ -1470,7 +1626,7 @@ impl SynapseService {
                 launched_at_unix_ms,
                 launch_response.pid,
                 &files,
-                wait_deadline,
+                session_wait_deadline,
             )
             .await
         {
@@ -1487,6 +1643,7 @@ impl SynapseService {
                         "reason": "session_registry_readback_timeout",
                         "wait_timeout_ms": params.wait_timeout_ms,
                         "wait_error": error,
+                        "spawn_timing": timing.readback(&in_flight, params.wait_timeout_ms),
                         "cleanup": cleanup,
                     }),
                 );
@@ -1507,6 +1664,7 @@ impl SynapseService {
                         "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                        "spawn_timing": timing.readback(&in_flight, params.wait_timeout_ms),
                         "wait_error": error,
                         "cleanup": cleanup,
                         "completion_artifacts": completion_artifacts,
@@ -1514,7 +1672,11 @@ impl SynapseService {
                 ));
             }
         };
+        timing.mark_session_matched();
 
+        timing.mark_task_wait_started();
+        let task_wait_deadline =
+            agent_spawn_wait_deadline_from(Instant::now(), params.wait_timeout_ms)?;
         let task_started = match self
             .wait_for_spawned_agent_task_started(
                 &params,
@@ -1523,7 +1685,7 @@ impl SynapseService {
                 &matched,
                 launch_response.pid,
                 &files,
-                wait_deadline,
+                task_wait_deadline,
             )
             .await
         {
@@ -1541,6 +1703,7 @@ impl SynapseService {
                         "wait_timeout_ms": params.wait_timeout_ms,
                         "task_start_error": error,
                         "session_id": matched.session_id,
+                        "spawn_timing": timing.readback(&in_flight, params.wait_timeout_ms),
                         "cleanup": cleanup,
                     }),
                 );
@@ -1564,6 +1727,7 @@ impl SynapseService {
                         "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
+                        "spawn_timing": timing.readback(&in_flight, params.wait_timeout_ms),
                         "task_start_error": error,
                         "cleanup": cleanup,
                         "completion_artifacts": completion_artifacts,
@@ -1571,6 +1735,7 @@ impl SynapseService {
                 ));
             }
         };
+        timing.mark_task_started();
         if let Err(error) =
             self.require_spawned_agent_session_live(&matched.session_id, &files, agent_kind)
         {
@@ -1767,12 +1932,46 @@ impl SynapseService {
     }
 
     fn current_session_ids(&self) -> Result<BTreeSet<String>, ErrorData> {
-        Ok(self
-            .session_list_impl(true)?
-            .sessions
+        let guard = self.session_registry_ref().lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "session registry lock poisoned while reading pre-spawn session ids",
+            )
+        })?;
+        Ok(guard
+            .reads(unix_time_ms_now())
             .into_iter()
-            .map(|summary| summary.registry.session_id)
+            .map(|read| read.session_id)
             .collect())
+    }
+
+    fn spawn_session_candidates_for_readiness(
+        &self,
+        include_targets: bool,
+    ) -> Result<Vec<SpawnSessionCandidateRead>, ErrorData> {
+        let registry_reads = {
+            let guard = self.session_registry_ref().lock().map_err(|_error| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "session registry lock poisoned while reading spawn readiness candidates",
+                )
+            })?;
+            guard.reads(unix_time_ms_now())
+        };
+        let mut candidates = Vec::with_capacity(registry_reads.len());
+        for registry in registry_reads {
+            let active_target = if include_targets {
+                self.agent_logical_foreground_read_model(&registry.session_id)?
+                    .map(|target| spawn_target_wire_from_session_target(&target))
+            } else {
+                None
+            };
+            candidates.push(SpawnSessionCandidateRead {
+                registry,
+                active_target,
+            });
+        }
+        Ok(candidates)
     }
 
     async fn wait_for_spawned_agent_session(
@@ -1791,15 +1990,17 @@ impl SynapseService {
             "sessions": [],
         });
         while !agent_spawn_deadline_remaining(deadline).is_zero() {
-            let list = self.session_list_impl(true).map_err(|error| {
-                json!({
-                    "reason": "session_list_read_failed",
-                    "error": error.message,
-                    "data": error.data,
-                })
-            })?;
+            let candidates = self
+                .spawn_session_candidates_for_readiness(params.target.is_some())
+                .map_err(|error| {
+                    json!({
+                        "reason": "spawn_readiness_candidate_read_failed",
+                        "error": error.message,
+                        "data": error.data,
+                    })
+                })?;
             let mut matched_session = None;
-            let session_count = list.sessions.len();
+            let session_count = candidates.len();
             let mut sessions_json = Vec::new();
             let mut readiness_reason_counts: BTreeMap<String, u64> = BTreeMap::new();
             let mut candidate_readiness = Vec::new();
@@ -1810,9 +2011,10 @@ impl SynapseService {
             // have not (yet) issued a daemon MCP tool call. They are identified
             // as ours; we bind one only with independent proof of task progress.
             let mut lenient_candidates: Vec<String> = Vec::new();
-            for summary in &list.sessions {
-                let readiness = spawn_session_candidate_readiness(
-                    summary,
+            for candidate in &candidates {
+                let readiness = spawn_session_candidate_readiness_from_read(
+                    &candidate.registry,
+                    candidate.active_target.as_ref(),
                     agent_kind,
                     params.target.as_ref(),
                     before_session_ids,
@@ -1825,25 +2027,26 @@ impl SynapseService {
                     .to_owned();
                 *readiness_reason_counts.entry(reason.clone()).or_default() += 1;
                 if reason == "tool_call_not_observed" {
-                    lenient_candidates.push(summary.registry.session_id.clone());
+                    lenient_candidates.push(candidate.registry.session_id.clone());
                 }
-                if explicit_task_session_id.as_deref() == Some(summary.registry.session_id.as_str())
-                    && spawn_session_identity_matches(
-                        summary,
+                if explicit_task_session_id.as_deref()
+                    == Some(candidate.registry.session_id.as_str())
+                    && spawn_session_identity_matches_from_read(
+                        &candidate.registry,
                         agent_kind,
                         before_session_ids,
                         launched_at_unix_ms,
                     )
                 {
                     explicit_task_session_match = Some(MatchedSpawnSession {
-                        session_id: summary.registry.session_id.clone(),
+                        session_id: candidate.registry.session_id.clone(),
                         registered_at_unix_ms: unix_time_ms_now(),
                         agent_process_id: discover_agent_process_id(launcher_pid, agent_kind),
                     });
                 }
                 if readiness.get("ready").and_then(Value::as_bool) == Some(true) {
                     ready_candidates.push(MatchedSpawnSession {
-                        session_id: summary.registry.session_id.clone(),
+                        session_id: candidate.registry.session_id.clone(),
                         registered_at_unix_ms: unix_time_ms_now(),
                         agent_process_id: discover_agent_process_id(launcher_pid, agent_kind),
                     });
@@ -1852,15 +2055,15 @@ impl SynapseService {
                     && candidate_readiness.len() < AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT
                 {
                     candidate_readiness.push(json!({
-                        "session_id": summary.registry.session_id,
-                        "started_at_unix_ms": summary.registry.started_at_unix_ms,
-                        "last_action": summary.registry.last_action,
-                        "active_target": summary.active_target,
+                        "session_id": candidate.registry.session_id,
+                        "started_at_unix_ms": candidate.registry.started_at_unix_ms,
+                        "last_action": candidate.registry.last_action,
+                        "active_target": candidate.active_target,
                         "readiness": readiness.clone(),
                     }));
                 }
                 if sessions_json.len() < AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT {
-                    sessions_json.push(spawn_session_observation(summary, readiness));
+                    sessions_json.push(spawn_session_observation_from_read(candidate, readiness));
                 }
             }
             last_observed = json!({
@@ -1874,6 +2077,7 @@ impl SynapseService {
                 "ready_candidate_count": ready_candidates.len(),
                 "sessions": sessions_json,
                 "readiness_files": agent_spawn_readiness_file_readback(files),
+                "read_model": "session_registry + per-session logical foreground target only; skips full session_list attached process/window scan",
             });
 
             if let Some(matched) = explicit_task_session_match {
@@ -2017,33 +2221,30 @@ impl SynapseService {
         &self,
         session_id: &str,
     ) -> Result<serde_json::Value, serde_json::Value> {
-        let list = self.session_list_impl(true).map_err(|error| {
-            json!({
-                "reason": "session_list_read_failed",
-                "session_id": session_id,
-                "error": error.message,
-                "data": error.data,
-            })
-        })?;
-        let Some(summary) = list
-            .sessions
-            .iter()
-            .find(|summary| summary.registry.session_id == session_id)
-        else {
+        let reads = {
+            let guard = self.session_registry_ref().lock().map_err(|_error| {
+                json!({
+                    "reason": "session_registry_lock_poisoned",
+                    "session_id": session_id,
+                })
+            })?;
+            guard.reads(unix_time_ms_now())
+        };
+        let Some(summary) = reads.iter().find(|read| read.session_id == session_id) else {
             return Ok(json!({
                 "reason": "spawned_session_missing_from_registry",
                 "session_id": session_id,
-                "session_count": list.sessions.len(),
+                "session_count": reads.len(),
             }));
         };
         Ok(json!({
-            "session_id": summary.registry.session_id,
-            "lifecycle": summary.registry.lifecycle,
-            "closed_at_unix_ms": summary.registry.closed_at_unix_ms,
-            "last_seen_unix_ms": summary.registry.last_seen_unix_ms,
-            "last_seen_ms_ago": summary.registry.last_seen_ms_ago,
-            "last_action": summary.registry.last_action,
-            "last_reason_code": summary.registry.last_reason_code,
+            "session_id": summary.session_id,
+            "lifecycle": summary.lifecycle,
+            "closed_at_unix_ms": summary.closed_at_unix_ms,
+            "last_seen_unix_ms": summary.last_seen_unix_ms,
+            "last_seen_ms_ago": summary.last_seen_ms_ago,
+            "last_action": summary.last_action,
+            "last_reason_code": summary.last_reason_code,
         }))
     }
 
@@ -4370,14 +4571,22 @@ fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[cfg(test)]
 fn agent_spawn_wait_deadline(wait_timeout_ms: u64) -> Result<Instant, ErrorData> {
+    agent_spawn_wait_deadline_from(Instant::now(), wait_timeout_ms)
+}
+
+fn agent_spawn_wait_deadline_from(
+    start: Instant,
+    wait_timeout_ms: u64,
+) -> Result<Instant, ErrorData> {
     if wait_timeout_ms > MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!("act_spawn_agent wait_timeout_ms must be <= {MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS}"),
         ));
     }
-    Instant::now()
+    start
         .checked_add(Duration::from_millis(wait_timeout_ms))
         .ok_or_else(|| {
             mcp_error(
@@ -4674,25 +4883,45 @@ fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
     })
 }
 
-fn spawn_session_observation(
-    summary: &super::session_tools::SessionSummary,
+#[derive(Clone, Debug)]
+struct SpawnSessionCandidateRead {
+    registry: SessionRegistryRead,
+    active_target: Option<TargetWire>,
+}
+
+fn spawn_target_wire_from_session_target(target: &SessionTarget) -> TargetWire {
+    match target {
+        SessionTarget::Window { hwnd } => TargetWire::Window { window_hwnd: *hwnd },
+        SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        } => TargetWire::Cdp {
+            window_hwnd: *window_hwnd,
+            cdp_target_id: cdp_target_id.clone(),
+        },
+    }
+}
+
+fn spawn_session_observation_from_read(
+    candidate: &SpawnSessionCandidateRead,
     readiness: Value,
 ) -> Value {
     json!({
-        "session_id": summary.registry.session_id,
-        "agent_kind": summary.registry.agent_kind,
-        "client_name": summary.registry.client_name,
-        "client_version": summary.registry.client_version,
-        "lifecycle": summary.registry.lifecycle,
-        "started_at_unix_ms": summary.registry.started_at_unix_ms,
-        "last_seen_unix_ms": summary.registry.last_seen_unix_ms,
-        "last_seen_ms_ago": summary.registry.last_seen_ms_ago,
-        "last_action": summary.registry.last_action,
-        "active_target": summary.active_target,
+        "session_id": candidate.registry.session_id,
+        "agent_kind": candidate.registry.agent_kind,
+        "client_name": candidate.registry.client_name,
+        "client_version": candidate.registry.client_version,
+        "lifecycle": candidate.registry.lifecycle,
+        "started_at_unix_ms": candidate.registry.started_at_unix_ms,
+        "last_seen_unix_ms": candidate.registry.last_seen_unix_ms,
+        "last_seen_ms_ago": candidate.registry.last_seen_ms_ago,
+        "last_action": candidate.registry.last_action,
+        "active_target": candidate.active_target,
         "readiness": readiness,
     })
 }
 
+#[cfg(test)]
 fn spawn_session_candidate_readiness(
     summary: &super::session_tools::SessionSummary,
     agent_kind: ActSpawnAgentCli,
@@ -4700,42 +4929,60 @@ fn spawn_session_candidate_readiness(
     before_session_ids: &BTreeSet<String>,
     launched_at_unix_ms: u64,
 ) -> Value {
-    if before_session_ids.contains(&summary.registry.session_id) {
+    spawn_session_candidate_readiness_from_read(
+        &summary.registry,
+        summary.active_target.as_ref(),
+        agent_kind,
+        target,
+        before_session_ids,
+        launched_at_unix_ms,
+    )
+}
+
+fn spawn_session_candidate_readiness_from_read(
+    registry: &SessionRegistryRead,
+    active_target: Option<&TargetWire>,
+    agent_kind: ActSpawnAgentCli,
+    target: Option<&ActSpawnAgentTarget>,
+    before_session_ids: &BTreeSet<String>,
+    launched_at_unix_ms: u64,
+) -> Value {
+    if before_session_ids.contains(&registry.session_id) {
         return json!({
             "ready": false,
             "reason": "session_existed_before_spawn",
             "expected": "new distinct MCP session id",
         });
     }
-    if summary.registry.lifecycle != "live" {
+    if registry.lifecycle != "live" {
         return json!({
             "ready": false,
             "reason": "session_not_live",
-            "lifecycle": summary.registry.lifecycle,
-            "closed_at_unix_ms": summary.registry.closed_at_unix_ms,
-            "last_reason_code": summary.registry.last_reason_code,
+            "lifecycle": registry.lifecycle,
+            "closed_at_unix_ms": registry.closed_at_unix_ms,
+            "last_reason_code": registry.last_reason_code,
         });
     }
-    if summary.registry.started_at_unix_ms + 2_000 < launched_at_unix_ms {
+    if registry.started_at_unix_ms + 2_000 < launched_at_unix_ms {
         return json!({
             "ready": false,
             "reason": "session_started_before_spawn_window",
-            "started_at_unix_ms": summary.registry.started_at_unix_ms,
+            "started_at_unix_ms": registry.started_at_unix_ms,
             "launched_at_unix_ms": launched_at_unix_ms,
             "allowed_clock_skew_ms": 2000,
         });
     }
-    if !summary_matches_cli(summary, agent_kind) {
+    if !registry_matches_cli(registry, agent_kind) {
         return json!({
             "ready": false,
             "reason": "session_cli_mismatch",
             "expected_cli": agent_kind.as_str(),
-            "agent_kind": summary.registry.agent_kind,
-            "client_name": summary.registry.client_name,
+            "agent_kind": registry.agent_kind,
+            "client_name": registry.client_name,
         });
     }
     if let Some(expected) = target {
-        if matches_target_wire(summary.active_target.as_ref(), expected) {
+        if matches_target_wire(active_target, expected) {
             json!({
                 "ready": true,
                 "reason": "target_bound",
@@ -4745,11 +4992,10 @@ fn spawn_session_candidate_readiness(
                 "ready": false,
                 "reason": "target_mismatch",
                 "expected_target": expected,
-                "active_target": summary.active_target,
+                "active_target": active_target,
             })
         }
-    } else if summary
-        .registry
+    } else if registry
         .last_action
         .as_deref()
         .is_some_and(|action| action.starts_with("tools/call:"))
@@ -4757,13 +5003,13 @@ fn spawn_session_candidate_readiness(
         json!({
             "ready": true,
             "reason": "tool_call_observed",
-            "last_action": summary.registry.last_action,
+            "last_action": registry.last_action,
         })
     } else {
         json!({
             "ready": false,
             "reason": "tool_call_not_observed",
-            "last_action": summary.registry.last_action,
+            "last_action": registry.last_action,
             "expected": "last_action beginning with tools/call:",
         })
     }
@@ -4782,28 +5028,39 @@ fn task_start_session_id_for_spawn(files: &AgentSpawnFiles, spawn_id: &str) -> O
         .map(str::to_owned)
 }
 
+#[cfg(test)]
 fn spawn_session_identity_matches(
     summary: &super::session_tools::SessionSummary,
     agent_kind: ActSpawnAgentCli,
     before_session_ids: &BTreeSet<String>,
     launched_at_unix_ms: u64,
 ) -> bool {
-    !before_session_ids.contains(&summary.registry.session_id)
-        && summary.registry.lifecycle == "live"
-        && summary.registry.started_at_unix_ms + 2_000 >= launched_at_unix_ms
-        && summary_matches_cli(summary, agent_kind)
+    spawn_session_identity_matches_from_read(
+        &summary.registry,
+        agent_kind,
+        before_session_ids,
+        launched_at_unix_ms,
+    )
 }
 
-fn summary_matches_cli(
-    summary: &super::session_tools::SessionSummary,
-    cli: ActSpawnAgentCli,
+fn spawn_session_identity_matches_from_read(
+    registry: &SessionRegistryRead,
+    agent_kind: ActSpawnAgentCli,
+    before_session_ids: &BTreeSet<String>,
+    launched_at_unix_ms: u64,
 ) -> bool {
+    !before_session_ids.contains(&registry.session_id)
+        && registry.lifecycle == "live"
+        && registry.started_at_unix_ms + 2_000 >= launched_at_unix_ms
+        && registry_matches_cli(registry, agent_kind)
+}
+
+fn registry_matches_cli(registry: &SessionRegistryRead, cli: ActSpawnAgentCli) -> bool {
     let cli = cli.as_str();
-    if summary.registry.agent_kind == cli {
+    if registry.agent_kind == cli {
         return true;
     }
-    summary
-        .registry
+    registry
         .client_name
         .as_deref()
         .is_some_and(|name| name.to_ascii_lowercase().contains(cli))
@@ -5168,6 +5425,14 @@ mod tests {
             Some(&json!(error_codes::TOOL_PARAMS_INVALID))
         );
         assert!(error.message.contains("must be <="));
+    }
+
+    #[test]
+    fn agent_spawn_wait_deadline_uses_supplied_phase_start() {
+        let start = Instant::now();
+        let deadline = agent_spawn_wait_deadline_from(start, 1_234).expect("valid phase deadline");
+
+        assert_eq!(deadline.duration_since(start), Duration::from_millis(1_234));
     }
 
     #[test]

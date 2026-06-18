@@ -600,7 +600,7 @@ impl SynapseService {
         Ok(targets)
     }
 
-    fn agent_logical_foreground_read_model(
+    pub(crate) fn agent_logical_foreground_read_model(
         &self,
         session_id: &str,
     ) -> Result<Option<SessionTarget>, ErrorData> {
