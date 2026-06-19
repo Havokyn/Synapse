@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use synapse_core::{AccessibleNode, CdpCapability, CdpStatus, Rect, SubsystemHealth, error_codes};
+#[cfg(test)]
+use synapse_core::CdpStatus;
+use synapse_core::{Rect, SubsystemHealth, error_codes};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Notify, RwLock, oneshot},
@@ -119,6 +121,7 @@ impl ChromeDebuggerBridgeError {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn cdp_status(&self) -> CdpStatus {
         if self.code == error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE
             || self.code == error_codes::CHROME_BRIDGE_EXTENSION_STALE
@@ -817,18 +820,6 @@ fn external_chrome_layout_infobar_processes() -> Vec<String> {
         .collect()
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ChromeDebuggerDomSnapshot {
-    pub nodes: Vec<AccessibleNode>,
-    pub total_ax_nodes: u32,
-    pub page_url: String,
-    pub target_id: String,
-    pub session_id: String,
-    pub target_candidate_count: u32,
-    pub target_selection_reason: String,
-    pub extension_id: String,
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ChromeDebuggerMouseButton {
     Left,
@@ -1266,31 +1257,6 @@ pub(crate) struct ChromeBridgeReloadResult {
     pub after: ChromeBridgeHostSnapshot,
     pub reconnected: bool,
     pub waited_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtensionSnapshotResponse {
-    nodes: Vec<ExtensionDomNode>,
-    total_ax_nodes: u32,
-    page_url: String,
-    target_id: String,
-    session_id: String,
-    target_candidate_count: u32,
-    target_selection_reason: String,
-    extension_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ExtensionDomNode {
-    backend_node_id: i64,
-    parent_backend_node_id: Option<i64>,
-    role: String,
-    name: String,
-    value: Option<String>,
-    bbox: Option<Rect>,
-    child_count: u32,
-    enabled: bool,
-    focused: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2506,67 +2472,6 @@ async fn send_attach_command(
     Err(error)
 }
 
-pub(crate) async fn fetch_dom_snapshot(
-    hwnd: i64,
-    foreground_title: &str,
-    foreground_url_hint: Option<&str>,
-    target_id_hint: Option<&str>,
-    max_nodes: usize,
-) -> Result<ChromeDebuggerDomSnapshot, ChromeDebuggerBridgeError> {
-    let result = send_attach_command(
-        hwnd,
-        "snapshot",
-        json!({
-            "hwnd": hwnd,
-            "foregroundTitle": foreground_title,
-            "foregroundUrlHint": foreground_url_hint,
-            "targetIdHint": target_id_hint,
-            "maxNodes": max_nodes,
-        }),
-    )
-    .await?;
-    let snapshot =
-        serde_json::from_value::<ExtensionSnapshotResponse>(result).map_err(|error| {
-            ChromeDebuggerBridgeError::protocol(format!(
-                "decode Chrome debugger DOM snapshot response: {error}"
-            ))
-        })?;
-    let dom_nodes = snapshot
-        .nodes
-        .into_iter()
-        .map(|node| synapse_a11y::CdpDomNode {
-            backend_node_id: node.backend_node_id,
-            parent_backend_node_id: node.parent_backend_node_id,
-            role: node.role,
-            name: node.name,
-            value: node.value,
-            frame_id: None,
-            bbox: node.bbox,
-            child_count: node.child_count,
-            enabled: node.enabled,
-            focused: node.focused,
-        })
-        .collect::<Vec<_>>();
-    let nodes = synapse_a11y::build_accessible_nodes_for_target(
-        hwnd,
-        Some(&snapshot.target_id),
-        &dom_nodes,
-        max_nodes,
-    );
-    Ok(ChromeDebuggerDomSnapshot {
-        nodes,
-        total_ax_nodes: snapshot.total_ax_nodes,
-        page_url: snapshot.page_url,
-        target_id: snapshot.target_id,
-        session_id: snapshot.session_id,
-        target_candidate_count: snapshot.target_candidate_count,
-        target_selection_reason: snapshot.target_selection_reason,
-        extension_id: snapshot
-            .extension_id
-            .unwrap_or_else(|| EXTENSION_ID.to_owned()),
-    })
-}
-
 pub(crate) async fn click_node(
     hwnd: i64,
     foreground_title: &str,
@@ -2923,10 +2828,6 @@ pub(crate) async fn reload_bridge(
     wait_timeout_ms: u64,
 ) -> Result<ChromeBridgeReloadResult, ChromeDebuggerBridgeError> {
     bridge().reload_self(wait_timeout_ms).await
-}
-
-pub(crate) fn cdp_capabilities() -> Vec<CdpCapability> {
-    synapse_a11y::cdp_capabilities()
 }
 
 pub(crate) fn is_direct_http_extension_bridge_request(headers: &HeaderMap, uri: &Uri) -> bool {

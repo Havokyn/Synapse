@@ -1678,67 +1678,21 @@ pub async fn enrich_input_with_cdp_for_target(
         return;
     }
 
-    match crate::chrome_debugger_bridge::fetch_dom_snapshot(
+    let detail = format!(
+        "normal Chrome has no reachable raw CDP endpoint, and the old Chrome debugger-extension DOM snapshot path is disabled because it can trigger Chrome's layout-shifting debugger infobar; use a session-owned Chrome bridge target with target_act/browser_set_value/cdp_* typed routes, or a dedicated Synapse-launched automation profile for raw CDP attach work (requested_target_id={})",
+        target_id_hint.unwrap_or_default()
+    );
+    tracing::warn!(
+        code = error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
         hwnd,
-        &title,
-        url_hint.as_deref(),
-        target_id_hint,
-        max_nodes,
-    )
-    .await
-    {
-        Ok(snapshot) => {
-            let count = u32::try_from(snapshot.nodes.len()).unwrap_or(u32::MAX);
-            for mut node in snapshot.nodes {
-                node.depth = node.depth.min(max_depth);
-                input.elements.push(node);
-            }
-            input.web_path = Some(WebPerceptionPath::Cdp);
-            if let Some(diagnostics) = input.cdp.as_mut() {
-                diagnostics.status = CdpStatus::Ok;
-                diagnostics.endpoint = Some(format!(
-                    "chrome-extension://{}/chrome.debugger",
-                    snapshot.extension_id
-                ));
-                diagnostics.reason_code = None;
-                diagnostics.detail = None;
-                diagnostics.capabilities = crate::chrome_debugger_bridge::cdp_capabilities();
-                diagnostics.attached_node_count = Some(count);
-                diagnostics.selected_target_id = Some(snapshot.target_id.clone());
-                diagnostics.selected_session_id = Some(snapshot.session_id.clone());
-                diagnostics.target_selection_reason =
-                    Some(snapshot.target_selection_reason.clone());
-                diagnostics.target_candidate_count = Some(snapshot.target_candidate_count);
-            }
-            tracing::info!(
-                code = "A11Y_CDP_EXTENSION_DOM_ATTACHED",
-                hwnd,
-                page_url = %snapshot.page_url,
-                target_id = %snapshot.target_id,
-                session_id = %snapshot.session_id,
-                requested_target_id = target_id_hint.unwrap_or_default(),
-                target_candidate_count = snapshot.target_candidate_count,
-                target_selection_reason = %snapshot.target_selection_reason,
-                node_count = count,
-                total_ax_nodes = snapshot.total_ax_nodes,
-                extension_id = %snapshot.extension_id,
-                "attached Chrome debugger extension DOM tree into observation elements"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                code = error.code(),
-                hwnd,
-                requested_target_id = target_id_hint.unwrap_or_default(),
-                detail = %error.detail(),
-                "Chrome debugger extension DOM snapshot failed"
-            );
-            if let Some(diagnostics) = input.cdp.as_mut() {
-                diagnostics.status = error.cdp_status();
-                diagnostics.reason_code = Some(error.code().to_owned());
-                diagnostics.detail = Some(error.detail().to_owned());
-            }
-        }
+        requested_target_id = target_id_hint.unwrap_or_default(),
+        detail = %detail,
+        "skipped deprecated Chrome debugger-extension DOM snapshot fallback"
+    );
+    if let Some(diagnostics) = input.cdp.as_mut() {
+        diagnostics.status = CdpStatus::ExtensionUnavailable;
+        diagnostics.reason_code = Some(error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE.to_owned());
+        diagnostics.detail = Some(detail);
     }
 }
 
@@ -3471,6 +3425,40 @@ mod tests {
         ));
         input.web_path = Some(WebPerceptionPath::Cdp);
         assert!(!should_attempt_browser_ocr(&input));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cdp_enrichment_skips_deprecated_chrome_debugger_extension_snapshot() {
+        let mut input = chromium_ocr_input();
+        let before_element_count = input.elements.len();
+
+        enrich_input_with_cdp_for_target(&mut input, 6, 160, Some("chrome-tab:test")).await;
+
+        let diagnostics = input.cdp.as_ref().expect("cdp diagnostics");
+        println!(
+            "readback=cdp_enrich edge=normal_chrome_no_raw_cdp status:{} reason:{:?} detail:{:?} before_elements:{} after_elements:{}",
+            diagnostics.status.as_str(),
+            diagnostics.reason_code,
+            diagnostics.detail,
+            before_element_count,
+            input.elements.len()
+        );
+        assert_eq!(diagnostics.status, CdpStatus::ExtensionUnavailable);
+        assert_eq!(
+            diagnostics.reason_code.as_deref(),
+            Some(error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE)
+        );
+        assert!(
+            diagnostics
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("disabled"))
+        );
+        assert!(diagnostics.detail.as_deref().is_none_or(|detail| {
+            !detail.contains(error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED)
+        }));
+        assert_eq!(input.elements.len(), before_element_count);
     }
 
     #[test]
