@@ -15,8 +15,8 @@
 use super::browser_field::BrowserSetValueParams;
 use super::{ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router};
 use crate::m1::{
-    CaptureScreenshotParams, CdpNavigateAction, CdpNavigateTabParams, CdpTargetInfoParams,
-    ObserveParams, mcp_error,
+    CaptureScreenshotParams, CdpActivateTabParams, CdpNavigateAction, CdpNavigateTabParams,
+    CdpTargetInfoParams, ObserveParams, mcp_error,
 };
 use crate::m2::{ActClickParams, ActSetFieldTextParams, default_verify_timeout_ms};
 use crate::m4::{ActRunShellExecutionMode, ActRunShellParams};
@@ -181,6 +181,7 @@ impl SynapseService {
             "screenshot" => {
                 let path = require_param(params.path, "screenshot", "path")?;
                 let session_id = target_act_session_id(&request_context, "screenshot")?;
+                let target = self.session_target(Some(&session_id))?;
                 let request_details = json!({
                     "session_id": &session_id,
                     "verb": "screenshot",
@@ -188,26 +189,58 @@ impl SynapseService {
                     "requires_agent_logical_foreground": true,
                     "no_human_os_foreground_fallback": true,
                 });
-                match self.agent_logical_foreground(&session_id)? {
-                    Some(_target) => {
+                match target {
+                    Some(SessionTarget::Cdp {
+                        window_hwnd,
+                        cdp_target_id,
+                    }) => {
+                        let activated = self
+                            .cdp_activate_tab(
+                                Parameters(CdpActivateTabParams {
+                                    window_hwnd: Some(window_hwnd),
+                                    cdp_target_id: Some(cdp_target_id),
+                                    wait_timeout_ms: params.wait_timeout_ms,
+                                }),
+                                request_context.clone(),
+                            )
+                            .await?;
                         let response = self
                             .capture_screenshot(
                                 Parameters(CaptureScreenshotParams {
                                     path,
                                     region: None,
-                                    window_hwnd: None,
+                                    window_hwnd: Some(window_hwnd),
                                     overwrite: true,
                                 }),
                                 request_context,
                             )
                             .await?;
-                        (
-                            "capture_screenshot",
-                            true,
-                            TARGET_ACT_STATUS_OK,
-                            target_act_result(&response.0)?,
-                        )
+                        let mut result = target_act_result(&response.0)?;
+                        if let Some(object) = result.as_object_mut() {
+                            object.insert(
+                                "target_act_visual_route".to_owned(),
+                                json!("cdp_activate_tab_then_passive_window_capture"),
+                            );
+                            object.insert(
+                                "activated_target".to_owned(),
+                                target_act_result(&activated.0)?,
+                            );
+                        }
+                        ("capture_screenshot", true, TARGET_ACT_STATUS_OK, result)
                     }
+                    Some(SessionTarget::Window { .. }) => target_act_delegate_response(
+                        "capture_screenshot",
+                        self.capture_screenshot(
+                            Parameters(CaptureScreenshotParams {
+                                path,
+                                region: None,
+                                window_hwnd: None,
+                                overwrite: true,
+                            }),
+                            request_context,
+                        )
+                        .await,
+                    )?,
                     None => {
                         let error = mcp_error(
                             error_codes::TARGET_NOT_SET,
