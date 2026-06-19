@@ -40,9 +40,10 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-19-coordinate-click-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str =
+    "synapse-chrome-bridge-2026-06-19-frame-aware-safe-bridge-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "e19c124aef46209f35ce20d79be8b11d8426136962ef63a40851554c097d69b8";
+    "170ebf1ac150480c46c485ec2b1f62ed8ce52d7c734bcfa6d0172442eb5b6edb";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -1457,6 +1458,54 @@ pub(crate) struct ChromeDebuggerPageText {
     pub error_code: Option<String>,
     #[serde(default)]
     pub error_detail: Option<String>,
+    #[serde(default)]
+    pub readback_scope: Option<String>,
+    #[serde(default)]
+    pub frame_count: usize,
+    #[serde(default)]
+    pub frame_text_available_count: usize,
+    #[serde(default)]
+    pub frame_text_nonempty_count: usize,
+    #[serde(default)]
+    pub frames: Vec<ChromeDebuggerFrameReadback>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerFrameReadback {
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub document_id: Option<String>,
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_detail: Option<String>,
+    #[serde(default)]
+    pub matched_count: Option<usize>,
+    #[serde(default)]
+    pub resolved_by: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub ready_state: Option<String>,
+    #[serde(default)]
+    pub has_active_element: Option<bool>,
+    #[serde(default)]
+    pub is_editable: Option<bool>,
+    #[serde(default)]
+    pub tag_name: Option<String>,
+    #[serde(default)]
+    pub text_len: Option<usize>,
+    #[serde(default)]
+    pub text_truncated: Option<bool>,
+    #[serde(default)]
+    pub text_sample: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1483,6 +1532,14 @@ pub(crate) struct ChromeDebuggerActiveElement {
     pub error_code: Option<String>,
     #[serde(default)]
     pub error_detail: Option<String>,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub frame_document_id: Option<String>,
+    #[serde(default)]
+    pub frame_result_count: usize,
+    #[serde(default)]
+    pub frame_results: Vec<ChromeDebuggerFrameReadback>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4043,6 +4100,15 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "page_text_truncated": result
                 .get("page_text")
                 .and_then(|value| value.get("text_truncated")),
+            "page_text_readback_scope": result
+                .get("page_text")
+                .and_then(|value| value.get("readback_scope")),
+            "page_text_frame_count": result
+                .get("page_text")
+                .and_then(|value| value.get("frame_count")),
+            "page_text_nonempty_frame_count": result
+                .get("page_text")
+                .and_then(|value| value.get("frame_text_nonempty_count")),
             "page_vitals_available": result
                 .get("page_vitals")
                 .and_then(|value| value.get("available")),
@@ -4061,6 +4127,8 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "tab_id": result.get("tab_id"),
             "chars_typed": result.get("chars_typed"),
             "readback_backend": result.get("readback_backend"),
+            "frame_id": result.get("frame_id"),
+            "frame_result_count": result.get("frame_result_count"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
@@ -4072,6 +4140,23 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "match_count": result.get("match_count"),
             "tag_name": result.get("tag_name"),
             "readback_backend": result.get("readback_backend"),
+            "frame_id": result.get("frame_id"),
+            "frame_result_count": result.get("frame_result_count"),
+            "before_value_len": result.get("before_value_len"),
+            "after_value_len": result.get("after_value_len"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "domAction" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "action": result.get("action"),
+            "matched_count": result.get("matched_count"),
+            "resolved_by": result.get("resolved_by"),
+            "readback_backend": result.get("readback_backend"),
+            "frame_id": result.get("frame_id"),
+            "frame_result_count": result.get("frame_result_count"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),

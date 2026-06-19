@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-19-coordinate-click-v1";
-const BRIDGE_BUILD_SHA256 = "e19c124aef46209f35ce20d79be8b11d8426136962ef63a40851554c097d69b8";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-19-frame-aware-safe-bridge-v1";
+const BRIDGE_BUILD_SHA256 = "170ebf1ac150480c46c485ec2b1f62ed8ce52d7c734bcfa6d0172442eb5b6edb";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -916,7 +916,7 @@ async function handleTypeActiveElement(params) {
   let results;
   try {
     results = await chrome.scripting.executeScript({
-      target: { tabId: selected.tabId },
+      target: { tabId: selected.tabId, allFrames: true },
       func: typeActiveElementInPage,
       args: [text]
     });
@@ -926,7 +926,9 @@ async function handleTypeActiveElement(params) {
       `chrome.scripting.executeScript typeActiveElement(${selected.tabId}) failed: ${errorMessage(error)}`
     );
   }
-  const first = Array.isArray(results) ? results[0] : null;
+  const frameResults = frameExecutionResults(results);
+  const okFrames = frameResults.filter((frame) => frame.result && frame.result.ok);
+  const first = okFrames[0] || frameResults.find((frame) => frame.result) || null;
   const result = first?.result;
   if (!result || typeof result !== "object") {
     throw bridgeError(
@@ -946,6 +948,10 @@ async function handleTypeActiveElement(params) {
     tab_id: selected.tabId,
     chars_typed: [...text].length,
     readback_backend: "chrome.scripting.executeScript",
+    frame_id: first.frame_id,
+    frame_document_id: first.document_id,
+    frame_result_count: frameResults.length,
+    frame_results: frameResults.map(summarizeFrameExecutionResult),
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason,
     ...result
@@ -1090,42 +1096,88 @@ async function handleDomAction(params) {
 
   const before = await tabPageState(selected.tabId, selected.target);
   const beforePageText = await tabPageTextState(selected.tabId);
+  const request = {
+    action,
+    selector: stringOrNull(params.selector),
+    elementId: stringOrNull(params.elementId),
+    role: stringOrNull(params.role),
+    name: stringOrNull(params.name),
+    value: stringOrNull(params.value),
+    option: stringOrNull(params.option),
+    clicks: normalizeClickCount(params.clicks),
+    maxPageTextChars: MAX_PAGE_TEXT_CHARS
+  };
   let injected;
   try {
     injected = await chrome.scripting.executeScript({
-      target: { tabId: selected.tabId },
+      target: { tabId: selected.tabId, allFrames: true },
       func: performDomActionInPage,
-      args: [{
-        action,
-        selector: stringOrNull(params.selector),
-        elementId: stringOrNull(params.elementId),
-        role: stringOrNull(params.role),
-        name: stringOrNull(params.name),
-        value: stringOrNull(params.value),
-        option: stringOrNull(params.option),
-        clicks: normalizeClickCount(params.clicks),
-        maxPageTextChars: MAX_PAGE_TEXT_CHARS
-      }]
+      args: [{ ...request, resolveOnly: true }]
     });
   } catch (error) {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `chrome.scripting.executeScript domAction(${selected.tabId}, ${action}) failed: ${errorMessage(error)}`
+      `chrome.scripting.executeScript domAction(${selected.tabId}, ${action}) resolve failed: ${errorMessage(error)}`
     );
   }
 
-  const first = Array.isArray(injected) ? injected[0] : null;
-  const actionResult = first?.result;
+  const frameResults = frameExecutionResults(injected);
+  const okFrames = frameResults.filter((frame) => frame.result && frame.result.ok);
+  const totalMatches = frameResults.reduce((sum, frame) => sum + frameResolvedMatchCount(frame), 0);
+  const ambiguousFrames = frameResults.filter((frame) =>
+    frame.result?.error_code === ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS
+  );
+  if (okFrames.length > 1 || totalMatches > 1 || ambiguousFrames.length > 0) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS,
+      `domAction ${action} matched ${totalMatches} actionable element(s) across ${frameResults.length} frame(s); ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  const first = okFrames[0] || null;
+  if (!first || !first.result || typeof first.result !== "object") {
+    const failed = frameResults.find((frame) => frame.result)?.result;
+    throw bridgeError(
+      String(failed?.error_code || ERROR_CHROME_DOM_ELEMENT_NOT_FOUND),
+      `domAction ${action} failed across ${frameResults.length} frame(s): ${String(failed?.error_detail || "no matching frame result")}; ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  if (!Number.isSafeInteger(first.frame_id)) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `domAction ${action} resolved a frame without a targetable frame_id; ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+
+  let actionInjected;
+  try {
+    actionInjected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, frameIds: [first.frame_id] },
+      func: performDomActionInPage,
+      args: [request]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript domAction(${selected.tabId}, ${action}, frame=${first.frame_id}) failed: ${errorMessage(error)}`
+    );
+  }
+  const actionFrameResults = frameExecutionResults(actionInjected);
+  const actionFrame = actionFrameResults.find((frame) => frame.result) || null;
+  const actionResult = actionFrame?.result;
   if (!actionResult || typeof actionResult !== "object") {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      "chrome.scripting.executeScript domAction returned no structured result"
+      "chrome.scripting.executeScript domAction returned no structured action result"
     );
   }
   if (!actionResult.ok) {
     throw bridgeError(
       String(actionResult.error_code || ERROR_AXTREE_FAILED),
-      `domAction ${action} failed: ${String(actionResult.error_detail || "")}`
+      `domAction ${action} failed in resolved frame ${first.frame_id}: ${String(actionResult.error_detail || "")}; ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
     );
   }
 
@@ -1143,6 +1195,10 @@ async function handleDomAction(params) {
     after_page_text: afterPageText,
     readback_backend: "chrome.scripting.executeScript+chrome.tabs.get",
     required_foreground: false,
+    frame_id: first.frame_id,
+    frame_document_id: first.document_id,
+    frame_result_count: frameResults.length,
+    frame_results: frameResults.map(summarizeFrameExecutionResult),
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason,
     ...actionResult
@@ -1751,11 +1807,16 @@ async function tabActiveElementState(tabId) {
   }
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       func: readActiveElementInPage
     });
-    const first = Array.isArray(results) ? results[0] : null;
-    if (!first || typeof first.result !== "object" || first.result === null) {
+    const frames = frameExecutionResults(results);
+    const selected =
+      frames.find((frame) => frame.result?.has_active_element && frame.result?.is_editable) ||
+      frames.find((frame) => frame.result?.has_active_element) ||
+      frames.find((frame) => frame.result) ||
+      null;
+    if (!selected || typeof selected.result !== "object" || selected.result === null) {
       return {
         available: false,
         readback_source: "chrome.scripting.executeScript",
@@ -1766,7 +1827,11 @@ async function tabActiveElementState(tabId) {
     return {
       available: true,
       readback_source: "chrome.scripting.executeScript",
-      ...first.result
+      frame_id: selected.frame_id,
+      frame_document_id: selected.document_id,
+      frame_result_count: frames.length,
+      frame_results: frames.map(summarizeFrameExecutionResult),
+      ...selected.result
     };
   } catch (error) {
     return {
@@ -1793,12 +1858,13 @@ async function tabPageTextState(tabId) {
   }
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       func: readPageTextInPage,
       args: [MAX_PAGE_TEXT_CHARS]
     });
-    const first = Array.isArray(results) ? results[0] : null;
-    if (!first || typeof first.result !== "object" || first.result === null) {
+    const frames = frameExecutionResults(results);
+    const aggregated = aggregatePageTextFrames(frames, MAX_PAGE_TEXT_CHARS);
+    if (!aggregated) {
       return {
         available: false,
         readback_source: "chrome.scripting.executeScript",
@@ -1813,7 +1879,7 @@ async function tabPageTextState(tabId) {
     return {
       available: true,
       readback_source: "chrome.scripting.executeScript",
-      ...first.result
+      ...aggregated
     };
   } catch (error) {
     return {
@@ -1827,6 +1893,80 @@ async function tabPageTextState(tabId) {
       error_detail: errorMessage(error)
     };
   }
+}
+
+function trimForReadback(value, maxChars) {
+  const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? maxChars : 240;
+  return Array.from(String(value || "").replace(/\s+/g, " ").trim()).slice(0, limit).join("");
+}
+
+function frameExecutionResults(results) {
+  if (!Array.isArray(results)) {
+    return [];
+  }
+  return results.map((entry, index) => ({
+    index,
+    frame_id: Number.isSafeInteger(entry?.frameId) ? entry.frameId : null,
+    document_id: entry?.documentId == null ? null : String(entry.documentId),
+    result: entry?.result && typeof entry.result === "object" ? entry.result : null
+  }));
+}
+
+function summarizeFrameExecutionResult(frame) {
+  const result = frame?.result && typeof frame.result === "object" ? frame.result : {};
+  const text = typeof result.text === "string" ? result.text : null;
+  return {
+    index: Number.isSafeInteger(frame?.index) ? frame.index : null,
+    frame_id: Number.isSafeInteger(frame?.frame_id) ? frame.frame_id : null,
+    document_id: frame?.document_id || null,
+    ok: result.ok == null ? null : Boolean(result.ok),
+    error_code: result.error_code == null ? null : String(result.error_code),
+    error_detail: result.error_detail == null ? null : trimForReadback(result.error_detail, 240),
+    matched_count: Number.isSafeInteger(result.matched_count) ? result.matched_count : null,
+    resolved_by: result.resolved_by == null ? null : String(result.resolved_by),
+    url: result.url == null ? (result.in_page_before_url == null ? null : String(result.in_page_before_url)) : String(result.url),
+    title: result.title == null ? (result.in_page_title == null ? null : String(result.in_page_title)) : String(result.title),
+    ready_state: result.ready_state == null ? (result.in_page_ready_state == null ? null : String(result.in_page_ready_state)) : String(result.ready_state),
+    has_active_element: result.has_active_element == null ? null : Boolean(result.has_active_element),
+    is_editable: result.is_editable == null ? null : Boolean(result.is_editable),
+    tag_name: result.tag_name == null ? null : String(result.tag_name),
+    text_len: Number.isSafeInteger(result.text_len) ? result.text_len : null,
+    text_truncated: result.text_truncated == null ? null : Boolean(result.text_truncated),
+    text_sample: text == null ? null : trimForReadback(text, 240)
+  };
+}
+
+function frameResolvedMatchCount(frame) {
+  const result = frame?.result && typeof frame.result === "object" ? frame.result : {};
+  for (const key of ["matched_count", "match_count", "editable_match_count"]) {
+    const value = result[key];
+    if (Number.isSafeInteger(value) && value > 0) {
+      return value;
+    }
+  }
+  return result.ok ? 1 : 0;
+}
+
+function aggregatePageTextFrames(frames, maxChars) {
+  const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? Math.min(maxChars, 65536) : 4096;
+  const availableFrames = frames.filter((frame) => frame.result && typeof frame.result === "object");
+  if (availableFrames.length === 0) {
+    return null;
+  }
+  const frameTexts = availableFrames.map((frame) => String(frame.result.text || ""));
+  const combined = frameTexts.filter((text) => text.length > 0).join("\n\n");
+  const combinedChars = Array.from(combined);
+  return {
+    text: combinedChars.slice(0, limit).join(""),
+    text_len: combinedChars.length,
+    text_truncated: combinedChars.length > limit || availableFrames.some((frame) => Boolean(frame.result.text_truncated)),
+    max_chars: limit,
+    readback_scope: "all_frames",
+    frame_count: frames.length,
+    frame_text_available_count: availableFrames.length,
+    frame_text_nonempty_count: frameTexts.filter((text) => text.length > 0).length,
+    frames: availableFrames.map(summarizeFrameExecutionResult)
+  };
 }
 
 function optionalInteger(value) {
@@ -1876,11 +2016,15 @@ async function tabPageVitalsState(tabId) {
   }
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       func: readPageVitalsInPage
     });
-    const first = Array.isArray(results) ? results[0] : null;
-    if (!first || typeof first.result !== "object" || first.result === null) {
+    const frames = frameExecutionResults(results);
+    const selected =
+      frames.find((frame) => frame.result?.available) ||
+      frames.find((frame) => frame.result) ||
+      null;
+    if (!selected || typeof selected.result !== "object" || selected.result === null) {
       return {
         available: false,
         readback_source: "chrome.scripting.executeScript",
@@ -1897,7 +2041,11 @@ async function tabPageVitalsState(tabId) {
     return {
       available: true,
       readback_source: "chrome.scripting.executeScript",
-      ...first.result
+      frame_id: selected.frame_id,
+      frame_document_id: selected.document_id,
+      frame_result_count: frames.length,
+      frame_results: frames.map(summarizeFrameExecutionResult),
+      ...selected.result
     };
   } catch (error) {
     return {
@@ -1939,7 +2087,10 @@ function readPageTextInPage(maxChars) {
     text,
     text_len: textLen,
     text_truncated: textLen > limit,
-    max_chars: limit
+    max_chars: limit,
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || "")
   };
 }
 
@@ -2339,28 +2490,70 @@ async function handleSetFieldValue(params) {
   let results;
   try {
     results = await chrome.scripting.executeScript({
-      target: { tabId: selected.tabId },
+      target: { tabId: selected.tabId, allFrames: true },
+      func: setFieldValueInPage,
+      args: [{ selector, activeElement, text, resolveOnly: true }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.scripting.executeScript setFieldValue(${selected.tabId}) resolve failed: ${errorMessage(error)}`
+    );
+  }
+  const frameResults = frameExecutionResults(results);
+  const okFrames = frameResults.filter((frame) => frame.result && frame.result.ok);
+  const totalMatches = frameResults.reduce((sum, frame) => sum + frameResolvedMatchCount(frame), 0);
+  if (okFrames.length > 1 || totalMatches > 1) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `setFieldValue matched ${totalMatches} editable element(s) across ${frameResults.length} frame(s); ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  const first = okFrames[0] || null;
+  if (!first || !first.result || typeof first.result !== "object") {
+    const failed = frameResults.find((frame) => frame.result)?.result;
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `setFieldValue failed across ${frameResults.length} frame(s): code=${String(failed?.error_code || "UNKNOWN")} ` +
+        `detail=${String(failed?.error_detail || "no matching frame result")}; frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  if (!Number.isSafeInteger(first.frame_id)) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `setFieldValue resolved a frame without a targetable frame_id; ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+
+  let actionResults;
+  try {
+    actionResults = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, frameIds: [first.frame_id] },
       func: setFieldValueInPage,
       args: [{ selector, activeElement, text }]
     });
   } catch (error) {
     throw bridgeError(
       ERROR_AXTREE_FAILED,
-      `chrome.scripting.executeScript setFieldValue(${selected.tabId}) failed: ${errorMessage(error)}`
+      `chrome.scripting.executeScript setFieldValue(${selected.tabId}, frame=${first.frame_id}) failed: ${errorMessage(error)}`
     );
   }
-  const first = Array.isArray(results) ? results[0] : null;
-  const result = first?.result;
+  const actionFrameResults = frameExecutionResults(actionResults);
+  const actionFrame = actionFrameResults.find((frame) => frame.result) || null;
+  const result = actionFrame?.result;
   if (!result || typeof result !== "object") {
     throw bridgeError(
       ERROR_AXTREE_FAILED,
-      "chrome.scripting.executeScript setFieldValue returned no structured result"
+      "chrome.scripting.executeScript setFieldValue returned no structured action result"
     );
   }
   if (!result.ok) {
     throw bridgeError(
       ERROR_AXTREE_FAILED,
-      `setFieldValue failed: code=${String(result.error_code || "UNKNOWN")} detail=${String(result.error_detail || "")}`
+      `setFieldValue failed in resolved frame ${first.frame_id}: code=${String(result.error_code || "UNKNOWN")} ` +
+        `detail=${String(result.error_detail || "")}; frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
     );
   }
   return {
@@ -2369,6 +2562,10 @@ async function handleSetFieldValue(params) {
     tab_id: selected.tabId,
     chars_requested: [...text].length,
     readback_backend: "chrome.scripting.executeScript",
+    frame_id: first.frame_id,
+    frame_document_id: first.document_id,
+    frame_result_count: frameResults.length,
+    frame_results: frameResults.map(summarizeFrameExecutionResult),
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason,
     ...result
@@ -2379,6 +2576,7 @@ function setFieldValueInPage(request) {
   const selector = request && request.selector != null ? String(request.selector) : null;
   const wantActive = Boolean(request && request.activeElement);
   const inputText = String((request && request.text) ?? "");
+  const resolveOnly = Boolean(request && request.resolveOnly);
 
   function isEditable(el) {
     if (!el || el.nodeType !== 1) {
@@ -2477,6 +2675,17 @@ function setFieldValueInPage(request) {
   }
 
   const beforeValue = readValue(element);
+  const tag = String(element.tagName || "").toLowerCase();
+  if (resolveOnly) {
+    return {
+      ok: true,
+      resolved_by: resolvedBy,
+      match_count: matchCount,
+      tag_name: tag,
+      is_editable: true,
+      before_value: beforeValue
+    };
+  }
   try {
     element.focus();
   } catch (_) {
@@ -2505,7 +2714,6 @@ function setFieldValueInPage(request) {
     };
   }
 
-  const tag = String(element.tagName || "").toLowerCase();
   let expected;
   if ((tag === "input" || tag === "textarea") && "value" in element) {
     const proto = tag === "input" ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
@@ -2637,6 +2845,7 @@ function performDomActionInPage(request) {
     option: stringOrEmpty(request?.option)
   };
   const clicks = Number.isSafeInteger(request?.clicks) ? request.clicks : 1;
+  const resolveOnly = Boolean(request?.resolveOnly);
   const maxPageTextChars = Number.isSafeInteger(request?.maxPageTextChars)
     ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
     : 4096;
@@ -2667,6 +2876,22 @@ function performDomActionInPage(request) {
       resolved_by: resolved.resolvedBy,
       before_element: beforeElement
     });
+  }
+  if (resolveOnly) {
+    return {
+      ok: true,
+      action,
+      matched_count: resolved.matchedCount,
+      resolved_by: resolved.resolvedBy,
+      before_element: beforeElement,
+      resolve_only: true,
+      in_page_before_url: beforeUrl,
+      in_page_after_url: String(location.href || ""),
+      in_page_title: String(document.title || ""),
+      in_page_ready_state: String(document.readyState || ""),
+      in_page_before_text: beforePageText,
+      in_page_after_text: beforePageText
+    };
   }
 
   const eventsDispatched = [];
