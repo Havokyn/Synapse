@@ -6872,6 +6872,11 @@ fn shell_wrapped_ssh_command_invocation(
         "cmd" | "cmd.exe" => (cmd_command_script_arg(args)?, "shell_wrapped_ssh:cmd"),
         _ => return None,
     };
+    // This is an argv splitter, not a shell parser. Preserve wrappers whose
+    // escaped quote syntax can change grouping if we strip and rewrite it.
+    if shell_wrapped_script_has_unsupported_quote_escaping(script) {
+        return None;
+    }
     let words = split_single_shell_command_words(script)?;
     let (ssh_command, ssh_args) = words.split_first()?;
     if ssh_family_client_for_executable(ssh_command) != Some("ssh") {
@@ -6882,6 +6887,14 @@ fn shell_wrapped_ssh_command_invocation(
         args: ssh_args.to_vec(),
         evidence,
     })
+}
+
+fn shell_wrapped_script_has_unsupported_quote_escaping(script: &str) -> bool {
+    script.contains("\\\"")
+        || script.contains("\\'")
+        || script.contains("`\"")
+        || script.contains("`'")
+        || script.contains("^\"")
 }
 
 fn powershell_command_script_arg(args: &[String]) -> Option<&str> {
@@ -11722,6 +11735,40 @@ mod tests {
         println!(
             "readback=act_run_shell_remote_tracking edge=complex_powershell before=command:{} args:{args:?} after=invocation:{invocation:?} scope:{scope:?} spawn:{spawn_plan:?}",
             params.command
+        );
+        assert!(invocation.is_none());
+        assert_eq!(scope.transport, SHELL_REMOTE_TRANSPORT_LOCAL);
+        assert_eq!(
+            scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_NOT_APPLICABLE
+        );
+        assert_eq!(spawn_plan.command, "powershell.exe");
+        assert_eq!(spawn_plan.args, args);
+    }
+
+    #[test]
+    fn shell_wrapped_powershell_ssh_with_escaped_remote_quotes_is_not_rewritten() {
+        let script = "ssh -o BatchMode=yes -i //wsl.localhost/Ubuntu-24.04/home/cabdru/.ssh/id_ed25519 -l croyse aiwonder \"sh -lc 'd=$HOME/synapse_issue1259; mkdir -p \\\"$d\\\"; printf 0 > \\\"$d/remote.rc\\\"; exit 0'\"";
+        let args = vec![
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            script.to_owned(),
+        ];
+        let params = ActRunShellStartParams {
+            command: "powershell.exe".to_owned(),
+            args: args.clone(),
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue1259-escaped-powershell".to_owned()),
+        };
+
+        let invocation = shell_job_ssh_command_invocation(&params.command, &params.args);
+        let scope = shell_job_remote_process_scope_from_start_params(&params);
+        let spawn_plan = shell_job_spawn_plan(&params, "issue1259-escaped-powershell");
+
+        println!(
+            "readback=act_run_shell_remote_tracking edge=escaped_powershell_quotes before=script:{script:?} after=invocation:{invocation:?} scope:{scope:?} spawn:{spawn_plan:?}"
         );
         assert!(invocation.is_none());
         assert_eq!(scope.transport, SHELL_REMOTE_TRANSPORT_LOCAL);
