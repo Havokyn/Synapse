@@ -266,10 +266,10 @@ fn format_external_chrome_popup_risks(rows: &[String]) -> String {
 
 fn external_chrome_popup_risk_warning(rows: &[String]) -> String {
     if rows.is_empty() {
-        return "external_chrome_popup_risk_blocking=false risk_count=0".to_owned();
+        return "external_chrome_popup_risk_warning=false risk_count=0".to_owned();
     }
     format!(
-        "external_chrome_popup_risk_blocking=true external_chrome_popup_risk_scope=normal_bridge_commands_refuse_until_debugger_native_hazards_removed_or_disabled risk_count={} external_chrome_popup_risk={} remediation=run scripts\\install-synapse-chrome-debugger.ps1 to apply the reversible HKCU ExtensionSettings popup shield; if policy write is denied, repair HKCU\\Software\\Policies\\Google\\Chrome ACL or disable/reload the listed extension before using the normal Chrome bridge",
+        "external_chrome_popup_risk_warning=true external_chrome_popup_risk_scope=external_attribution_policy_shield_warning_only risk_count={} external_chrome_popup_risk={} remediation=run scripts\\install-synapse-chrome-debugger.ps1 to apply the reversible HKCU ExtensionSettings popup shield; if policy write is denied, Synapse still allows its debugger-free chrome.tabs/chrome.scripting bridge and continues to refuse attach-capable debugger commands",
         rows.len(),
         format_external_chrome_popup_risks(rows)
     )
@@ -286,39 +286,19 @@ fn external_chrome_layout_infobar_warning(rows: &[String]) -> String {
     )
 }
 
-fn external_chrome_popup_risk_error(
-    hwnd: i64,
-    command_kind: &'static str,
-    rows: &[String],
-) -> ChromeDebuggerBridgeError {
-    ChromeDebuggerBridgeError {
-        code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
-        detail: format!(
-            "normal Synapse Chrome Bridge refused popup-sensitive command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=runtime-enabled external Chrome debugger/nativeMessaging surface can raise a layout-shifting browser infobar and corrupt coordinate truth external_chrome_popup_risk={} remediation=run scripts\\install-synapse-chrome-debugger.ps1 to apply the reversible HKCU ExtensionSettings popup shield; if that reports SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED, repair HKCU\\Software\\Policies\\Google\\Chrome ACL or disable/reload the listed extension before using the normal Chrome bridge",
-            format_external_chrome_popup_risks(rows)
-        ),
-    }
-}
-
-fn ensure_normal_bridge_external_popup_suppressed(
-    hwnd: i64,
-    command_kind: &'static str,
-) -> Result<(), ChromeDebuggerBridgeError> {
+fn note_normal_bridge_external_popup_risk(hwnd: i64, command_kind: &'static str) {
     let risks = external_chrome_popup_risks();
     if risks.is_empty() {
-        return Ok(());
+        return;
     }
-    let error = external_chrome_popup_risk_error(hwnd, command_kind, &risks);
     tracing::warn!(
-        code = error.code(),
+        code = "CHROME_EXTERNAL_POPUP_RISK_WARNING",
         hwnd,
         command_kind,
         risk_count = risks.len(),
         external_chrome_popup_risk = %format_external_chrome_popup_risks(&risks),
-        detail = %error.detail(),
-        "normal Chrome bridge refused command because external debugger/nativeMessaging risk is not suppressed"
+        "normal Chrome bridge continuing debugger-free tabs/scripting command while reporting external debugger/nativeMessaging risk"
     );
-    Err(error)
 }
 
 fn note_normal_bridge_registration_external_popup_risk() {
@@ -2178,19 +2158,15 @@ fn chrome_bridge_health_from_snapshot(
     let extension_user_agent = host.extension_user_agent.as_deref().unwrap_or("");
     let stale_reasons = bridge_identity_stale_reasons(host);
     let extension_stale = !stale_reasons.is_empty();
-    let external_popup_blocked = !popup_risks.is_empty();
     let extension_stale_reasons = if stale_reasons.is_empty() {
         "none".to_owned()
     } else {
         stale_reasons.join("|")
     };
-    let tab_control_available = extension_id == EXTENSION_ID
-        && host.last_disconnect_detail.is_none()
-        && !external_popup_blocked;
+    let tab_control_available =
+        extension_id == EXTENSION_ID && host.last_disconnect_detail.is_none();
     let status = if tab_control_available {
         if extension_stale { "stale" } else { "ok" }
-    } else if external_popup_blocked {
-        "blocked"
     } else if host.last_disconnect_detail.is_some() {
         "unavailable"
     } else {
@@ -2404,7 +2380,7 @@ pub(crate) async fn open_tab(
     expected_window_bounds: Option<Rect>,
     expected_window_title: Option<&str>,
 ) -> Result<ChromeDebuggerOpenTabResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "openTab")?;
+    note_normal_bridge_external_popup_risk(hwnd, "openTab");
     let result = bridge()
         .send_command(
             "openTab",
@@ -2433,7 +2409,7 @@ pub(crate) async fn close_tab(
     hwnd: i64,
     target_id: &str,
 ) -> Result<ChromeDebuggerCloseTabResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "closeTab")?;
+    note_normal_bridge_external_popup_risk(hwnd, "closeTab");
     let result = bridge()
         .send_command(
             "closeTab",
@@ -2457,7 +2433,7 @@ pub(crate) async fn target_info(
     expected_window_bounds: Option<Rect>,
     expected_window_title: Option<&str>,
 ) -> Result<ChromeDebuggerTargetInfo, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "targetInfoPageText")?;
+    note_normal_bridge_external_popup_risk(hwnd, "targetInfoPageText");
     let result = bridge()
         .send_command(
             "targetInfoPageText",
@@ -2498,7 +2474,7 @@ pub(crate) async fn type_active_element(
     target_id: &str,
     text: &str,
 ) -> Result<ChromeDebuggerTypeActiveElementResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "typeActiveElement")?;
+    note_normal_bridge_external_popup_risk(hwnd, "typeActiveElement");
     let result = bridge()
         .send_command(
             "typeActiveElement",
@@ -2529,7 +2505,7 @@ pub(crate) async fn set_field_value(
     active_element: bool,
     text: &str,
 ) -> Result<ChromeDebuggerSetFieldValueResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "setFieldValue")?;
+    note_normal_bridge_external_popup_risk(hwnd, "setFieldValue");
     let result = bridge()
         .send_command(
             "setFieldValue",
@@ -2558,7 +2534,7 @@ pub(crate) async fn navigate_tab(
     ignore_cache: bool,
     agent_session_id: Option<&str>,
 ) -> Result<ChromeDebuggerNavigateResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "navigateTab")?;
+    note_normal_bridge_external_popup_risk(hwnd, "navigateTab");
     let result = bridge()
         .send_command(
             "navigateTab",
@@ -2589,7 +2565,7 @@ pub(crate) async fn activate_tab(
     target_id: &str,
     wait_timeout_ms: u64,
 ) -> Result<ChromeDebuggerActivateTabResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(hwnd, "activateTab")?;
+    note_normal_bridge_external_popup_risk(hwnd, "activateTab");
     let result = bridge()
         .send_command(
             "activateTab",
@@ -2638,7 +2614,7 @@ pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
 pub(crate) async fn dom_action(
     request: ChromeDebuggerDomActionRequest<'_>,
 ) -> Result<Value, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "domAction")?;
+    note_normal_bridge_external_popup_risk(request.hwnd, "domAction");
     bridge()
         .send_command(
             "domAction",
@@ -3687,7 +3663,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_bridge_health_reports_external_popup_risk_as_blocking() {
+    fn chrome_bridge_health_reports_external_popup_risk_as_non_blocking_warning() {
         let host = ChromeBridgeHealthRecord {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
@@ -3719,15 +3695,13 @@ mod tests {
             &[],
         );
 
-        assert_eq!(health.status, "blocked");
+        assert_eq!(health.status, "ok");
         let detail = health.detail.as_deref().expect("health detail");
-        assert!(detail.contains("tab_control_available=false"));
-        assert!(detail.contains("external_chrome_popup_risk_blocking=true"));
-        assert!(
-            detail.contains(
-                "external_chrome_popup_risk_scope=normal_bridge_commands_refuse_until_debugger_native_hazards_removed_or_disabled"
-            )
-        );
+        assert!(detail.contains("tab_control_available=true"));
+        assert!(detail.contains("external_chrome_popup_risk_warning=true"));
+        assert!(detail.contains(
+            "external_chrome_popup_risk_scope=external_attribution_policy_shield_warning_only"
+        ));
         assert!(detail.contains("extension_id=external"));
     }
 
@@ -3900,30 +3874,20 @@ mod tests {
     }
 
     #[test]
-    fn external_popup_risk_error_refuses_before_browser_work() {
+    fn external_popup_risk_warning_is_not_a_normal_bridge_refusal() {
         let risks = vec![
             "profile=Profile 5 pref=Secure Preferences extension_id=fcoeoabgfenejglbffodgkkbkcdhcgfn name=\"Claude\" active_api=debugger,nativeMessaging".to_owned(),
             "native_messaging_process pid=26616 name=cmd.exe extension_id=fcoeoabgfenejglbffodgkkbkcdhcgfn".to_owned(),
         ];
 
-        let error = external_chrome_popup_risk_error(1234, "openTab", &risks);
+        let warning = external_chrome_popup_risk_warning(&risks);
 
-        assert_eq!(
-            error.code(),
-            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
-        );
-        assert!(
-            error
-                .detail()
-                .contains("before queueing any Chrome command")
-        );
-        assert!(error.detail().contains("layout-shifting browser infobar"));
-        assert!(error.detail().contains("fcoeoabgfenejglbffodgkkbkcdhcgfn"));
-        assert!(
-            error
-                .detail()
-                .contains("SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED")
-        );
+        assert!(warning.contains("external_chrome_popup_risk_warning=true"));
+        assert!(warning.contains("external_attribution_policy_shield_warning_only"));
+        assert!(warning.contains("risk_count=2"));
+        assert!(warning.contains("fcoeoabgfenejglbffodgkkbkcdhcgfn"));
+        assert!(!warning.contains("tab_control_available=false"));
+        assert!(!warning.contains("refused"));
     }
 
     #[test]

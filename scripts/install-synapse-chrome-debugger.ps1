@@ -276,11 +276,11 @@ function Set-SynapseChromeExternalDebuggerPolicy {
             changed = $false
             reason = 'external_popup_shield_write_denied_warning'
             warning_code = 'SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED'
-            blocking = $true
+            blocking = $false
             phase = 'read_or_create'
             error = $_.Exception.Message
             acl = $acl
-            remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell so Synapse can apply the debugger/nativeMessaging popup shield; normal Chrome bridge commands fail closed while runtime-enabled debugger/nativeMessaging hazards remain because the Chrome debugger infobar changes layout and breaks coordinate truth'
+            remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell if you want Synapse to apply the external debugger/nativeMessaging popup shield; Synapse keeps its debugger-free chrome.tabs/chrome.scripting bridge available and continues to refuse attach-capable debugger commands'
             shielded_entries = @()
             unchanged_entries = @()
         }
@@ -347,11 +347,11 @@ function Set-SynapseChromeExternalDebuggerPolicy {
                 changed = $false
                 reason = 'external_popup_shield_write_denied_warning'
                 warning_code = 'SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED'
-                blocking = $true
+                blocking = $false
                 phase = 'write_extension_settings'
                 error = $_.Exception.Message
                 acl = $acl
-                remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell so Synapse can apply the debugger/nativeMessaging popup shield; normal Chrome bridge commands fail closed while runtime-enabled debugger/nativeMessaging hazards remain because the Chrome debugger infobar changes layout and breaks coordinate truth'
+                remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell if you want Synapse to apply the external debugger/nativeMessaging popup shield; Synapse keeps its debugger-free chrome.tabs/chrome.scripting bridge available and continues to refuse attach-capable debugger commands'
                 shielded_entries = @($shieldedEntries)
                 unchanged_entries = @($unchangedEntries)
             }
@@ -790,10 +790,10 @@ $externalHazardExtensionIds = @(
 # External extensions and native-messaging hosts that use debugger/nativeMessaging
 # can surface layout-changing Chrome popups independently of Synapse's tabs-only
 # bridge. Setup tries to apply a reversible HKCU ExtensionSettings shield for
-# those permissions by default. Failure to write the shield is a blocking
-# normal-bridge setup state while the runtime-enabled hazard remains, because
-# the Chrome debugger infobar changes viewport geometry and breaks coordinate
-# truth even when Synapse's bridge never requests or calls debugger/nativeMessaging.
+# those permissions by default. Failure to write the external shield is reported
+# with ACL/readback detail, but it does not block Synapse's own debugger-free
+# tabs/scripting bridge. The bridge still refuses attach-capable debugger
+# commands before queueing any Chrome command.
 #
 # As a one-way remediation we remove any debugger/nativeMessaging blockers that
 # an earlier Synapse version wrote into Chrome ExtensionSettings, so running the
@@ -812,14 +812,8 @@ $chromePolicyPopupShield = if ($PreserveExternalDebuggerExtensions) {
     Set-SynapseChromeExternalDebuggerPolicy -Extensions $allExternalDebuggerOrNativeExtensions
 }
 
-$runtimeEnabledExternalPopupHazards = @(
-    @($externalDebuggerOrNativeExtensions)
-    @($externalNativeMessagingProcessRows)
-)
-$externalPopupRiskBlocksPopupFreeCommands = ($runtimeEnabledExternalPopupHazards.Count -gt 0)
-
 [pscustomobject]@{
-    ok = (-not $externalPopupRiskBlocksPopupFreeCommands)
+    ok = $true
     native_host = $hostName
     native_manifest = $null
     registry_key = $registryPath
@@ -854,13 +848,9 @@ $externalPopupRiskBlocksPopupFreeCommands = ($runtimeEnabledExternalPopupHazards
     current_chrome_processes = $chromeProcesses
     chrome_policy_cleanup = $chromePolicyCleanup
     chrome_policy_popup_shield = $chromePolicyPopupShield
-    external_popup_risk_blocks_popup_free_commands = $externalPopupRiskBlocksPopupFreeCommands
-    external_popup_risk_scope = 'blocking_until_no_runtime_enabled_debugger_native_hazards'
-    external_popup_risk_block_reason = if ($externalPopupRiskBlocksPopupFreeCommands) {
-        'runtime_enabled_debugger_or_native_hazard_present'
-    } else {
-        'none'
-    }
+    external_popup_risk_blocks_popup_free_commands = $false
+    external_popup_risk_scope = 'reported_for_operator_attribution_and_policy_shield_only'
+    external_popup_risk_block_reason = 'none'
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     synapse_stale_granted_permission_warning = [pscustomobject]@{
         warning = ($staleSynapseGrantedPermissions.Count -gt 0)

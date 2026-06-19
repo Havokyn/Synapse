@@ -48,10 +48,8 @@ extensions or native hosts that request `debugger`/`nativeMessaging`. The shield
 is identified by Synapse's `blocked_install_message` marker and can be removed
 with the maintenance command below. If the HKCU Chrome policy key is ACL-locked,
 the verifier reports `SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED` with ACL
-readback. Runtime-enabled external debugger/nativeMessaging hazards then block
-normal Chrome bridge commands until the policy shield is applied or the listed
-extension/process is disabled, because the debugger infobar changes viewport
-geometry and corrupts coordinate truth.
+readback. That external-extension shield warning does not block Synapse's own
+debugger-free `chrome.tabs` / `chrome.scripting` bridge.
 
 Then load this directory as an unpacked extension from `chrome://extensions`.
 The extension registers with the loopback daemon at `http://127.0.0.1:7700`,
@@ -76,9 +74,9 @@ reported separately because they are profile debt, not proof that the running
 bridge can call the API.
 
 Registration is command-surface scoped. The daemon accepts the direct bridge
-registration for the expected Synapse extension, but normal tab/scripting
-commands fail closed while a runtime-enabled external debugger/nativeMessaging
-hazard remains. Attach-capable commands also fail closed with
+registration for the expected Synapse extension even when it reports an external
+Chrome extension/native-host popup risk, because Synapse's normal bridge is
+debugger-free. Attach-capable commands still fail closed with
 `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before queueing any browser work.
 
 Background tab commands (`openTab`, `closeTab`, `navigateTab`, `activateTab`,
@@ -106,10 +104,10 @@ CDP in a dedicated silent automation profile for arbitrary JavaScript eval.
 plus document visibility state. No command calls `chrome.debugger.getTargets` or
 `chrome.debugger.attach`; target IDs returned by this path are synthetic
 `chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback. The daemon refuses
-attach-capable debugger commands and also refuses normal tab/scripting commands
-while external `debugger`/`nativeMessaging` surfaces remain runtime-enabled and
-unsuppressed. Those surfaces are visible in health/diagnostics with the exact
-profile/process that must be disabled, reloaded, or policy-shielded.
+attach-capable debugger commands before queueing them. External
+`debugger`/`nativeMessaging` surfaces remain visible in health/diagnostics for
+operator attribution and policy shielding, but they do not strand these
+popup-free normal-profile commands.
 
 The lifecycle command `reloadSelf` is limited to self-reload. It validates the
 expected extension ID and expected build ID, acknowledges the request to the
@@ -132,8 +130,8 @@ scripting. By default, setup writes a Synapse-marked HKCU `ExtensionSettings`
 `-PreserveExternalDebuggerExtensions` only as an explicit emergency opt-out;
 deep CDP work still belongs in a dedicated Synapse-launched automation profile
 started with `--silent-debugger-extension-api`. If the policy key is ACL-locked,
-setup reports the denied write as a blocking normal-bridge setup failure until
-the listed hazard is disabled or the policy ACL is repaired.
+setup reports the denied write as a non-blocking warning for the external
+shield.
 
 Runtime Chrome observations follow the same rule. If raw CDP is unavailable and
 Synapse refuses a normal-profile attach-capable command, the diagnostic detail
@@ -144,9 +142,8 @@ headed Playwright MCP launches with `--disable-blink-features=AutomationControll
 or remote debugging without `--silent-debugger-extension-api`. A remaining
 end-user debugger/native-host/banner popup is therefore attributed to a concrete
 extension or process instead of being reported as an ambiguous Synapse bridge
-failure. Background normal-profile tab and typed DOM commands refuse while these
-runtime-enabled hazards remain, because the browser infobar moves the page and
-breaks coordinate truth. Use raw CDP
+failure. Background normal-profile tab and typed DOM commands use these warnings
+as attribution only; they remain available through the safe bridge. Use raw CDP
 on a dedicated Synapse-launched automation profile started with
 `--silent-debugger-extension-api` only for attach-capable CDP work.
 
@@ -160,10 +157,9 @@ scripts\synapse-setup.ps1
 Setup registers the bridge, removes stale Synapse-authored blockers from prior
 builds, and tries to write current Synapse-authored `blocked_permissions`
 entries for detected external debugger/nativeMessaging hazards. Those entries
-are reversible through the maintenance command below and are the supported way
-to suppress popups from other extensions/native hosts. If they cannot be
-applied and the hazard remains runtime-enabled, Synapse normal Chrome bridge
-commands fail closed.
+are reversible through the maintenance command below and are the supported
+optional way to suppress popups from other extensions/native hosts; they are not
+required for Synapse's own tabs/scripting bridge.
 
 To heal an affected machine without a full setup run, invoke the standalone
 verifier's maintenance entry point:

@@ -27,12 +27,10 @@ through `chrome.tabs`. DOM attach through the debugger API is intentionally
 unavailable in the normal end-user bridge. If no CDP endpoint is available, the
 UIA tree is still returned, but it is the browser shell, not the page DOM.
 External extensions or native hosts with `debugger` / `nativeMessaging` are
-reported in health/diagnostics for popup attribution and policy shielding. If
-they remain runtime-enabled, Synapse's normal `chrome.tabs` / `chrome.scripting`
-bridge commands fail closed before queueing Chrome work because the debugger
-infobar changes viewport geometry and corrupts coordinate truth. Attach-capable
-debugger commands also fail closed with
-`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED`.
+reported in health/diagnostics for popup attribution and policy shielding. They
+do not block Synapse's own debugger-free `chrome.tabs` / `chrome.scripting`
+bridge. Attach-capable debugger commands fail closed with
+`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before any Chrome work is queued.
 
 ## Diagnostics
 
@@ -74,8 +72,8 @@ The intended strategy ladder is:
 2. Non-attach Chrome extension `chrome.tabs` navigation for normal-profile
    background tab open, close, navigate, reload, back, and forward over the
    direct localhost WebSocket bridge. Runtime-enabled external popup-risk
-   surfaces block this path until they are policy-shielded, disabled, or
-   reloaded out of the active profile.
+   surfaces are reported separately; they do not disable Synapse's safe
+   tabs/scripting commands.
 3. OCR/capture over tiled browser content when CDP is down or attach fails.
 4. Explicit `uia_only` for browser chrome/native UI when neither DOM nor OCR
    produced page content.
@@ -203,13 +201,11 @@ Chrome session, the supported attach path is:
    `-PreserveExternalDebuggerExtensions` only as an explicit emergency opt-out.
    If `HKCU\Software\Policies\Google\Chrome` is ACL-locked, the verifier reports
    `SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED` and ACL readback as a
-   blocking normal-bridge setup state while the listed runtime-enabled hazard
-   remains.
+   non-blocking warning for the external shield.
    Runtime `observe` diagnostics also include a live
    `external_chrome_popup_risk` profile/process summary when Synapse refuses a
-   normal-profile attach-capable or popup-sensitive command, so remaining
-   popups are attributed to the exact external browser surface instead of to
-   Synapse's tabs-only bridge.
+   normal-profile attach-capable command, so remaining popups are attributed to
+   the exact external browser surface instead of to Synapse's tabs-only bridge.
    Health/setup also report `external_chrome_layout_infobar_risk` for visible
    automation Chrome processes whose flags are known to show layout-shifting
    browser banners, including headed Playwright MCP Chrome with
