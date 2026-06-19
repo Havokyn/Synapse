@@ -77,7 +77,8 @@ certifying the host.
 The verifier also reads Chrome profile permissions for the live Synapse
 extension ID and fails closed if an older load still has unexpected
 `debugger` or `nativeMessaging` active. Granted-only stale permissions are
-reported separately because they are profile debt, not proof that the running
+reported separately because Chromium can retain removed permissions in the
+granted set after an update; they are profile debt, not proof that the running
 bridge can call the API.
 
 Registration is command-surface scoped. The daemon accepts the direct bridge
@@ -137,9 +138,12 @@ scripting. By default, setup writes a Synapse-marked HKCU `ExtensionSettings`
 `-PreserveExternalDebuggerExtensions` only as an explicit emergency opt-out;
 deep CDP work still belongs in a dedicated Synapse-launched automation profile
 started with `--silent-debugger-extension-api`. If the policy key is ACL-locked,
-setup reports the denied write as a policy-shield failure and relies on the
-loaded bridge's `chrome.management` suppression readback. If Chrome rejects that
-suppression, normal-profile commands fail closed with exact extension IDs.
+setup reports the denied write with ACL evidence instead of assuming the shield
+exists. Granted-only stale Synapse rows remain advisory when the loaded bridge is
+current and `debuggerApiAvailable=false`; active/manifest self hazards still fail
+closed. External hazards rely on the loaded bridge's `chrome.management`
+suppression readback. If Chrome rejects that suppression, normal-profile commands
+fail closed with exact extension IDs.
 
 Runtime Chrome observations follow the same rule. If raw CDP is unavailable and
 Synapse refuses a normal-profile attach-capable command, the diagnostic detail

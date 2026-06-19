@@ -201,17 +201,20 @@ Chrome session, the supported attach path is:
    bridge build that still does is blocked by Chrome policy instead of being able
    to show the "`started debugging this browser`" banner. Admin- or user-authored
    `ExtensionSettings` entries are preserved except for that Synapse-authored
-   permission shield. Run
+   permission shield. Granted-only stale Synapse permission rows are diagnostic
+   after a bridge update; they are not treated as popup-capable when the live
+   worker identity is current and `extension_debugger_api_available=false`.
+   Active or manifest `debugger` / `nativeMessaging` rows still fail closed. Run
    `scripts\install-synapse-chrome-debugger.ps1 -RemoveExternalDebuggerPolicyOnly`
    to remove only Synapse-authored external popup shields; it keeps the Synapse
    extension ID self-shield. Use
    `-PreserveExternalDebuggerExtensions` only as an explicit emergency opt-out.
    If `HKCU\Software\Policies\Google\Chrome` is ACL-locked, the verifier reports
-   `SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED` and ACL readback as a
-   blocking policy-shield failure. The installed bridge then must suppress the
-   hazard through `chrome.management`; if Chrome rejects that suppression,
-   normal bridge commands fail closed and report the exact extension IDs and
-   suppression error.
+   `SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED` and ACL readback instead of
+   silently assuming the shield exists. The installed bridge then must suppress
+   external hazards through `chrome.management`; if Chrome rejects that
+   suppression, normal bridge commands fail closed and report the exact
+   extension IDs and suppression error.
    `health` also reports
    `synapse_chrome_self_policy_shield_present=<true|false>` from the same
    `ExtensionSettings` value so agents can distinguish a real Synapse

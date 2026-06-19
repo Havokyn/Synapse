@@ -372,15 +372,13 @@ fn synapse_chrome_self_permission_warning(rows: &[String], policy_shield_present
             formatted
         );
     }
-    if !policy_shield_present {
-        return format!(
-            "synapse_chrome_bridge_permission_blocking=true self_risk_scope=granted_only_stale_permissions_without_self_policy_shield self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=normal bridge commands fail closed while stale Synapse debugger/nativeMessaging profile residue exists without a physical HKCU ExtensionSettings self-shield; rerun scripts\\install-synapse-chrome-debugger.ps1 and repair the HKCU\\Software\\Policies\\Google\\Chrome ACL/write path until synapse_chrome_self_policy_shield_present=true, or clear the stale Chrome profile residue by reloading/removing the old extension state",
-            rows.len(),
-            formatted
-        );
-    }
+    let shield_scope = if policy_shield_present {
+        "granted_only_stale_permissions_with_policy_shield"
+    } else {
+        "granted_only_stale_permissions_without_policy_shield"
+    };
     format!(
-        "synapse_chrome_bridge_permission_warning=true self_risk_scope=granted_only_stale_permissions self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=granted-only profile residue is warning-only once the loaded bridge identity is current and debugger-free; read synapse_chrome_self_policy_shield_* in this health detail to confirm whether setup physically wrote the HKCU ExtensionSettings self-shield",
+        "synapse_chrome_bridge_permission_warning=true self_risk_scope={shield_scope} self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=granted-only profile residue is not active Chrome extension capability once the loaded bridge identity is current and extension_debugger_api_available=false; setup still attempts the HKCU ExtensionSettings self-shield when ACLs allow it, but commands rely on runtime debugger-free readback plus active/manifest permission fail-closed gates to prevent the 'Synapse Chrome Bridge started debugging this browser' layout infobar",
         rows.len(),
         formatted
     )
@@ -630,23 +628,19 @@ fn ensure_normal_bridge_external_popup_suppressed(
         });
     }
     if !self_risks.is_empty() && !self_policy_shield.present {
-        tracing::error!(
-            code = "CHROME_SELF_POLICY_SHIELD_MISSING",
+        // Chromium keeps removed permissions in the granted set after an
+        // extension update. Granted-only residue is diagnostic; active/manifest
+        // permissions and the live runtime debugger API readback are the popup
+        // capability gates.
+        tracing::warn!(
+            code = "CHROME_SELF_GRANTED_PERMISSION_RESIDUE",
             hwnd,
             command_kind,
             risk_count = self_risks.len(),
             synapse_chrome_bridge_permission_risk = %format_external_chrome_popup_risks(&self_risks),
             synapse_chrome_self_policy_shield = %self_policy_shield.detail,
-            "normal Chrome bridge refusing tabs/scripting command while stale Synapse debugger/nativeMessaging permission residue exists without a physical self policy shield"
+            "normal Chrome bridge continuing because Synapse self debugger/nativeMessaging residue is granted-only and the live bridge runtime is verified debugger-free before commands are queued"
         );
-        return Err(ChromeDebuggerBridgeError {
-            code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
-            detail: format!(
-                "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=stale Synapse debugger/nativeMessaging profile residue exists without physical HKCU ExtensionSettings self-shield synapse_chrome_bridge_permission_risk={} {} remediation=rerun scripts\\install-synapse-chrome-debugger.ps1 and repair HKCU\\Software\\Policies\\Google\\Chrome ACL/write access until synapse_chrome_self_policy_shield_present=true, or clear the stale Chrome profile residue by reloading/removing the old extension state; commands stay failed closed to prevent the 'Synapse Chrome Bridge started debugging this browser' layout infobar",
-                format_external_chrome_popup_risks(&self_risks),
-                self_policy_shield.detail
-            ),
-        });
     }
     let risks = external_chrome_popup_risks();
     if risks.is_empty() {
@@ -2751,9 +2745,8 @@ fn chrome_bridge_health_from_snapshot_with_self_policy(
     let layout_warning = external_chrome_layout_infobar_warning(layout_infobar_risks);
     let self_permission_warning =
         synapse_chrome_self_permission_warning(self_profile_risks, self_policy_shield.present);
-    let self_permission_blocking = !synapse_chrome_self_active_popup_risks(self_profile_risks)
-        .is_empty()
-        || (!self_profile_risks.is_empty() && !self_policy_shield.present);
+    let self_permission_blocking =
+        !synapse_chrome_self_active_popup_risks(self_profile_risks).is_empty();
 
     let Some(host) = active_host else {
         let risk_warning = external_chrome_popup_risk_warning(popup_risks, false);
@@ -4581,7 +4574,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_bridge_health_blocks_self_granted_only_residue_without_policy_shield() {
+    fn chrome_bridge_health_warns_on_self_granted_only_residue_without_policy_shield() {
         let host = ChromeBridgeHealthRecord {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
@@ -4635,12 +4628,13 @@ mod tests {
             &missing_policy_shield,
         );
 
-        assert_eq!(health.status, "unsafe_profile");
+        assert_eq!(health.status, "ok");
         let detail = health.detail.as_deref().expect("health detail");
-        assert!(detail.contains("tab_control_available=false"));
-        assert!(detail.contains("synapse_chrome_bridge_permission_blocking=true"));
-        assert!(detail.contains("granted_only_stale_permissions_without_self_policy_shield"));
+        assert!(detail.contains("tab_control_available=true"));
+        assert!(detail.contains("synapse_chrome_bridge_permission_warning=true"));
+        assert!(detail.contains("granted_only_stale_permissions_without_policy_shield"));
         assert!(detail.contains("synapse_chrome_self_policy_shield_present=false"));
+        assert!(detail.contains("extension_debugger_api_available=false"));
     }
 
     #[test]
@@ -4701,7 +4695,7 @@ mod tests {
         let detail = health.detail.as_deref().expect("health detail");
         assert!(detail.contains("tab_control_available=true"));
         assert!(detail.contains("synapse_chrome_bridge_permission_warning=true"));
-        assert!(detail.contains("granted_only_stale_permissions"));
+        assert!(detail.contains("granted_only_stale_permissions_with_policy_shield"));
         assert!(detail.contains("synapse_chrome_self_policy_shield_present=true"));
     }
 
