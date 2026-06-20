@@ -2310,6 +2310,7 @@ impl SynapseService {
         started_by_session_id: Option<&str>,
     ) -> Result<(), ErrorData> {
         let agent_kind = params.effective_cli()?;
+        let log_dir = agent_spawn_root_dir()?.join(spawn_id);
         let db = self.m3_storage()?;
         let mut record = synapse_core::AgentEventRecord::new(
             super::agent_events::unix_time_ns_now(),
@@ -2331,6 +2332,7 @@ impl SynapseService {
             "hold_open_ms": params.hold_open_ms,
             "kind": agent_kind.as_str(),
             "model_ref": params.local_model_ref(),
+            "log_dir": log_dir.display().to_string(),
             // Spawn-template provenance (#909) so the journal records which
             // template version drove the run, not just the rendered params.
             "template_id": params.template_id.as_deref(),

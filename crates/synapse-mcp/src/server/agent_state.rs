@@ -21,8 +21,9 @@
 //! exit event reaching the journal):
 //!
 //! - `working`/`spawning` and silent past the threshold (default 120 s):
-//!   process alive → `stuck` (`silent_timeout`), process gone →
-//!   `dead` (`process_gone_without_exit_event`).
+//!   process alive + no fresh spawn artifact output → `stuck`
+//!   (`silent_timeout`), process gone → `dead`
+//!   (`process_gone_without_exit_event`).
 //! - any non-dead agent whose known PID has vanished → `dead`.
 //! - runaway: the same tool called with identical argument digests N times
 //!   consecutively (default 5) → `stuck` with `runaway = true`
@@ -48,10 +49,13 @@
 
 use std::{
     collections::BTreeMap,
+    fs,
+    path::Path,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
+    time::UNIX_EPOCH,
 };
 
 use schemars::JsonSchema;
@@ -300,6 +304,14 @@ struct AgentEntry {
     log_dir: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct AgentArtifactActivity {
+    source: &'static str,
+    path: String,
+    modified_unix_ms: u64,
+    len_bytes: u64,
+}
+
 impl AgentEntry {
     fn read(&self, now_unix_ms: u64) -> AgentStateRead {
         AgentStateRead {
@@ -333,6 +345,43 @@ impl AgentEntry {
     fn probe_pid(&self) -> Option<u32> {
         self.agent_process_id.or(self.launcher_process_id)
     }
+}
+
+fn newest_spawn_artifact_activity(entry: &AgentEntry) -> Option<AgentArtifactActivity> {
+    let log_dir = Path::new(entry.log_dir.as_deref()?);
+    [
+        ("stdout_jsonl", "stdout.jsonl"),
+        ("codex_app_server_stdout", "codex-app-server.stdout.log"),
+        ("codex_app_server_events", "codex-app-server-events.jsonl"),
+        ("codex_control", "codex-control.json"),
+    ]
+    .into_iter()
+    .filter_map(|(source, file_name)| artifact_activity(log_dir, source, file_name))
+    .max_by_key(|activity| (activity.modified_unix_ms, activity.len_bytes))
+}
+
+fn artifact_activity(
+    log_dir: &Path,
+    source: &'static str,
+    file_name: &str,
+) -> Option<AgentArtifactActivity> {
+    let path = log_dir.join(file_name);
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return None;
+    }
+    let modified_unix_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())?;
+    Some(AgentArtifactActivity {
+        source,
+        path: path.display().to_string(),
+        modified_unix_ms,
+        len_bytes: metadata.len(),
+    })
 }
 
 /// Liveness knobs, env-overridable. Loaded once at daemon startup via
@@ -586,6 +635,34 @@ impl AgentStateTracker {
                     }),
                     now_unix_ms,
                 ));
+                continue;
+            }
+            if matches!(
+                entry.state,
+                AgentLifecycleState::Working
+                    | AgentLifecycleState::Spawning
+                    | AgentLifecycleState::Stuck
+            ) && !entry.runaway
+                && let Some(activity) = newest_spawn_artifact_activity(entry)
+                && activity.modified_unix_ms > entry.last_event_unix_ms
+            {
+                let observed_at_unix_ms = activity.modified_unix_ms.min(now_unix_ms);
+                entry.last_event_unix_ms = entry.last_event_unix_ms.max(observed_at_unix_ms);
+                if entry.state == AgentLifecycleState::Stuck {
+                    transitions.push(force_transition(
+                        entry,
+                        AgentLifecycleState::Working,
+                        "artifact_activity_resumed",
+                        None,
+                        json!({
+                            "artifact_source": activity.source,
+                            "artifact_path": activity.path,
+                            "artifact_modified_unix_ms": activity.modified_unix_ms,
+                            "artifact_len_bytes": activity.len_bytes,
+                        }),
+                        now_unix_ms,
+                    ));
+                }
                 continue;
             }
             // Unprobeable end-of-life: an agent with no pid to liveness-check
@@ -979,7 +1056,7 @@ fn initial_entry(
         } else {
             None
         },
-        log_dir: if record.kind == Kind::SpawnReady {
+        log_dir: if matches!(record.kind, Kind::SpawnRequested | Kind::SpawnReady) {
             payload_string(&record.payload, "log_dir")
         } else {
             None
@@ -1356,6 +1433,10 @@ mod tests {
         record
     }
 
+    fn set_event_time_ms(record: &mut AgentEventRecord, unix_ms: u64) {
+        record.ts_ns = unix_ms.saturating_mul(1_000_000);
+    }
+
     #[test]
     fn spawn_lifecycle_produces_expected_states_and_reason_codes() {
         let mut tracker = AgentStateTracker::default();
@@ -1564,6 +1645,133 @@ mod tests {
             transitions.is_empty(),
             "needs_input must not be silence-swept: {transitions:?}"
         );
+    }
+
+    #[test]
+    fn sweep_treats_recent_spawn_stdout_as_liveness_activity() {
+        let mut tracker = AgentStateTracker::default();
+        let dir = tempfile::TempDir::new().expect("temp");
+        let spawn = "agent-spawn-ut-active-stdout";
+        let session = "session-ut-active-stdout";
+        let base = unix_time_ns_now() / 1_000_000;
+        let old_event_ms = base.saturating_sub(DEFAULT_STUCK_AFTER_MS + 10_000);
+        let mut ready = event(AgentEventKind::SpawnReady, Some(spawn), Some(session));
+        set_event_time_ms(&mut ready, old_event_ms);
+        ready.payload = json!({
+            "agent_process_id": 77,
+            "log_dir": dir.path().display().to_string(),
+        });
+        tracker.apply_event(&ready);
+        fs::write(
+            dir.path().join("stdout.jsonl"),
+            b"{\"type\":\"codex.event_msg\",\"msg\":\"still reading files\"}\n",
+        )
+        .expect("write stdout");
+
+        let now = unix_time_ns_now() / 1_000_000;
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|pid| pid == 77,
+        );
+        assert!(
+            transitions.is_empty(),
+            "fresh stdout must prevent false stuck: {transitions:?}"
+        );
+        let read = tracker
+            .read_for_session(session, now)
+            .expect("session read");
+        assert_eq!(read.state, AgentLifecycleState::Working);
+        assert!(
+            read.silent_ms < DEFAULT_STUCK_AFTER_MS,
+            "stdout mtime must refresh silence readback: {read:?}"
+        );
+    }
+
+    #[test]
+    fn sweep_treats_spawn_requested_stdout_as_activity_before_ready() {
+        let mut tracker = AgentStateTracker::default();
+        let dir = tempfile::TempDir::new().expect("temp");
+        let spawn = "agent-spawn-ut-spawning-stdout";
+        let base = unix_time_ns_now() / 1_000_000;
+        let old_event_ms = base.saturating_sub(DEFAULT_STUCK_AFTER_MS + 10_000);
+        let mut requested = event(AgentEventKind::SpawnRequested, Some(spawn), None);
+        set_event_time_ms(&mut requested, old_event_ms);
+        requested.payload = json!({
+            "log_dir": dir.path().display().to_string(),
+        });
+        tracker.apply_event(&requested);
+        fs::write(
+            dir.path().join("stdout.jsonl"),
+            b"{\"type\":\"codex.event_msg\",\"msg\":\"provisioning output advanced\"}\n",
+        )
+        .expect("write stdout");
+
+        let now = unix_time_ns_now() / 1_000_000;
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|_pid| panic!("spawn_requested has no pid yet"),
+        );
+        assert!(
+            transitions.is_empty(),
+            "fresh stdout must prevent spawn_silent_timeout: {transitions:?}"
+        );
+        let read = tracker.unbound_reads(now).remove(0);
+        assert_eq!(read.state, AgentLifecycleState::Spawning);
+        assert!(
+            read.silent_ms < DEFAULT_STUCK_AFTER_MS,
+            "stdout mtime must refresh spawning silence readback: {read:?}"
+        );
+    }
+
+    #[test]
+    fn sweep_resolves_non_runaway_stuck_when_spawn_stdout_advances() {
+        let mut tracker = AgentStateTracker::default();
+        let dir = tempfile::TempDir::new().expect("temp");
+        let spawn = "agent-spawn-ut-stuck-stdout-resume";
+        let session = "session-ut-stuck-stdout-resume";
+        let base = unix_time_ns_now() / 1_000_000;
+        let old_event_ms = base.saturating_sub(DEFAULT_STUCK_AFTER_MS + 10_000);
+        let mut ready = event(AgentEventKind::SpawnReady, Some(spawn), Some(session));
+        set_event_time_ms(&mut ready, old_event_ms);
+        ready.payload = json!({
+            "agent_process_id": 88,
+            "log_dir": dir.path().display().to_string(),
+        });
+        tracker.apply_event(&ready);
+
+        let first_sweep = old_event_ms + DEFAULT_STUCK_AFTER_MS + 1;
+        let transitions = tracker.sweep(
+            first_sweep,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|pid| pid == 88,
+        );
+        assert_eq!(transitions.len(), 1, "{transitions:?}");
+        assert_eq!(transitions[0].state_to, AgentLifecycleState::Stuck);
+        assert_eq!(transitions[0].reason_code, "silent_timeout");
+
+        fs::write(
+            dir.path().join("stdout.jsonl"),
+            b"{\"type\":\"codex.event_msg\",\"msg\":\"tool output advanced\"}\n",
+        )
+        .expect("write stdout");
+
+        let now = unix_time_ns_now() / 1_000_000;
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|pid| pid == 88,
+        );
+        assert_eq!(transitions.len(), 1, "{transitions:?}");
+        assert_eq!(transitions[0].state_from, AgentLifecycleState::Stuck);
+        assert_eq!(transitions[0].state_to, AgentLifecycleState::Working);
+        assert_eq!(transitions[0].reason_code, "artifact_activity_resumed");
+        assert_eq!(transitions[0].evidence["artifact_source"], "stdout_jsonl");
     }
 
     #[test]
