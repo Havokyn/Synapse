@@ -161,7 +161,7 @@ use crate::{
         AgentSpawnTaskStartedParams, AgentSpawnTaskStartedResponse, LaunchWindowState,
         M4ServiceConfig, MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS, RunShellAuthorization,
         ShellExecutionContext, assign_owned_process_job, authorize_run_shell,
-        authorize_run_shell_start, cancel_shell_job, execute_combo, launch, launch_for_session,
+        authorize_run_shell_start, cancel_shell_job, execute_combo, launch_for_session,
         launch_process_history_row, launch_process_history_row_key, launch_request_details,
         prepare_run_shell_params_for_context, prepare_run_shell_start_params_for_context,
         required_combo_permissions, run_authorized_shell, run_shell_idempotency_completed_row,

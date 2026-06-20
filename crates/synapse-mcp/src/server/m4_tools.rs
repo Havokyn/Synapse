@@ -7,7 +7,7 @@ use super::{
     AgentSpawnTaskStartedResponse, ErrorData, Json, LaunchWindowState,
     MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS, Parameters, RunShellAuthorization, SessionTarget,
     ShellExecutionContext, SynapseService, TargetWire, assign_owned_process_job,
-    authorize_run_shell, authorize_run_shell_start, cancel_shell_job, execute_combo, launch,
+    authorize_run_shell, authorize_run_shell_start, cancel_shell_job, execute_combo,
     launch_for_session, launch_process_history_row, launch_process_history_row_key,
     launch_request_details, mcp_error, prepare_run_shell_params_for_context,
     prepare_run_shell_start_params_for_context, required_combo_permissions, run_authorized_shell,
@@ -37,6 +37,7 @@ use super::{
     session_registry::{
         SessionRegistryRead, SpawnedAgentControlRead, SpawnedAgentRead, unix_time_ms_now,
     },
+    terminal_capture::capture::{CaptureArtifacts, CaptureSpec, spawn_capture_to_asciicast},
 };
 
 const ACT_SPAWN_AGENT: &str = "act_spawn_agent";
@@ -959,6 +960,66 @@ fn record_launch_process_history(
         .map_err(|error| mcp_error(error.code(), error.to_string()))
 }
 
+fn launch_agent_spawn_with_terminal_capture(
+    config: &crate::m4::M4ServiceConfig,
+    params: &ActLaunchParams,
+    files: &AgentSpawnFiles,
+    spawn_id: &str,
+    launched_at_unix_ms: u64,
+) -> Result<ActLaunchResponse, ErrorData> {
+    crate::m4::validate_launch_authorized(config, params)?;
+    let env = crate::m4::launch_child_environment(params, ACT_SPAWN_AGENT)?;
+    let artifacts = agent_spawn_terminal_capture_artifacts(&files.log_dir);
+    let spec = CaptureSpec {
+        program: params.target.clone(),
+        args: params.args.clone(),
+        cwd: params.working_dir.as_ref().map(PathBuf::from),
+        env,
+        cols: 120,
+        rows: 40,
+        started_unix_secs: launched_at_unix_ms / 1000,
+        title: Some(format!("Synapse {spawn_id}")),
+    };
+    let spawned = spawn_capture_to_asciicast(spec, artifacts.clone()).map_err(|error| {
+        agent_spawn_tool_error(
+            error_codes::ACTION_AGENT_SPAWN_FAILED,
+            "act_spawn_agent failed to start the spawned agent in an owned PTY terminal",
+            json!({
+                "code": error_codes::ACTION_AGENT_SPAWN_FAILED,
+                "reason": "owned_pty_spawn_failed",
+                "spawn_id": spawn_id,
+                "launch_target": params.target,
+                "log_dir": files.log_dir.display().to_string(),
+                "terminal_asciicast_path": artifacts.asciicast_path.display().to_string(),
+                "terminal_capture_status_path": artifacts.status_path.display().to_string(),
+                "terminal_final_screen_path": artifacts.final_screen_path.display().to_string(),
+                "source_error": error.to_string(),
+            }),
+        )
+    })?;
+    tracing::info!(
+        code = "AGENT_SPAWN_OWNED_PTY_STARTED",
+        spawn_id,
+        pid = spawned.process_id,
+        asciicast_path = %spawned.artifacts.asciicast_path.display(),
+        status_path = %spawned.artifacts.status_path.display(),
+        "act_spawn_agent launched wrapper in an owned PTY"
+    );
+    Ok(ActLaunchResponse {
+        pid: spawned.process_id,
+        hwnd: None,
+        matched_title: None,
+        launched_at: chrono::Utc::now().to_rfc3339(),
+        reason: Some("owned_conpty_terminal_capture".to_owned()),
+        cdp_debug_port: None,
+        cdp_endpoint: None,
+        cdp_user_data_dir: None,
+        cdp_verified_url: None,
+        cdp_verified_title: None,
+        desktop: None,
+    })
+}
+
 fn require_shell_session_id(
     request_context: &RequestContext<RoleServer>,
 ) -> Result<String, ErrorData> {
@@ -1555,7 +1616,13 @@ impl SynapseService {
 
         timing.mark_prelaunch_done();
         timing.mark_launch_started();
-        let launch_response = match launch(&self.m4_config, launch_params.clone()).await {
+        let launch_response = match launch_agent_spawn_with_terminal_capture(
+            &self.m4_config,
+            &launch_params,
+            &files,
+            &spawn_id,
+            launched_at_unix_ms,
+        ) {
             Ok(response) => response,
             Err(error) => {
                 let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
@@ -2584,6 +2651,7 @@ struct AgentSpawnFiles {
 
 impl AgentSpawnFiles {
     fn to_response(&self) -> ActSpawnAgentLogPaths {
+        let terminal = agent_spawn_terminal_capture_artifacts(&self.log_dir);
         ActSpawnAgentLogPaths {
             log_dir: self.log_dir.display().to_string(),
             prompt_path: self.prompt_path.display().to_string(),
@@ -2593,6 +2661,9 @@ impl AgentSpawnFiles {
             completion_status_path: self.completion_status_path.display().to_string(),
             task_started_path: self.task_started_path.display().to_string(),
             task_started_script_path: self.task_started_script_path.display().to_string(),
+            terminal_asciicast_path: terminal.asciicast_path.display().to_string(),
+            terminal_capture_status_path: terminal.status_path.display().to_string(),
+            terminal_final_screen_path: terminal.final_screen_path.display().to_string(),
             debug_path: self
                 .debug_path
                 .as_ref()
@@ -2634,6 +2705,14 @@ impl AgentSpawnFiles {
                 .as_ref()
                 .map(|path| path.display().to_string()),
         }
+    }
+}
+
+fn agent_spawn_terminal_capture_artifacts(log_dir: &Path) -> CaptureArtifacts {
+    CaptureArtifacts {
+        asciicast_path: log_dir.join("terminal.cast"),
+        status_path: log_dir.join("terminal-capture-status.json"),
+        final_screen_path: log_dir.join("terminal-final-screen.txt"),
     }
 }
 
@@ -3009,6 +3088,7 @@ fn write_agent_spawn_daemon_terminal_artifacts(
     let completed_at_unix_ms = unix_time_ms_now();
     let stdout_len = file_len(&files.stdout_path);
     let stderr_len = file_len(&files.stderr_path);
+    let terminal = agent_spawn_terminal_capture_artifacts(&files.log_dir);
     let final_message = json!({
         "schema_version": 1,
         "spawn_id": spawn_id,
@@ -3022,6 +3102,9 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "stderr_path": files.stderr_path.display().to_string(),
         "completion_status_path": files.completion_status_path.display().to_string(),
         "task_started_path": files.task_started_path.display().to_string(),
+        "terminal_asciicast_path": terminal.asciicast_path.display().to_string(),
+        "terminal_capture_status_path": terminal.status_path.display().to_string(),
+        "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
         "details": details,
     });
     let final_write = serde_json::to_vec_pretty(&final_message)
@@ -3055,6 +3138,12 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "stdout_bytes": stdout_len,
         "stderr_path": files.stderr_path.display().to_string(),
         "stderr_bytes": stderr_len,
+        "terminal_asciicast_path": terminal.asciicast_path.display().to_string(),
+        "terminal_asciicast_bytes": file_len(&terminal.asciicast_path),
+        "terminal_capture_status_path": terminal.status_path.display().to_string(),
+        "terminal_capture_status_bytes": file_len(&terminal.status_path),
+        "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
+        "terminal_final_screen_bytes": file_len(&terminal.final_screen_path),
         "daemon_terminal_artifact": true,
     });
     let status_write = serde_json::to_vec_pretty(&completion_status)
@@ -5305,6 +5394,7 @@ fn read_json_file_lossy(path: &Path) -> Option<Value> {
 }
 
 fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
+    let terminal = agent_spawn_terminal_capture_artifacts(&files.log_dir);
     json!({
         "task_started_path": files.task_started_path.display().to_string(),
         "task_started_bytes": file_len(&files.task_started_path),
@@ -5338,6 +5428,13 @@ fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
             .codex_app_server_events_path
             .as_ref()
             .map_or(0, |path| file_len(path)),
+        "terminal_asciicast_path": terminal.asciicast_path.display().to_string(),
+        "terminal_asciicast_bytes": file_len(&terminal.asciicast_path),
+        "terminal_capture_status_path": terminal.status_path.display().to_string(),
+        "terminal_capture_status_bytes": file_len(&terminal.status_path),
+        "terminal_capture_status": read_json_file_lossy(&terminal.status_path),
+        "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
+        "terminal_final_screen_bytes": file_len(&terminal.final_screen_path),
     })
 }
 

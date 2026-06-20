@@ -314,7 +314,7 @@ impl M4ServiceConfig {
             .map(|pattern| pattern.raw.as_str())
     }
 
-    fn launch_match<'a>(&'a self, command_line: &str) -> Option<&'a str> {
+    pub(crate) fn launch_match<'a>(&'a self, command_line: &str) -> Option<&'a str> {
         if self.allow_launch_any {
             return Some(ANY_PERMITTED_SENTINEL);
         }
@@ -1165,6 +1165,9 @@ pub struct ActSpawnAgentLogPaths {
     pub completion_status_path: String,
     pub task_started_path: String,
     pub task_started_script_path: String,
+    pub terminal_asciicast_path: String,
+    pub terminal_capture_status_path: String,
+    pub terminal_final_screen_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3019,6 +3022,10 @@ fn launch_request_sha256(params: &ActLaunchParams) -> Result<String, ErrorData> 
     Ok(sha256_hex(&bytes))
 }
 
+#[allow(
+    dead_code,
+    reason = "kept as the direct M4 launch helper for unit tests and non-server callers"
+)]
 pub async fn launch(
     config: &M4ServiceConfig,
     params: ActLaunchParams,
@@ -3026,37 +3033,45 @@ pub async fn launch(
     Ok(launch_for_session(config, params, None).await?.response)
 }
 
+pub(crate) fn validate_launch_authorized(
+    config: &M4ServiceConfig,
+    params: &ActLaunchParams,
+) -> Result<String, ErrorData> {
+    validate_launch_params(params)?;
+    let command_line = launch_command_line(params)?;
+    if let Some(matched_pattern) = config.launch_match(&command_line) {
+        return Ok(matched_pattern.to_owned());
+    }
+    let reason = if config.allow_launch_count() == 0 {
+        "no_allow_launch_policy"
+    } else {
+        "launch_command_not_allowlisted"
+    };
+    Err(policy_error(
+        error_codes::SAFETY_LAUNCH_DENIED_BY_POLICY,
+        "act_launch target is not permitted by --allow-launch policy",
+        json!({
+            "code": error_codes::SAFETY_LAUNCH_DENIED_BY_POLICY,
+            "target": params.target,
+            "args": params.args,
+            "command_line": command_line,
+            "working_dir": params.working_dir,
+            "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
+            "timeout_ms": params.timeout_ms,
+            "idempotency_key_present": params.idempotency_key.is_some(),
+            "allow_launch_patterns": config.allow_launch_count(),
+            "reason": reason,
+        }),
+    ))
+}
+
 pub(crate) async fn launch_for_session(
     config: &M4ServiceConfig,
     params: ActLaunchParams,
     session_id: Option<&str>,
 ) -> Result<ActLaunchOutcome, ErrorData> {
-    validate_launch_params(&params)?;
+    let matched_pattern = validate_launch_authorized(config, &params)?;
     let command_line = launch_command_line(&params)?;
-    let Some(matched_pattern) = config.launch_match(&command_line) else {
-        let reason = if config.allow_launch_count() == 0 {
-            "no_allow_launch_policy"
-        } else {
-            "launch_command_not_allowlisted"
-        };
-        return Err(policy_error(
-            error_codes::SAFETY_LAUNCH_DENIED_BY_POLICY,
-            "act_launch target is not permitted by --allow-launch policy",
-            json!({
-                "code": error_codes::SAFETY_LAUNCH_DENIED_BY_POLICY,
-                "target": params.target,
-                "args": params.args,
-                "command_line": command_line,
-                "working_dir": params.working_dir,
-                "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
-                "timeout_ms": params.timeout_ms,
-                "idempotency_key_present": params.idempotency_key.is_some(),
-                "allow_launch_patterns": config.allow_launch_count(),
-                "reason": reason,
-            }),
-        ));
-    };
-    let matched_pattern = matched_pattern.to_owned();
     let wait_regex = params
         .wait_for_window_title_regex
         .as_ref()
@@ -5383,6 +5398,21 @@ fn launch_environment_block(params: &ActLaunchParams) -> Result<Vec<u16>, ErrorD
     }
     block.push(0);
     Ok(block)
+}
+
+pub(crate) fn launch_child_environment(
+    params: &ActLaunchParams,
+    surface: &'static str,
+) -> Result<BTreeMap<String, String>, ErrorData> {
+    let mut env = child_base_environment();
+    ensure_child_temp_environment(&mut env);
+    validate_child_base_environment(&env, surface)?;
+    for (key, value) in &params.env {
+        #[cfg(windows)]
+        validate_launch_environment_entry(key, value)?;
+        env.insert(key.to_ascii_uppercase(), (key.clone(), value.clone()));
+    }
+    Ok(env.into_values().collect())
 }
 
 fn child_base_environment() -> BTreeMap<String, (String, String)> {
