@@ -2181,6 +2181,7 @@ fn shell_job_status_diagnostics(
     if let Some(transfer) = &transfer {
         actionable_hints.extend(transfer.suggested_next_steps.iter().cloned());
     }
+    actionable_hints.extend(shell_job_remote_command_exit_status_hints(job));
     actionable_hints.sort();
     actionable_hints.dedup();
     ActRunShellJobDiagnostics {
@@ -2194,6 +2195,37 @@ fn shell_job_status_diagnostics(
         transfer,
         actionable_hints,
     }
+}
+
+fn shell_job_remote_command_exit_status_hints(job: &ActRunShellJobStatus) -> Vec<String> {
+    if job.status != "exit_nonzero"
+        || job.exit_code != Some(1)
+        || job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH
+    {
+        return Vec::new();
+    }
+    let Some(parts) = ssh_direct_command_parts(&job.args) else {
+        return Vec::new();
+    };
+    let Some(remote_command) = parts.remote_command else {
+        return Vec::new();
+    };
+    if ssh_remote_command_has_bash_login_errexit_hazard(&remote_command) {
+        return vec![
+            "bash_login_shell_errexit_can_override_inner_exit_status_use_bash_c_or_disable_errexit_before_exit"
+                .to_owned(),
+        ];
+    }
+    Vec::new()
+}
+
+fn ssh_remote_command_has_bash_login_errexit_hazard(remote_command: &str) -> bool {
+    let lower = remote_command.to_ascii_lowercase();
+    let invokes_login_bash = lower.contains("bash -lc")
+        || lower.contains("bash -l -c")
+        || lower.contains("bash --login -c");
+    let enables_errexit = lower.contains("set -e") || lower.contains("set -o errexit");
+    invokes_login_bash && enables_errexit
 }
 
 fn shell_job_output_state(
@@ -13363,6 +13395,66 @@ SYNAPSE_REMOTE_EXIT_V1 job_id=issue1274-exit-nonzero pid=2266815 pgid=2266815 ex
                 .iter()
                 .any(|evidence| evidence
                     == "remote_exit_marker:SYNAPSE_REMOTE_EXIT_V1:pid=2266815:pgid=2266815:exit_code=7")
+        );
+    }
+
+    #[test]
+    fn issue1283_bash_login_errexit_exit_one_surfaces_specific_hint() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = temp_shell_job_paths(&temp);
+        let mut status = issue1277_ssh_status("issue1283-bash-login", "exit_nonzero", &paths);
+        status.exit_code = Some(1);
+        status.args = vec![
+            "-l".to_owned(),
+            "croyse".to_owned(),
+            "aiwonder.mst.com".to_owned(),
+            "bash -lc 'set +e; true; EC=$?; set -e; printf \"inner_exit=%s\\n\" \"$EC\"; exit \"$EC\"'"
+                .to_owned(),
+        ];
+        status.remote_process_scope =
+            ssh_remote_process_scope("ssh.exe", &status.args, "regression_issue1283");
+
+        let diagnostics = shell_job_status_diagnostics(&status, false, 23, 211);
+
+        println!(
+            "readback=act_run_shell_status issue=1283 edge=bash_login_errexit hints={:?}",
+            diagnostics.actionable_hints
+        );
+        assert!(diagnostics.actionable_hints.iter().any(|hint| hint
+            == "bash_login_shell_errexit_can_override_inner_exit_status_use_bash_c_or_disable_errexit_before_exit"));
+    }
+
+    #[test]
+    fn issue1283_non_login_bash_errexit_exit_one_keeps_generic_ssh_hints() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = temp_shell_job_paths(&temp);
+        let mut status = issue1277_ssh_status("issue1283-bash-non-login", "exit_nonzero", &paths);
+        status.exit_code = Some(1);
+        status.args = vec![
+            "-l".to_owned(),
+            "croyse".to_owned(),
+            "aiwonder.mst.com".to_owned(),
+            "bash -c 'set +e; true; EC=$?; set -e; printf \"inner_exit=%s\\n\" \"$EC\"; exit \"$EC\"'"
+                .to_owned(),
+        ];
+        status.remote_process_scope =
+            ssh_remote_process_scope("ssh.exe", &status.args, "regression_issue1283");
+
+        let diagnostics = shell_job_status_diagnostics(&status, false, 23, 211);
+
+        println!(
+            "readback=act_run_shell_status issue=1283 edge=non_login_bash hints={:?}",
+            diagnostics.actionable_hints
+        );
+        assert!(!diagnostics.actionable_hints.iter().any(|hint| hint
+            == "bash_login_shell_errexit_can_override_inner_exit_status_use_bash_c_or_disable_errexit_before_exit"));
+        assert!(
+            diagnostics
+                .actionable_hints
+                .iter()
+                .any(|hint| hint == "check_remote_command_tty_stdin_and_auth_prompts")
         );
     }
 
