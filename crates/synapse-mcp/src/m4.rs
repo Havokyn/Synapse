@@ -120,6 +120,8 @@ const SHELL_REMOTE_CLEANUP_UNVERIFIED: &str = "remote_cleanup_unverified";
 const SHELL_REMOTE_CLEANUP_FAILED: &str = "remote_cleanup_failed";
 const SHELL_REMOTE_CLEANUP_PRE_MARKER_TERMINAL: &str =
     "remote_process_never_started_or_untracked_pre_marker";
+const SHELL_JOB_STATUS_REMOTE_TRANSPORT_LOST: &str = "transport_lost_process_may_still_run";
+const SHELL_REMOTE_CLEANUP_TRANSPORT_LOST: &str = "transport_lost_process_may_still_run";
 const SHELL_REMOTE_PROCESS_MARKER: &str = "SYNAPSE_REMOTE_PROCESS_V1";
 const SHELL_REMOTE_CLEANUP_MARKER: &str = "SYNAPSE_REMOTE_CLEANUP_V1";
 const SHELL_REMOTE_METADATA_PREFIX_BYTES: usize = 128 * 1024;
@@ -7845,6 +7847,13 @@ fn verify_shell_job_remote_cleanup_after_terminal(
         return;
     }
 
+    if matches!(
+        job.remote_process_scope.remote_cleanup_status.as_str(),
+        SHELL_REMOTE_CLEANUP_TRANSPORT_LOST
+    ) {
+        return;
+    }
+
     if let Err(error) = refresh_shell_job_remote_metadata_from_outputs(job, paths) {
         mark_shell_job_remote_cleanup_failed(
             job,
@@ -7858,6 +7867,19 @@ fn verify_shell_job_remote_cleanup_after_terminal(
     if job.remote_process_scope.remote_process_id.is_some()
         && job.remote_process_scope.remote_process_group_id.is_some()
     {
+        match mark_shell_job_remote_transport_lost_if_detected(job, paths, trigger) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                mark_shell_job_remote_cleanup_failed(
+                    job,
+                    trigger,
+                    "remote_transport_loss_read_failed",
+                    &format!("{error:?}"),
+                );
+                return;
+            }
+        }
         let _ = attempt_shell_job_remote_cleanup(job, paths, trigger, original_args);
         return;
     }
@@ -7879,6 +7901,102 @@ fn verify_shell_job_remote_cleanup_after_terminal(
         let terminal_status = job.status.clone();
         mark_shell_job_remote_cleanup_unverified(job, trigger, &terminal_status);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteTransportLostEvidence {
+    reason: &'static str,
+    pattern: &'static str,
+}
+
+fn mark_shell_job_remote_transport_lost_if_detected(
+    job: &mut ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+    trigger: &'static str,
+) -> Result<bool, ErrorData> {
+    if job.cancel_requested
+        || job.timed_out
+        || job.status != "exit_nonzero"
+        || job.exit_code != Some(255)
+    {
+        return Ok(false);
+    }
+    let stderr_prefix =
+        read_file_prefix_lossy(&paths.stderr_path, SHELL_REMOTE_METADATA_PREFIX_BYTES)?;
+    let stderr_tail = tail_file_lossy(&paths.stderr_path, SHELL_JOB_TAIL_DEFAULT_BYTES as usize)?;
+    let evidence = remote_transport_lost_evidence(&stderr_prefix)
+        .or_else(|| remote_transport_lost_evidence(&stderr_tail));
+    let Some(evidence) = evidence else {
+        return Ok(false);
+    };
+    mark_shell_job_remote_transport_lost(job, trigger, evidence);
+    Ok(true)
+}
+
+fn remote_transport_lost_evidence(stderr: &str) -> Option<RemoteTransportLostEvidence> {
+    let lower = stderr.to_ascii_lowercase();
+    let patterns = [
+        ("ssh_connection_reset", "connection reset by peer"),
+        ("ssh_client_loop_disconnect", "client_loop: send disconnect"),
+        ("ssh_broken_pipe", "broken pipe"),
+        ("ssh_connection_timed_out", "connection timed out"),
+        ("ssh_operation_timed_out", "operation timed out"),
+        ("ssh_network_unreachable", "network is unreachable"),
+        ("ssh_connection_closed", "connection closed by remote host"),
+        ("ssh_closed_by_remote_host", "closed by remote host"),
+    ];
+    patterns
+        .iter()
+        .find(|(_, pattern)| lower.contains(pattern))
+        .map(|(reason, pattern)| RemoteTransportLostEvidence { reason, pattern })
+}
+
+fn mark_shell_job_remote_transport_lost(
+    job: &mut ActRunShellJobStatus,
+    trigger: &'static str,
+    evidence: RemoteTransportLostEvidence,
+) {
+    let remote_identity = job
+        .remote_process_scope
+        .remote_identity
+        .as_deref()
+        .unwrap_or("unknown_remote");
+    let pid = job
+        .remote_process_scope
+        .remote_process_id
+        .as_deref()
+        .unwrap_or("unknown_pid");
+    let pgid = job
+        .remote_process_scope
+        .remote_process_group_id
+        .as_deref()
+        .unwrap_or("unknown_pgid");
+    let message = format!(
+        "{trigger} classified SSH transport loss after the remote process marker for '{remote_identity}'; local ssh exit_code=255 matched {}; Synapse did not run remote cleanup because cancel_requested=false and timed_out=false. Remote pid {pid}, process group {pgid} may still be running; call act_run_shell_cancel for explicit remote cleanup.",
+        evidence.reason
+    );
+    job.status = SHELL_JOB_STATUS_REMOTE_TRANSPORT_LOST.to_owned();
+    job.remote_process_scope.remote_cleanup_required = true;
+    job.remote_process_scope.remote_cleanup_verified = false;
+    job.remote_process_scope.remote_cleanup_status = SHELL_REMOTE_CLEANUP_TRANSPORT_LOST.to_owned();
+    job.remote_process_scope.remote_cleanup_error_code = None;
+    job.remote_process_scope.remote_cleanup_message = Some(message.clone());
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        format!("remote_transport_lost:{}", evidence.reason),
+    );
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        format!("remote_transport_lost_pattern:{}", evidence.pattern),
+    );
+    push_unique_evidence(
+        &mut job.remote_process_scope.detection_evidence,
+        "remote_cleanup_deferred_until_explicit_cancel".to_owned(),
+    );
+    if job.error_code.as_deref() == Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED) {
+        job.error_code = None;
+    }
+    job.error_message = Some(message);
 }
 
 fn parse_remote_process_metadata(
@@ -10587,6 +10705,50 @@ mod tests {
         }
     }
 
+    fn temp_shell_job_paths(temp: &tempfile::TempDir) -> ShellJobPaths {
+        ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+            remote_cleanup_path: temp.path().join("remote-cleanup.json"),
+        }
+    }
+
+    fn issue1277_ssh_status(
+        job_id: &str,
+        status: &str,
+        paths: &ShellJobPaths,
+    ) -> ActRunShellJobStatus {
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec![
+                "aiwonder".to_owned(),
+                "bash -lc 'exec -a issue1277 sleep 600'".to_owned(),
+            ],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some(job_id.to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe aiwonder \"bash -lc 'exec -a issue1277 sleep 600'\"".to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+        };
+        shell_job_status_record(
+            job_id,
+            status,
+            &params,
+            paths,
+            "request-sha",
+            &authorization,
+            "2026-06-20T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        )
+    }
+
     fn local_model_spawn_params(prompt: Option<&str>) -> ActSpawnAgentParams {
         spawn_params(ActSpawnAgentCli::LocalModel, prompt)
     }
@@ -12452,6 +12614,175 @@ mod tests {
             SHELL_REMOTE_CLEANUP_NOT_TRACKED
         );
         assert!(status.error_code.is_none());
+    }
+
+    #[test]
+    fn issue1277_shell_terminal_tracked_ssh_transport_reset_defers_remote_cleanup() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = temp_shell_job_paths(&temp);
+        let stderr = "noise before marker\n\
+SYNAPSE_REMOTE_PROCESS_V1 job_id=issue1277-reset pid=3487519 pgid=3487519 sid=3487519\n\
+Read from remote host aiwonder.mst.com: Connection reset by peer\r\n\
+client_loop: send disconnect: Connection reset by peer\r\n";
+        std::fs::write(&paths.stdout_path, b"")
+            .unwrap_or_else(|error| panic!("write stdout log: {error}"));
+        std::fs::write(&paths.stderr_path, stderr)
+            .unwrap_or_else(|error| panic!("write stderr log: {error}"));
+        let mut status = issue1277_ssh_status("issue1277-reset", "exit_nonzero", &paths);
+        status.exit_code = Some(255);
+
+        verify_shell_job_remote_cleanup_after_terminal(
+            &mut status,
+            &paths,
+            "regression_terminal_readback",
+            None,
+        );
+
+        println!(
+            "readback=act_run_shell_remote_cleanup issue=1277 edge=transport_reset before=status:exit_nonzero exit_code:255 stderr={stderr:?} after=status:{} remote:{:?}",
+            status.status, status.remote_process_scope
+        );
+        assert_eq!(status.status, SHELL_JOB_STATUS_REMOTE_TRANSPORT_LOST);
+        assert_eq!(
+            status.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_TRANSPORT_LOST
+        );
+        assert!(status.remote_process_scope.remote_cleanup_required);
+        assert!(!status.remote_process_scope.remote_cleanup_verified);
+        assert_eq!(
+            status.remote_process_scope.remote_process_id.as_deref(),
+            Some("3487519")
+        );
+        assert_eq!(
+            status
+                .remote_process_scope
+                .remote_process_group_id
+                .as_deref(),
+            Some("3487519")
+        );
+        assert_eq!(status.remote_process_scope.remote_cleanup_error_code, None);
+        assert_eq!(status.error_code, None);
+        assert!(
+            status
+                .remote_process_scope
+                .remote_cleanup_message
+                .as_deref()
+                .is_some_and(|message| message.contains("act_run_shell_cancel"))
+        );
+        assert!(
+            status
+                .remote_process_scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence == "remote_transport_lost:ssh_connection_reset")
+        );
+        assert!(
+            status
+                .remote_process_scope
+                .detection_evidence
+                .iter()
+                .any(|evidence| evidence == "remote_cleanup_deferred_until_explicit_cancel")
+        );
+
+        let after_first_readback =
+            serde_json::to_value(&status.remote_process_scope).expect("remote scope serializes");
+        verify_shell_job_remote_cleanup_after_terminal(
+            &mut status,
+            &paths,
+            "regression_terminal_readback",
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(&status.remote_process_scope).expect("remote scope serializes"),
+            after_first_readback
+        );
+    }
+
+    #[test]
+    fn issue1277_shell_transport_loss_detection_skips_cancel_timeout_and_unrelated_exit_255() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = temp_shell_job_paths(&temp);
+        let stderr = "SYNAPSE_REMOTE_PROCESS_V1 job_id=issue1277-guard pid=3487519 pgid=3487519 sid=3487519\n\
+client_loop: send disconnect: Connection reset by peer\r\n";
+        std::fs::write(&paths.stdout_path, b"")
+            .unwrap_or_else(|error| panic!("write stdout log: {error}"));
+        std::fs::write(&paths.stderr_path, stderr)
+            .unwrap_or_else(|error| panic!("write stderr log: {error}"));
+        let mut base = issue1277_ssh_status("issue1277-guard", "exit_nonzero", &paths);
+        base.exit_code = Some(255);
+        let metadata = parse_remote_process_metadata(stderr, "issue1277-guard")
+            .expect("remote marker should parse");
+        apply_remote_process_metadata(&mut base, metadata);
+
+        let closed_by_remote = remote_transport_lost_evidence(
+            "Connection to aiwonder.mst.com closed by remote host.\r\n",
+        )
+        .expect("OpenSSH closed-by-remote-host stderr must classify as transport loss");
+        assert_eq!(closed_by_remote.reason, "ssh_closed_by_remote_host");
+
+        let mut cancel_requested = base.clone();
+        cancel_requested.cancel_requested = true;
+        let mut timed_out = base.clone();
+        timed_out.timed_out = true;
+        let mut non_255_exit = base.clone();
+        non_255_exit.exit_code = Some(1);
+        let mut successful_status = base.clone();
+        successful_status.status = "ok".to_owned();
+        successful_status.exit_code = Some(0);
+
+        for (label, mut edge) in [
+            ("cancel_requested", cancel_requested),
+            ("timed_out", timed_out),
+            ("non_255_exit", non_255_exit),
+            ("successful_status", successful_status),
+        ] {
+            let before_status = edge.status.clone();
+            let before_cleanup_status = edge.remote_process_scope.remote_cleanup_status.clone();
+            let detected = mark_shell_job_remote_transport_lost_if_detected(
+                &mut edge,
+                &paths,
+                "regression_terminal_readback",
+            )
+            .unwrap_or_else(|error| {
+                panic!("{label} transport detection should read stderr: {error}")
+            });
+            println!(
+                "readback=act_run_shell_remote_cleanup issue=1277 edge={label} before=status:{before_status} cleanup:{before_cleanup_status} after=status:{} cleanup:{} detected:{detected}",
+                edge.status, edge.remote_process_scope.remote_cleanup_status
+            );
+            assert!(
+                !detected,
+                "{label} must not be classified as transport loss"
+            );
+            assert_eq!(edge.status, before_status);
+            assert_eq!(
+                edge.remote_process_scope.remote_cleanup_status,
+                before_cleanup_status
+            );
+        }
+
+        let no_transport_stderr = "SYNAPSE_REMOTE_PROCESS_V1 job_id=issue1277-guard pid=3487519 pgid=3487519 sid=3487519\nexit 255 without an SSH transport-loss string\n";
+        std::fs::write(&paths.stderr_path, no_transport_stderr)
+            .unwrap_or_else(|error| panic!("write non-transport stderr log: {error}"));
+        let mut no_transport = base.clone();
+        let detected = mark_shell_job_remote_transport_lost_if_detected(
+            &mut no_transport,
+            &paths,
+            "regression_terminal_readback",
+        )
+        .unwrap_or_else(|error| panic!("non-transport detection should read stderr: {error}"));
+        println!(
+            "readback=act_run_shell_remote_cleanup issue=1277 edge=no_transport_pattern before=exit_nonzero/255 after=status:{} cleanup:{} detected:{detected}",
+            no_transport.status, no_transport.remote_process_scope.remote_cleanup_status
+        );
+        assert!(!detected);
+        assert_eq!(no_transport.status, "exit_nonzero");
+        assert_eq!(
+            no_transport.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_TRACKED
+        );
     }
 
     #[test]
