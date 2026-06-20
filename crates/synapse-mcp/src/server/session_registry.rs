@@ -110,6 +110,16 @@ pub(crate) struct SpawnedAgentControlRead {
     pub last_interrupt_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_interrupt_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_steer_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_steer_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_steer_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_steer_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_steer_instruction_chars: Option<u64>,
 }
 
 impl Default for SessionRegistry {

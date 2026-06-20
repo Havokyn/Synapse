@@ -94,6 +94,8 @@ const STEER_MESSAGE_TTL_MS: u64 = 600_000;
 const MAX_STEER_INSTRUCTION_CHARS: usize = 16_000;
 const CODEX_APP_SERVER_INTERRUPT_SCRIPT: &str = include_str!("codex_app_server_interrupt.ps1");
 const CODEX_INTERRUPT_HELPER_TIMEOUT_MS: u64 = 8_000;
+const CODEX_APP_SERVER_STEER_SCRIPT: &str = include_str!("codex_app_server_steer.ps1");
+const CODEX_STEER_HELPER_TIMEOUT_MS: u64 = 8_000;
 
 /// Destructive-action confirmation token for `fleet_stop`, matching the
 /// action-diagnostic confirm pattern. A typo or empty value is refused.
@@ -171,7 +173,7 @@ pub struct ProcessReadback {
 }
 
 /// One ranked channel's real outcome. `status` is one of `delivered`,
-/// `unavailable`, or `failed` — never a fabricated success.
+/// `unavailable`, `failed`, or `skipped` — never a fabricated success.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelAttempt {
@@ -343,15 +345,16 @@ pub(crate) struct OperatorPanicKillAllResponse {
 pub struct AgentSteerParams {
     /// The agent to steer: its own MCP session id, or its `agent-spawn-*` id.
     pub session_id: String,
-    /// The instruction to inject. Spliced into the agent's context at the next
-    /// safe point by the cooperative steering-inbox contract. Non-empty,
-    /// bounded to 16 000 chars.
+    /// The instruction to inject. Codex app-server agents receive it through
+    /// `turn/steer` guarded by the active `expectedTurnId`; other agents fall
+    /// back to the cooperative steering-inbox contract. Non-empty, bounded to
+    /// 16 000 chars.
     pub instruction: String,
-    /// When true (default), the steering row requests a read receipt: when the
+    /// When true (default), mailbox fallback requests a read receipt: when the
     /// agent drains and applies the instruction it writes a receipt to the
-    /// caller's receipt box (readable via `agent_receipts`), turning delivery
-    /// into provable consumption. The `agent_steer` response always proves
-    /// *delivery* (the durable row) regardless of this flag.
+    /// caller's receipt box (readable via `agent_receipts`), turning mailbox
+    /// delivery into provable consumption. Codex app-server steering proves
+    /// physical delivery by the `turn/steer` response instead.
     #[serde(default = "default_true")]
     #[schemars(default = "default_true")]
     pub request_receipt: bool,
@@ -371,17 +374,19 @@ pub struct AgentSteerResponse {
     pub delivered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_via: Option<String>,
-    /// Character count of the instruction that was delivered (the SoT for "what
-    /// was injected" is the persisted mailbox row referenced by `row_key`).
+    /// Character count of the instruction that was delivered. The durable
+    /// `MessageSent` journal row records what was injected; mailbox fallback
+    /// also persists the exact payload in the row referenced by `row_key`.
     pub instruction_chars: usize,
     /// Every ranked channel and its true outcome.
     pub channels: Vec<ChannelAttempt>,
     /// The `MessageSent` journal row written when a channel delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal_event: Option<JournalReadback>,
-    /// Where a consumption receipt will appear once the agent applies the
-    /// instruction, when `request_receipt` was set. Poll `agent_receipts` for
-    /// proof of consumption (delivery is already proven by `delivered`).
+    /// Where a mailbox consumption receipt will appear once the agent applies
+    /// the instruction, when mailbox fallback delivered and `request_receipt`
+    /// was set. Poll `agent_receipts` for proof of mailbox consumption
+    /// (delivery is already proven by `delivered`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_box_session_id: Option<String>,
     /// The OS process table at steer time (steering never kills; read once for
@@ -589,7 +594,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Inject an instruction into ONE running spawned agent (#905) by its MCP session id or agent-spawn-* id, via ranked clean channels. The cooperative steering-inbox (durable `steer` mailbox row, #908) is the wired channel: well-behaved agents drain it between tool calls and splice it into context. Codex app-server mid-turn inject and claude stream-json stdin inject are reported unavailable (the daemon owns neither input pipe; mid-turn claude stdin messages are also dropped from history per anthropics/claude-code#41230); PTY stdin needs owned-PTY capture (#902). Reports each channel's real outcome plus a process-table readback; the durable row is the delivery source of truth and a read receipt (default on) proves consumption via agent_receipts. Errors if no channel can deliver."
+        description = "Inject an instruction into ONE running spawned agent (#905/#1294) by its MCP session id or agent-spawn-* id, via ranked clean channels. Codex app-server spawns use real turn/steer from codex-control.json with expectedTurnId as the active-turn precondition; cooperative mailbox remains the lower-ranked durable fallback and can request agent_receipts consumption proof. Claude stream-json stdin inject and PTY stdin are reported unavailable unless their real owned channel exists. Reports each channel's real outcome plus a process-table readback; errors if no channel can deliver."
     )]
     pub async fn agent_steer(
         &self,
@@ -1090,6 +1095,7 @@ impl SynapseService {
 
         let payload = json!({
             "requested_id": lookup,
+            "instruction": instruction,
             "instruction_chars": instruction_chars,
             "request_receipt": params.request_receipt,
             "from": caller_session,
@@ -1176,18 +1182,19 @@ impl SynapseService {
                 json!({
                     "delivered_via": delivered_via,
                     "instruction_chars": instruction_chars,
-                    "instruction_preview": compact_for_channel_reason(instruction),
+                    "instruction": instruction,
                     "process": &process,
                 }),
             )?)
         } else {
             None
         };
-        let receipt_box_session_id = if delivered && request_receipt {
-            caller_session.map(ToOwned::to_owned)
-        } else {
-            None
-        };
+        let receipt_box_session_id =
+            if delivered_via.as_deref() == Some("mailbox_steer") && request_receipt {
+                caller_session.map(ToOwned::to_owned)
+            } else {
+                None
+            };
         Ok(AgentSteerResponse {
             requested_id: requested_id.to_owned(),
             session_id: target.session_id.clone(),
@@ -1218,17 +1225,10 @@ impl SynapseService {
         let mut attempts = Vec::new();
         let mut delivered_via = None;
 
-        attempts.push(ChannelAttempt {
-            channel: "codex_app_server_inject".to_owned(),
-            rank: 1,
-            status: "unavailable".to_owned(),
-            reason: "channel_not_wired: the codex app-server protocol exposes turn/interrupt \
-                     (cancel) but no mid-turn user-input inject RPC; a new turn would race the \
-                     running one"
-                .to_owned(),
-            message_id: None,
-            row_key: None,
-        });
+        let codex = self.deliver_codex_app_server_steer(target, instruction);
+        record_first_delivered_channel(&mut delivered_via, &codex);
+        attempts.push(codex);
+
         attempts.push(ChannelAttempt {
             channel: "claude_stream_json_input".to_owned(),
             rank: 2,
@@ -1241,13 +1241,26 @@ impl SynapseService {
             row_key: None,
         });
 
-        // Rank 3: cooperative steering mailbox — the one wired channel.
-        let mailbox =
-            self.deliver_mailbox_steer(target, instruction, request_receipt, caller_session);
-        if mailbox.status == "delivered" {
-            record_first_delivered_channel(&mut delivered_via, &mailbox);
+        // Rank 3: cooperative steering mailbox — durable fallback. If the live
+        // app-server channel delivered, do not queue a duplicate instruction
+        // that the agent could consume later between tool calls.
+        if delivered_via.is_some() {
+            attempts.push(ChannelAttempt {
+                channel: "mailbox_steer".to_owned(),
+                rank: 3,
+                status: "skipped".to_owned(),
+                reason: "higher_ranked_channel_delivered: codex_app_server_inject delivered to the active turn, so no duplicate durable mailbox row was written".to_owned(),
+                message_id: None,
+                row_key: None,
+            });
+        } else {
+            let mailbox =
+                self.deliver_mailbox_steer(target, instruction, request_receipt, caller_session);
+            if mailbox.status == "delivered" {
+                record_first_delivered_channel(&mut delivered_via, &mailbox);
+            }
+            attempts.push(mailbox);
         }
-        attempts.push(mailbox);
 
         attempts.push(ChannelAttempt {
             channel: "pty_stdin".to_owned(),
@@ -1262,6 +1275,175 @@ impl SynapseService {
         });
 
         (attempts, delivered_via)
+    }
+
+    fn deliver_codex_app_server_steer(
+        &self,
+        target: &ResolvedAgent,
+        instruction: &str,
+    ) -> ChannelAttempt {
+        if target.agent_kind != "codex" {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "channel_not_applicable: target agent_kind={} is not codex",
+                    target.agent_kind
+                ),
+                message_id: None,
+                row_key: None,
+            };
+        }
+        let Some(control) = target.control.as_ref() else {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_wired: this codex session has no codex-control.json metadata; it was likely spawned by the legacy plain-CLI path before #958".to_owned(),
+                message_id: None,
+                row_key: None,
+            };
+        };
+        if control.protocol != "codex_app_server_ws" {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "channel_not_wired: unsupported control protocol {}",
+                    control.protocol
+                ),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+        let Some(thread_id) = control
+            .thread_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_ready: codex-control.json has no thread_id".to_owned(),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        };
+        let Some(turn_id) = control.turn_id.as_deref().filter(|value| !value.is_empty()) else {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: "channel_not_ready: codex-control.json has no turn_id".to_owned(),
+                message_id: None,
+                row_key: Some(control.control_path.clone()),
+            };
+        };
+        if matches!(
+            control.turn_status.as_str(),
+            "completed" | "interrupted" | "failed" | "runner_error"
+        ) {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "turn_not_steerable: codex-control.json reports turn_status={}",
+                    control.turn_status
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+        if crate::m4::owned_live_process_ids(&[control.app_server_process_id]).is_empty() {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "unavailable".to_owned(),
+                reason: format!(
+                    "app_server_not_live: codex app-server pid {} is not live",
+                    control.app_server_process_id
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+
+        let script_path = PathBuf::from(&target.log_dir).join("codex-app-server-steer.ps1");
+        if let Err(error) = fs::write(&script_path, CODEX_APP_SERVER_STEER_SCRIPT) {
+            return ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "failed".to_owned(),
+                reason: format!(
+                    "steer_helper_write_failed: {} ({error})",
+                    script_path.display()
+                ),
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            };
+        }
+
+        match run_codex_steer_helper(&script_path, control, thread_id, turn_id, instruction) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stdout_trimmed = stdout.trim();
+                let delivered_turn_id = serde_json::from_str::<Value>(stdout_trimmed)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("turn_id")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned)
+                    })
+                    .unwrap_or_else(|| turn_id.to_owned());
+                ChannelAttempt {
+                    channel: "codex_app_server_inject".to_owned(),
+                    rank: 1,
+                    status: "delivered".to_owned(),
+                    reason: format!(
+                        "turn_steer_delivered: endpoint={} thread_id={} expected_turn_id={} turn_id={} control_path={} stdout={}",
+                        control.endpoint,
+                        thread_id,
+                        turn_id,
+                        delivered_turn_id,
+                        control.control_path,
+                        compact_for_channel_reason(stdout_trimmed)
+                    ),
+                    message_id: Some(delivered_turn_id),
+                    row_key: Some(control.control_path.clone()),
+                }
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                ChannelAttempt {
+                    channel: "codex_app_server_inject".to_owned(),
+                    rank: 1,
+                    status: "failed".to_owned(),
+                    reason: format!(
+                        "turn_steer_failed: exit={:?} stdout={} stderr={}",
+                        output.status.code(),
+                        compact_for_channel_reason(stdout.trim()),
+                        compact_for_channel_reason(stderr.trim())
+                    ),
+                    message_id: Some(turn_id.to_owned()),
+                    row_key: Some(control.control_path.clone()),
+                }
+            }
+            Err(error) => ChannelAttempt {
+                channel: "codex_app_server_inject".to_owned(),
+                rank: 1,
+                status: "failed".to_owned(),
+                reason: error,
+                message_id: Some(turn_id.to_owned()),
+                row_key: Some(control.control_path.clone()),
+            },
+        }
     }
 
     /// Delivers a durable `steer` mailbox row to the target's steering inbox,
@@ -3100,6 +3282,76 @@ fn run_codex_interrupt_helper(
                 let _ = child.wait();
                 return Err(format!(
                     "interrupt_helper_wait_failed: helper pid {pid}: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn run_codex_steer_helper(
+    script_path: &PathBuf,
+    control: &SpawnedAgentControlRead,
+    thread_id: &str,
+    turn_id: &str,
+    instruction: &str,
+) -> Result<Output, String> {
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(script_path)
+        .args([
+            "-Endpoint",
+            control.endpoint.as_str(),
+            "-ThreadId",
+            thread_id,
+            "-TurnId",
+            turn_id,
+            "-Instruction",
+            instruction,
+            "-ControlPath",
+            control.control_path.as_str(),
+            "-EventsPath",
+            control.events_path.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("steer_helper_spawn_failed: {error}"))?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("steer_helper_output_failed: {error}"));
+            }
+            Ok(None)
+                if started.elapsed() < Duration::from_millis(CODEX_STEER_HELPER_TIMEOUT_MS) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "steer_helper_timeout: helper pid {pid} exceeded {CODEX_STEER_HELPER_TIMEOUT_MS}ms"
+                ));
+            }
+            Err(error) => {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "steer_helper_wait_failed: helper pid {pid}: {error}"
                 ));
             }
         }

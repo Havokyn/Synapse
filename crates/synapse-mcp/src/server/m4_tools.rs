@@ -6341,6 +6341,11 @@ mod tests {
                 "turn_id": "turn-1",
                 "turn_status": "inProgress",
                 "last_error": null,
+                "last_steer_status": "delivered",
+                "last_steer_error": null,
+                "last_steer_at_unix_ms": 123789,
+                "last_steer_turn_id": "turn-1",
+                "last_steer_instruction_chars": 42,
                 "updated_at_unix_ms": 123456
             }))
             .expect("encode control"),
@@ -6352,6 +6357,9 @@ mod tests {
             .expect("codex control present");
         assert_eq!(control.thread_id.as_deref(), Some("thread-1"));
         assert_eq!(control.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(control.last_steer_status.as_deref(), Some("delivered"));
+        assert_eq!(control.last_steer_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(control.last_steer_instruction_chars, Some(42));
 
         let mut bom_prefixed = vec![0xEF, 0xBB, 0xBF];
         bom_prefixed.extend(
@@ -6449,6 +6457,13 @@ mod tests {
             "runner must journal outbound JSON-RPC send boundaries for app-server stalls"
         );
         assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$script:LastFinalAgentMessageText")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$phase -eq 'final_answer'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT
+                    .contains("$finalText = $script:LastFinalAgentMessageText"),
+            "runner must preserve final_answer item/completed notifications when turn/completed omits turn items"
+        );
+        assert!(
             CODEX_APP_SERVER_RUNNER_SCRIPT
                 .contains("$prompt = [string](Get-Content -Raw -LiteralPath $PromptPath"),
             "Windows PowerShell 5.1 must cast Get-Content -Raw prompt bytes before ConvertTo-Json"
@@ -6472,6 +6487,16 @@ mod tests {
                 && interrupt_script.contains("Invoke-WithFileRetry")
                 && interrupt_script.contains("Move-ReplaceWithRetry"),
             "Codex app-server interrupt control/events files must be no-BOM and retry transient file contention"
+        );
+        let steer_script = include_str!("codex_app_server_steer.ps1");
+        assert!(
+            steer_script.contains("method = 'turn/steer'")
+                && steer_script.contains("expectedTurnId = $TurnId")
+                && steer_script.contains("text_elements = @()")
+                && steer_script.contains("responsesapiClientMetadata")
+                && steer_script.contains("last_steer_status")
+                && steer_script.contains("Move-ReplaceWithRetry"),
+            "Codex app-server steer must use the generated turn/steer protocol with expectedTurnId and durable control readback"
         );
     }
 

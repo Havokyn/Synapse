@@ -230,6 +230,20 @@ function Update-FromNotification($Message) {
     if ($null -eq $method -or $null -eq $params) {
         return
     }
+    if ($method -eq 'item/completed') {
+        $item = Get-JsonProperty $params 'item'
+        $itemType = Get-JsonProperty $item 'type'
+        if ($itemType -eq 'agentMessage') {
+            $itemText = [string](Get-JsonProperty $item 'text')
+            if (-not [string]::IsNullOrWhiteSpace($itemText)) {
+                $script:LastAgentMessageText = $itemText
+                $phase = [string](Get-JsonProperty $item 'phase')
+                if ($phase -eq 'final_answer') {
+                    $script:LastFinalAgentMessageText = $itemText
+                }
+            }
+        }
+    }
     $turn = Get-JsonProperty $params 'turn'
     $turnId = Get-JsonProperty $turn 'id'
     if ($method -eq 'turn/started' -and $null -ne $turnId) {
@@ -282,6 +296,8 @@ $script:ThreadId = $null
 $script:TurnId = $null
 $script:TurnStatus = 'starting'
 $script:LastErrorText = $null
+$script:LastAgentMessageText = $null
+$script:LastFinalAgentMessageText = $null
 $socket = $null
 $appServer = $null
 
@@ -387,6 +403,12 @@ try {
         if ($method -eq 'turn/completed' -and [string](Get-JsonProperty $params 'threadId') -eq $script:ThreadId -and [string](Get-JsonProperty $completedTurn 'id') -eq $script:TurnId) {
             $script:TurnStatus = [string](Get-JsonProperty $completedTurn 'status')
             $finalText = Get-FinalAgentText $completedTurn
+            if ([string]::IsNullOrWhiteSpace($finalText)) {
+                $finalText = $script:LastFinalAgentMessageText
+            }
+            if ([string]::IsNullOrWhiteSpace($finalText)) {
+                $finalText = $script:LastAgentMessageText
+            }
             if ([string]::IsNullOrWhiteSpace($finalText)) {
                 $finalText = ([ordered]@{
                     schema_version = 1
