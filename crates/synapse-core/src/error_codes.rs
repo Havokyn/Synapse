@@ -184,6 +184,7 @@ pub const MODEL_REGISTRY_NOT_FOUND: &str = "MODEL_REGISTRY_NOT_FOUND";
 pub const MODEL_REGISTRY_CONFLICT: &str = "MODEL_REGISTRY_CONFLICT";
 pub const MODEL_REGISTRY_DISABLED: &str = "MODEL_REGISTRY_DISABLED";
 pub const MODEL_REGISTRY_UNPROBED: &str = "MODEL_REGISTRY_UNPROBED";
+pub const MODEL_REGISTRY_PROBE_STALE: &str = "MODEL_REGISTRY_PROBE_STALE";
 pub const MODEL_API_KEY_MISSING: &str = "MODEL_API_KEY_MISSING";
 /// A stored API-key secret could not be decrypted (wrong Windows user, copied
 /// database, tampered ciphertext, or non-Windows host). Never silently ignored.

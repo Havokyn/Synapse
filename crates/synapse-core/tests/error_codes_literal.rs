@@ -129,6 +129,7 @@ fn error_codes_match_literal_names() {
     assert_literal!(MODEL_REGISTRY_CONFLICT);
     assert_literal!(MODEL_REGISTRY_DISABLED);
     assert_literal!(MODEL_REGISTRY_UNPROBED);
+    assert_literal!(MODEL_REGISTRY_PROBE_STALE);
 
     assert_literal!(SAFETY_KILLSWITCH_ACTIVE);
     assert_literal!(SAFETY_PROCESS_DENYLISTED);

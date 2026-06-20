@@ -30,6 +30,7 @@ const SYNAPSE_TOOL_CATALOG: &str = "synapse_tool_catalog";
 const SYNAPSE_TOOL_CALL: &str = "synapse_tool";
 const INTERNALIZED_TOOL_CALL_ENVELOPE: &str = "tool_call";
 const ACT_CALL_TOOL_CALL_ENVELOPE: &str = "act_call";
+const LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalAgentCli {
@@ -73,6 +74,7 @@ struct LocalModelRegistryRow {
 
 #[derive(Clone, Debug, Deserialize)]
 struct LocalModelProbe {
+    observed_at_unix_ms: u64,
     healthy: bool,
     error_code: Option<String>,
     error_detail: Option<String>,
@@ -3287,6 +3289,15 @@ fn validate_registry_row(row: &LocalModelRegistryRow) -> anyhow::Result<()> {
             probe.error_detail.as_deref().unwrap_or("")
         );
     }
+    let probe_age_ms = unix_time_ms_now().saturating_sub(probe.observed_at_unix_ms);
+    if probe_age_ms > LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS {
+        bail!(
+            "LOCAL_MODEL_PROBE_STALE: registry row {:?} last healthy probe age {}ms exceeds {}ms; run local_model_probe after verifying endpoint process/socket SoT",
+            row.name,
+            probe_age_ms,
+            LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS
+        );
+    }
     Ok(())
 }
 
@@ -3810,6 +3821,7 @@ fn error_code_from_detail(detail: &str) -> &str {
         "LOCAL_MODEL_UNHEALTHY",
         "LOCAL_MODEL_DISABLED",
         "LOCAL_MODEL_UNPROBED",
+        "LOCAL_MODEL_PROBE_STALE",
         "LOCAL_MODEL_ENDPOINT_NON_LOOPBACK",
         "SYNAPSE_TOOL_CALL_FAILED",
         "TOOL_PARAMS_INVALID",
@@ -5432,6 +5444,7 @@ cdp_open_tab, target_claim.\n\n\
             context_length: None,
             max_tools: None,
             last_probe: Some(LocalModelProbe {
+                observed_at_unix_ms: unix_time_ms_now(),
                 healthy: true,
                 error_code: None,
                 error_detail: None,
@@ -5539,10 +5552,25 @@ cdp_open_tab, target_claim.\n\n\
             context_length: Some(1_000_000),
             max_tools: Some(128),
             last_probe: Some(LocalModelProbe {
+                observed_at_unix_ms: unix_time_ms_now(),
                 healthy: true,
                 error_code: None,
                 error_detail: None,
             }),
         }
+    }
+
+    #[test]
+    fn validate_registry_row_refuses_stale_healthy_probe() {
+        let mut row = test_local_agent_row();
+        if let Some(probe) = row.last_probe.as_mut() {
+            probe.observed_at_unix_ms =
+                unix_time_ms_now().saturating_sub(LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS + 1);
+        }
+        let error = validate_registry_row(&row).expect_err("stale healthy probe must be refused");
+        assert!(
+            error.to_string().contains("LOCAL_MODEL_PROBE_STALE"),
+            "unexpected error: {error:?}"
+        );
     }
 }

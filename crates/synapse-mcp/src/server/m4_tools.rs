@@ -81,6 +81,7 @@ const AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT: usize = 80;
 const AGENT_SPAWN_POLL_INTERVAL_MS: u64 = 250;
 const AGENT_SPAWN_LOG_TAIL_BYTES: usize = 8 * 1024;
 const AGENT_SPAWN_ORPHAN_RECOVERY_STALE_MS: u64 = 10 * 60 * 1000;
+const LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS: u64 = 15 * 60 * 1000;
 static AGENT_SPAWN_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static AGENT_SPAWN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -2477,6 +2478,22 @@ impl SynapseService {
                     "model_ref": model_ref,
                     "row_key": row.row_key.clone(),
                     "last_probe": row.last_probe.clone(),
+                    "source_of_truth": "CF_KV prefix local_model_registry/v1/model/name_hex/",
+                }),
+            ));
+        }
+        let probe_age_ms = unix_time_ms_now().saturating_sub(probe.observed_at_unix_ms);
+        if probe_age_ms > LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS {
+            return Err(local_model_spawn_refusal(
+                error_codes::MODEL_REGISTRY_PROBE_STALE,
+                "local_model_registry_probe_stale",
+                "act_spawn_agent local_model refused because the registry row's last healthy probe is stale; run local_model_probe after verifying the endpoint process/socket Source of Truth",
+                json!({
+                    "model_ref": model_ref,
+                    "row_key": row.row_key.clone(),
+                    "last_probe": row.last_probe.clone(),
+                    "probe_age_ms": probe_age_ms,
+                    "max_probe_age_ms": LOCAL_MODEL_SPAWN_MAX_PROBE_AGE_MS,
                     "source_of_truth": "CF_KV prefix local_model_registry/v1/model/name_hex/",
                 }),
             ));
