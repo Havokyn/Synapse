@@ -2322,11 +2322,13 @@ fn infer_task_tool_contract(task: &str, tools: &[Tool]) -> Option<TaskToolContra
     let exact_tool_phrase = [
         "exact-contract synapse task",
         "use exactly",
+        "use only the exact tool calls",
         "call exactly",
         "execute exactly these mcp tools",
         "execute exactly these synapse tools",
         "execute exactly these real synapse tools",
         "exactly one synapse mcp tool",
+        "required tool calls exactly in order",
         "use exactly these real synapse tools",
         "use exactly these synapse tools",
     ]
@@ -4309,6 +4311,54 @@ mod tests {
                 .contains("outside this task's exact-tool contract")
         );
         Ok(())
+    }
+
+    #[test]
+    fn exact_tool_contract_detects_operator_exact_tool_calls_phrase() {
+        let tools = tools_named(["cdp_open_tab", "target_claim", "workspace_put"]);
+        let task = "Use only the exact tool calls below, in order:\n\
+1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1220-lane.html\",\"window_hwnd\":1704314}\n\
+2. target_claim {\"ttl_ms\":120000}\n\
+3. workspace_put {\"run_id\":\"issue1220-ramp5\",\"key\":\"agent-a\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools)
+            .expect("operator exact-tool-call wording must infer a contract");
+
+        assert_eq!(
+            contract.ordered_tools,
+            vec!["cdp_open_tab", "target_claim", "workspace_put"]
+        );
+        assert_eq!(
+            contract
+                .argument_templates
+                .get("workspace_put")
+                .and_then(|args| args.get("key"))
+                .and_then(Value::as_str),
+            Some("agent-a")
+        );
+    }
+
+    #[test]
+    fn exact_tool_contract_detects_required_tool_calls_exactly_in_order_phrase() {
+        let tools = tools_named(["cdp_open_tab", "target_claim", "workspace_put"]);
+        let task = "The required tool calls exactly in order are:\n\
+1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1220-lane.html?agent=b\",\"window_hwnd\":1704314}\n\
+2. target_claim {\"ttl_ms\":120000}\n\
+3. workspace_put {\"run_id\":\"issue1220-ramp5\",\"key\":\"agent-b\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools)
+            .expect("required-tool-calls-exactly wording must infer a contract");
+
+        assert_eq!(
+            contract.ordered_tools,
+            vec!["cdp_open_tab", "target_claim", "workspace_put"]
+        );
+        assert_eq!(
+            contract
+                .argument_templates
+                .get("cdp_open_tab")
+                .and_then(|args| args.get("window_hwnd"))
+                .and_then(Value::as_i64),
+            Some(1704314)
+        );
     }
 
     #[test]

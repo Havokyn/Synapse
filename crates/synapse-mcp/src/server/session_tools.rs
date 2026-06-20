@@ -1756,6 +1756,18 @@ fn session_attention_class(
     ) {
         return AgentAttentionClass::CleanupRequired;
     }
+    let owns_orphan_cleanup_resource = active_target.is_some() || has_persisted_cdp_owner;
+    if registry.lifecycle == "live"
+        && registry.agent_kind == "local-model"
+        && registry.spawned_agent.is_none()
+        && registry.last_seen_ms_ago >= DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS
+        && owns_orphan_cleanup_resource
+        && target_claims.is_empty()
+        && !lease.is_owner
+        && !active_target_claimed_by_other(session_id, active_target, all_target_claims)
+    {
+        return AgentAttentionClass::CleanupRequired;
+    }
     if recent_live_session_supersedes_terminal_history(registry, agent_state) {
         return AgentAttentionClass::None;
     }
@@ -1780,6 +1792,19 @@ fn terminal_dead_agent_state(agent_state: Option<&AgentStateRead>) -> bool {
     };
     matches!(agent_state.state, AgentLifecycleState::Dead)
         && agent_state.attention_class.is_terminal_history()
+}
+
+fn quiet_orphan_local_model_resource_session(summary: &SessionSummary) -> bool {
+    let owns_cleanup_resource =
+        summary.active_target.is_some() || !summary.persisted_cdp_target_owners.is_empty();
+    summary.registry.lifecycle == "live"
+        && summary.registry.agent_kind == "local-model"
+        && summary.registry.spawned_agent.is_none()
+        && summary.registry.last_seen_ms_ago >= DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS
+        && owns_cleanup_resource
+        && summary.target_claims.is_empty()
+        && !summary.lease.is_owner
+        && summary.foreground_lane.status != "conflicting_owner"
 }
 
 fn active_target_claimed_by_other(
@@ -1882,16 +1907,46 @@ fn ensure_cross_session_cleanup_allowed(
             })),
         ));
     }
+    if quiet_orphan_local_model_resource_session(summary) {
+        let owner_in_flight =
+            match crate::daemon_lifecycle::in_flight_tool_calls_for_session(requested_session_id) {
+                Ok(calls) => calls,
+                #[cfg(test)]
+                Err(error) if error.to_string().contains("ledger is not configured") => Vec::new(),
+                Err(error) => {
+                    return Err(mcp_error(
+                        error_codes::TOOL_INTERNAL_ERROR,
+                        format!("read daemon lifecycle in-flight tool calls: {error:#}"),
+                    ));
+                }
+            };
+        if owner_in_flight.is_empty() {
+            return Ok(());
+        }
+        return Err(ErrorData::new(
+            ErrorCode(-32099),
+            "session_end cross-session cleanup refused because the orphan local-model session has in-flight tool calls",
+            Some(json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "current_session_id": current_session_id,
+                "requested_session_id": requested_session_id,
+                "target_lifecycle": summary.registry.lifecycle,
+                "target_attention_class": summary.attention_class,
+                "owner_in_flight": owner_in_flight,
+                "required": "quiet orphan local-model resource owner with empty daemon in-flight ledger",
+            })),
+        ));
+    }
     Err(ErrorData::new(
         ErrorCode(-32099),
-        "session_end cross-session cleanup is allowed only for non-live cleanup_required sessions or verified dead quiet live resource owners",
+        "session_end cross-session cleanup is allowed only for non-live cleanup_required sessions, verified dead quiet live resource owners, or quiet orphan local-model resource owners",
         Some(json!({
             "code": error_codes::TOOL_PARAMS_INVALID,
             "current_session_id": current_session_id,
             "requested_session_id": requested_session_id,
             "target_lifecycle": summary.registry.lifecycle,
             "target_attention_class": summary.attention_class,
-            "required": "non-live cleanup_required or live dead quiet no-claim no-lease no-in-flight resource owner",
+            "required": "non-live cleanup_required, live dead quiet no-claim no-lease no-in-flight resource owner, or quiet orphan local-model no-claim no-lease no-in-flight resource owner",
         })),
     ))
 }
@@ -2762,6 +2817,88 @@ mod tests {
                 &status_response(Some(summary))
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn cross_session_end_policy_allows_quiet_orphan_local_model_resource_rows() {
+        let lease_status = synapse_action::LeaseStatus::unheld();
+        let now_unix_ms = 1_000_000;
+        let mut registry = synthetic_registry_read("orphan-local-model", now_unix_ms, 500);
+        registry.lifecycle = "live".to_owned();
+        registry.agent_kind = "local-model".to_owned();
+        registry.last_seen_ms_ago = DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS + 1;
+        registry.last_seen_unix_ms = now_unix_ms.saturating_sub(registry.last_seen_ms_ago);
+        registry.spawned_agent = None;
+        registry.last_action = None;
+
+        let summary = build_session_summary(
+            "orphan-local-model",
+            Some(registry),
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            &[],
+            &lease_status,
+            now_unix_ms,
+            500,
+            false,
+        )
+        .expect("quiet orphan summary");
+
+        assert_eq!(summary.registry.lifecycle, "live");
+        assert_eq!(summary.registry.agent_kind, "local-model");
+        assert!(summary.registry.spawned_agent.is_none());
+        assert!(summary.agent_state.is_none());
+        assert_eq!(
+            summary.attention_class,
+            AgentAttentionClass::CleanupRequired
+        );
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "orphan-local-model",
+                &status_response(Some(summary))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn cross_session_end_policy_refuses_recent_orphan_local_model_resource_rows() {
+        let lease_status = synapse_action::LeaseStatus::unheld();
+        let now_unix_ms = 1_000_000;
+        let mut registry = synthetic_registry_read("recent-orphan-local-model", now_unix_ms, 500);
+        registry.lifecycle = "live".to_owned();
+        registry.agent_kind = "local-model".to_owned();
+        registry.last_seen_ms_ago = DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS - 1;
+        registry.last_seen_unix_ms = now_unix_ms.saturating_sub(registry.last_seen_ms_ago);
+        registry.spawned_agent = None;
+        registry.last_action = None;
+
+        let summary = build_session_summary(
+            "recent-orphan-local-model",
+            Some(registry),
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            &[],
+            &lease_status,
+            now_unix_ms,
+            500,
+            false,
+        )
+        .expect("recent orphan summary");
+
+        assert_eq!(summary.registry.lifecycle, "live");
+        assert_eq!(summary.registry.agent_kind, "local-model");
+        assert!(summary.registry.spawned_agent.is_none());
+        assert_eq!(summary.attention_class, AgentAttentionClass::None);
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "recent-orphan-local-model",
+                &status_response(Some(summary))
+            )
+            .is_err()
         );
     }
 
