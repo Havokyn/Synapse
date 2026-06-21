@@ -13,6 +13,7 @@ pub mod interaction_cadence;
 pub mod local_models;
 pub mod permissions;
 pub mod plan;
+pub mod plan_execution;
 pub mod profile;
 pub mod profile_authoring;
 pub mod profile_quality;

@@ -1388,34 +1388,45 @@ impl SynapseService {
             "tool.invocation kind=cdp_open_tab"
         );
         let session_id = require_target_session_id(&request_context)?;
-        validate_cdp_tab_url(&params.0.url)?;
-        let window_hwnd = self.resolve_cdp_context_window(&session_id, params.0.window_hwnd)?;
+        self.cdp_open_tab_for_session(params.0, &session_id)
+            .await
+            .map(Json)
+    }
+
+    pub(super) async fn cdp_open_tab_for_session(
+        &self,
+        params: CdpOpenTabParams,
+        session_id: &str,
+    ) -> Result<CdpOpenTabResponse, ErrorData> {
+        const TOOL: &str = "cdp_open_tab";
+        validate_cdp_tab_url(&params.url)?;
+        let window_hwnd = self.resolve_cdp_context_window(session_id, params.window_hwnd)?;
         let window_context = validate_target_window_context(window_hwnd)?;
         let window_title = window_context.window_title.clone();
         let process_name = window_context.process_name.clone();
         let endpoint = cdp_endpoint_for_action_log(window_hwnd);
         let request_details = json!({
-            "session_id": &session_id,
+            "session_id": session_id,
             "window_hwnd": window_hwnd,
             "endpoint": &endpoint,
-            "requested_url": &params.0.url,
+            "requested_url": &params.url,
             "background": true,
             "required_foreground": false,
             "expected_window_bounds": &window_context.window_bounds,
         });
-        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, session_id)?;
         let result = self
             .cdp_open_tab_impl(
-                &session_id,
+                session_id,
                 window_hwnd,
                 window_context.window_bounds,
-                &params.0.url,
+                &params.url,
                 &window_title,
                 &process_name,
             )
             .await;
-        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
-        result.map(Json)
+        self.audit_action_result_for_session(TOOL, &result, session_id)?;
+        result
     }
 
     #[tool(

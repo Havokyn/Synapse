@@ -623,139 +623,9 @@ impl SynapseService {
         }
         let params = params.0;
         let session_id = super::context::mcp_session_id_from_request_context(&request_context)?;
-        let command_payload = launch_request_details(&params);
-        let command_before = json!({
-            "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
-            "session_id": &session_id,
-        });
-        self.command_audit_intent(super::command_audit::CommandAuditInput::mcp(
-            "act_launch",
-            "spawn",
-            session_id.clone(),
-            session_id.clone(),
-            command_payload.clone(),
-            command_before.clone(),
-            Value::Null,
-            "pending",
-        ))?;
-        if let Some(session_id) = session_id.as_deref() {
-            self.audit_action_started_with_details_for_session(
-                "act_launch",
-                &command_payload,
-                session_id,
-            )?;
-        } else {
-            self.audit_action_started_with_details("act_launch", &command_payload)?;
-        }
-        let result = match launch_for_session(
-            &self.m4_config,
-            params.clone(),
-            session_id.as_deref(),
-        )
-        .await
-        {
-            Ok(mut outcome) => {
-                let response = outcome.response.clone();
-                let process_job = if session_id.is_some() {
-                    match assign_owned_process_job(response.pid, "act_launch", None) {
-                        Ok(process_job) => Some(process_job),
-                        Err(error) => {
-                            let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
-                            return Err(launch_lifecycle_tool_error(
-                                "act_launch spawned the process but failed to assign a session process job; exact spawned PID cleanup was attempted",
-                                json!({
-                                    "code": error_codes::TOOL_INTERNAL_ERROR,
-                                    "reason": "process_job_assign_failed",
-                                    "pid": response.pid,
-                                    "source_error": error.message,
-                                    "cleanup": cleanup,
-                                }),
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
-                if let Err(error) = record_launch_process_history(self, &params, &response) {
-                    let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
-                    return Err(launch_lifecycle_tool_error(
-                        "act_launch spawned the process but failed to record process history; exact spawned PID cleanup was attempted",
-                        json!({
-                            "code": error_codes::TOOL_INTERNAL_ERROR,
-                            "reason": "process_history_record_failed",
-                            "pid": response.pid,
-                            "source_error": error.message,
-                            "cleanup": cleanup,
-                        }),
-                    ));
-                }
-                if let (Some(session_id), Some(process_job)) = (session_id.clone(), process_job) {
-                    if let Err(error) = self.register_session_process_resource(
-                        super::session_lifecycle::SessionProcessResource::new(
-                            session_id,
-                            "act_launch",
-                            response.pid,
-                            None,
-                            params.target.clone(),
-                            process_job,
-                        )
-                        .with_desktop_lease(outcome.desktop_lease.take()),
-                    ) {
-                        let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
-                        return Err(launch_lifecycle_tool_error(
-                            "act_launch spawned the process but failed to register the session process resource; exact spawned PID cleanup was attempted",
-                            json!({
-                                "code": error_codes::TOOL_INTERNAL_ERROR,
-                                "reason": "session_process_register_failed",
-                                "pid": response.pid,
-                                "source_error": error.message,
-                                "cleanup": cleanup,
-                            }),
-                        ));
-                    }
-                }
-                Ok(response)
-            }
-            Err(error) => Err(error),
-        };
-        match &result {
-            Ok(response) => self.command_audit_final(
-                super::command_audit::CommandAuditInput::mcp(
-                    "act_launch",
-                    "spawn",
-                    session_id.clone(),
-                    session_id.clone(),
-                    command_payload,
-                    command_before,
-                    json!({
-                        "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
-                        "response": response,
-                    }),
-                    "ok",
-                ),
-            )?,
-            Err(error) => self.command_audit_final(
-                super::command_audit::CommandAuditInput::mcp(
-                    "act_launch",
-                    "spawn",
-                    session_id.clone(),
-                    session_id.clone(),
-                    command_payload,
-                    command_before,
-                    json!({
-                        "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
-                    }),
-                    "error",
-                )
-                .with_error(super::command_audit::command_audit_error_from_error_data(error)),
-            )?,
-        };
-        if let Some(session_id) = session_id.as_deref() {
-            self.audit_action_result_for_session("act_launch", &result, session_id)?;
-        } else {
-            self.audit_action_result("act_launch", &result)?;
-        }
-        result.map(Json)
+        self.act_launch_for_session_id(params, session_id)
+            .await
+            .map(Json)
     }
 
     #[tool(
@@ -937,6 +807,148 @@ impl SynapseService {
             )?,
         };
         self.audit_action_result_for_request(ACT_SPAWN_AGENT, &result, request_context)?;
+        result
+    }
+}
+
+impl SynapseService {
+    pub(super) async fn act_launch_for_session_id(
+        &self,
+        params: ActLaunchParams,
+        session_id: Option<String>,
+    ) -> Result<ActLaunchResponse, ErrorData> {
+        let command_payload = launch_request_details(&params);
+        let command_before = json!({
+            "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
+            "session_id": &session_id,
+        });
+        self.command_audit_intent(super::command_audit::CommandAuditInput::mcp(
+            "act_launch",
+            "spawn",
+            session_id.clone(),
+            session_id.clone(),
+            command_payload.clone(),
+            command_before.clone(),
+            Value::Null,
+            "pending",
+        ))?;
+        if let Some(session_id) = session_id.as_deref() {
+            self.audit_action_started_with_details_for_session(
+                "act_launch",
+                &command_payload,
+                session_id,
+            )?;
+        } else {
+            self.audit_action_started_with_details("act_launch", &command_payload)?;
+        }
+        let result = match launch_for_session(
+            &self.m4_config,
+            params.clone(),
+            session_id.as_deref(),
+        )
+        .await
+        {
+            Ok(mut outcome) => {
+                let response = outcome.response.clone();
+                let process_job = if session_id.is_some() {
+                    match assign_owned_process_job(response.pid, "act_launch", None) {
+                        Ok(process_job) => Some(process_job),
+                        Err(error) => {
+                            let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
+                            return Err(launch_lifecycle_tool_error(
+                                "act_launch spawned the process but failed to assign a session process job; exact spawned PID cleanup was attempted",
+                                json!({
+                                    "code": error_codes::TOOL_INTERNAL_ERROR,
+                                    "reason": "process_job_assign_failed",
+                                    "pid": response.pid,
+                                    "source_error": error.message,
+                                    "cleanup": cleanup,
+                                }),
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Err(error) = record_launch_process_history(self, &params, &response) {
+                    let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
+                    return Err(launch_lifecycle_tool_error(
+                        "act_launch spawned the process but failed to record process history; exact spawned PID cleanup was attempted",
+                        json!({
+                            "code": error_codes::TOOL_INTERNAL_ERROR,
+                            "reason": "process_history_record_failed",
+                            "pid": response.pid,
+                            "source_error": error.message,
+                            "cleanup": cleanup,
+                        }),
+                    ));
+                }
+                if let (Some(session_id), Some(process_job)) = (session_id.clone(), process_job) {
+                    if let Err(error) = self.register_session_process_resource(
+                        super::session_lifecycle::SessionProcessResource::new(
+                            session_id,
+                            "act_launch",
+                            response.pid,
+                            None,
+                            params.target.clone(),
+                            process_job,
+                        )
+                        .with_desktop_lease(outcome.desktop_lease.take()),
+                    ) {
+                        let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
+                        return Err(launch_lifecycle_tool_error(
+                            "act_launch spawned the process but failed to register the session process resource; exact spawned PID cleanup was attempted",
+                            json!({
+                                "code": error_codes::TOOL_INTERNAL_ERROR,
+                                "reason": "session_process_register_failed",
+                                "pid": response.pid,
+                                "source_error": error.message,
+                                "cleanup": cleanup,
+                            }),
+                        ));
+                    }
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        };
+        match &result {
+            Ok(response) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "act_launch",
+                    "spawn",
+                    session_id.clone(),
+                    session_id.clone(),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
+                        "response": response,
+                    }),
+                    "ok",
+                ),
+            )?,
+            Err(error) => self.command_audit_final(
+                super::command_audit::CommandAuditInput::mcp(
+                    "act_launch",
+                    "spawn",
+                    session_id.clone(),
+                    session_id.clone(),
+                    command_payload,
+                    command_before,
+                    json!({
+                        "source_of_truth": "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
+                    }),
+                    "error",
+                )
+                .with_error(super::command_audit::command_audit_error_from_error_data(error)),
+            )?,
+        };
+        if let Some(session_id) = session_id.as_deref() {
+            self.audit_action_result_for_session("act_launch", &result, session_id)?;
+        } else {
+            self.audit_action_result("act_launch", &result)?;
+        }
         result
     }
 }

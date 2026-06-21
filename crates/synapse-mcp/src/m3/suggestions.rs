@@ -38,6 +38,8 @@ use crate::m1::mcp_error;
 use super::episodes::now_ts_ns;
 use super::intent::{IntentCurrentParams, current_intents};
 use super::permissions::{Permission, RequiredPermissions, required};
+use super::plan::PlanDocument;
+use super::plan_execution::PlanExecutionRecord;
 use super::routines::{
     RoutineFeedbackParams, feedback_suppressed, load_state_row, record_routine_feedback,
 };
@@ -408,6 +410,112 @@ fn write_suggestion(db: &Arc<Db>, record: &SuggestionRecord) -> Result<(), Error
     }
 }
 
+pub fn load_suggestion_by_id(
+    db: &Arc<Db>,
+    suggestion_id: &str,
+) -> Result<Option<SuggestionRecord>, ErrorData> {
+    validate_suggestion_id("suggestion", suggestion_id)?;
+    let mut matches = load_all_suggestions(db)?
+        .into_iter()
+        .filter_map(|(_key, record)| (record.suggestion_id == suggestion_id).then_some(record))
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            format!(
+                "SUGGESTION_ID_COLLISION: suggestion_id {suggestion_id} appears in more than one CF_KV row"
+            ),
+        ));
+    }
+    Ok(matches.pop())
+}
+
+pub fn accept_suggestion_for_execution(
+    db: &Arc<Db>,
+    suggestion_id: &str,
+    now_ns: u64,
+    plan_ref: &str,
+    execution_id: &str,
+    dry_run: bool,
+) -> Result<SuggestionRecord, ErrorData> {
+    validate_suggestion_id("suggestion_accept", suggestion_id)?;
+    let Some(mut record) = load_suggestion_by_id(db, suggestion_id)? else {
+        return Err(mcp_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("SUGGESTION_NOT_FOUND: suggestion_id {suggestion_id} is not in CF_KV"),
+        ));
+    };
+    if record.status != SuggestionStatus::Live {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "SUGGESTION_NOT_LIVE: suggestion_id {suggestion_id} has status {:?}; only live suggestions can be accepted for execution",
+                record.status
+            ),
+        ));
+    }
+    record.status = SuggestionStatus::Accepted;
+    record.proposed_plan_ref = Some(plan_ref.to_owned());
+    record.resolved_ts_ns = Some(now_ns);
+    record.resolution_note = Some(if dry_run {
+        format!("dry-run accepted by suggestion_accept; execution_id={execution_id}")
+    } else {
+        format!("accepted by suggestion_accept; execution_id={execution_id}")
+    });
+    if !dry_run {
+        if !db.pressure_permits_write(cf::CF_KV) {
+            return Err(mcp_error(
+                error_codes::STORAGE_WRITE_FAILED,
+                format!(
+                    "suggestion_accept refused under disk pressure: pressure_level={:?}",
+                    db.pressure_level()
+                ),
+            ));
+        }
+        write_suggestion(db, &record)?;
+    }
+    Ok(record)
+}
+
+pub fn record_suggestion_execution_feedback(
+    db: &Arc<Db>,
+    routine_id: &str,
+    outcome: RoutineFeedbackOutcome,
+    now_ns: u64,
+    note: &str,
+) -> Result<(), ErrorData> {
+    record_terminal_feedback(db, routine_id, outcome, now_ns, note)
+}
+
+fn validate_suggestion_id(tool: &str, suggestion_id: &str) -> Result<(), ErrorData> {
+    let trimmed = suggestion_id.trim();
+    if trimmed.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} suggestion_id must not be empty"),
+        ));
+    }
+    if trimmed != suggestion_id {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} suggestion_id must not contain leading or trailing whitespace"),
+        ));
+    }
+    if suggestion_id.chars().count() > 512 {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} suggestion_id must be at most 512 Unicode scalar values"),
+        ));
+    }
+    if suggestion_id.contains('\0') || suggestion_id.chars().any(char::is_control) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} suggestion_id must not contain control characters"),
+        ));
+    }
+    Ok(())
+}
+
 fn record_terminal_feedback(
     db: &Arc<Db>,
     routine_id: &str,
@@ -632,6 +740,36 @@ pub fn required_permissions_list(_params: &SuggestionListParams) -> RequiredPerm
     required([Permission::ReadStorage])
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionAcceptParams {
+    pub suggestion_id: String,
+    /// Compute the plan and per-step routing report without mutating storage or
+    /// launching/opening anything.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Browser HWND used by `cdp_open_tab` steps. If omitted, the executor may
+    /// use the MCP session's existing CDP/window target; if neither exists, the
+    /// step is refused with evidence instead of using the human foreground.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_window_hwnd: Option<i64>,
+    /// Timeout applied to launch-window/postcondition waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionAcceptResponse {
+    pub suggestion: SuggestionRecord,
+    pub plan: PlanDocument,
+    pub execution: PlanExecutionRecord,
+}
+
+pub fn required_permissions_accept(_params: &SuggestionAcceptParams) -> RequiredPermissions {
+    required([Permission::ReadStorage, Permission::WriteStorage])
+}
+
 pub fn list_suggestions(
     db: &Arc<Db>,
     params: &SuggestionListParams,
@@ -664,6 +802,8 @@ pub fn list_suggestions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use synapse_core::SCHEMA_VERSION;
+    use synapse_storage::Db;
 
     fn config() -> SuggestionConfig {
         SuggestionConfig {
@@ -676,6 +816,58 @@ mod tests {
         }
     }
     const T: u64 = 1_000_000_000_000_000_000;
+
+    fn temp_db() -> (tempfile::TempDir, Arc<Db>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Db::open(dir.path(), SCHEMA_VERSION).expect("open db"));
+        (dir, db)
+    }
+
+    fn live_suggestion() -> SuggestionRecord {
+        SuggestionRecord {
+            record_version: SUGGESTION_RECORD_VERSION,
+            suggestion_id: "sg1-rt1-accept-000000000000000001".to_owned(),
+            routine_id: "rt1-accept".to_owned(),
+            label: Some("Daily setup".to_owned()),
+            created_ts_ns: T,
+            expiry_ts_ns: T + 600_000_000_000,
+            status: SuggestionStatus::Live,
+            confidence: 0.9,
+            matched_prefix_len: 1,
+            total_steps: 2,
+            remaining_step_count: 1,
+            proposed_plan_ref: None,
+            resolved_ts_ns: None,
+            resolution_note: None,
+        }
+    }
+
+    #[test]
+    fn accept_suggestion_updates_the_durable_suggestion_row() {
+        let (_dir, db) = temp_db();
+        let record = live_suggestion();
+        write_suggestion(&db, &record).expect("write live suggestion");
+        let accepted = accept_suggestion_for_execution(
+            &db,
+            &record.suggestion_id,
+            T + 1,
+            "plan/v1/rt1-accept",
+            "px1-accept",
+            false,
+        )
+        .expect("accept suggestion");
+        assert_eq!(accepted.status, SuggestionStatus::Accepted);
+        assert_eq!(accepted.resolved_ts_ns, Some(T + 1));
+        assert_eq!(
+            accepted.proposed_plan_ref.as_deref(),
+            Some("plan/v1/rt1-accept")
+        );
+
+        let readback = load_suggestion_by_id(&db, &record.suggestion_id)
+            .expect("load readback")
+            .expect("accepted suggestion exists");
+        assert_eq!(readback, accepted);
+    }
 
     #[test]
     fn gate_blocks_below_threshold_disabled_and_suppressed() {
