@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
@@ -107,6 +107,16 @@ import {
   type TimelinePurgeReadback,
   type TimelinePurgeRequest
 } from "@/lib/dashboard-state";
+import {
+  DASHBOARD_LIVE_SCOPES,
+  createDashboardLiveController,
+  dashboardLiveLabel,
+  dashboardLiveScopeForRoute,
+  dashboardQueryKeysForScope,
+  initialDashboardLiveState,
+  type DashboardLiveState,
+  type DashboardPanelScope
+} from "@/lib/live-data";
 import { asArray, asRecord, cn, nsToTime, rawText, timeAgo, unixMsToTime } from "@/lib/utils";
 import { useUiStore, type DashboardRouteId, type Density, type Theme } from "@/store/ui-store";
 
@@ -193,6 +203,7 @@ function shortKey(value?: string | null) {
 }
 
 export function App() {
+  const queryClient = useQueryClient();
   const density = useUiStore((state) => state.density);
   const setDensity = useUiStore((state) => state.setDensity);
   const theme = useUiStore((state) => state.theme);
@@ -208,6 +219,8 @@ export function App() {
   const [savedViewName, setSavedViewName] = useState("");
   const [savedViewError, setSavedViewError] = useState("");
   const [auditFilters, setAuditFilters] = useState<AuditQueryFilters>(() => defaultAuditFilters());
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [liveState, setLiveState] = useState<DashboardLiveState>(() => initialDashboardLiveState());
 
   const query = useQuery({
     queryKey: ["dashboard-state"],
@@ -222,6 +235,20 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.density = density;
   }, [theme, density]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const controller = createDashboardLiveController({
+      onStateChange: setLiveState,
+      onScopeEvent: (scope) => invalidateDashboardScope(queryClient, scope)
+    });
+    controller.start();
+    return () => controller.stop();
+  }, [queryClient]);
 
   useEffect(() => {
     const syncFromHash = () => {
@@ -315,10 +342,12 @@ export function App() {
   });
 
   const state = query.data;
-  const freshnessMs = state ? Date.now() - state.generated_at_unix_ms : undefined;
+  const freshnessMs = state ? nowMs - state.generated_at_unix_ms : undefined;
   const stale = query.isError || (freshnessMs !== undefined && freshnessMs > 10000);
   const normalizedRoute = normalizeRoute(route);
   const activeRoute = routeDefinitions.find((item) => item.id === normalizedRoute) ?? routeDefinitions[0];
+  const activeLiveScope = dashboardLiveScopeForRoute(normalizedRoute);
+  const activeLive = dashboardLiveLabel(liveState[activeLiveScope], nowMs);
 
   const commands = useMemo(
     () => [
@@ -420,8 +449,11 @@ export function App() {
       <PageHeader
         title={activeRoute.title}
         subtitle={
-          <span className={stale ? "text-warning-fg" : "text-secondary"}>
-            {query.isError ? rawText(query.error) : `Updated ${freshnessMs === undefined ? "pending" : timeAgo(freshnessMs)} ago`}
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className={stale ? "text-warning-fg" : "text-secondary"}>
+              {query.isError ? rawText(query.error) : `Updated ${freshnessMs === undefined ? "pending" : timeAgo(freshnessMs)} ago`}
+            </span>
+            <span className={liveToneClass(activeLive.tone)}>{activeLive.text}</span>
           </span>
         }
         actions={
@@ -462,6 +494,8 @@ export function App() {
         }
       />
 
+      <LiveDataStrip liveState={liveState} nowMs={nowMs} />
+
       {normalizedRoute === "fleet" ? (
         <FleetView
           state={state}
@@ -489,6 +523,41 @@ export function App() {
       <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
     </AppShell>
   );
+}
+
+function invalidateDashboardScope(queryClient: QueryClient, scope: DashboardPanelScope) {
+  for (const queryKey of dashboardQueryKeysForScope(scope)) {
+    void queryClient.invalidateQueries({ queryKey });
+  }
+}
+
+function LiveDataStrip({ liveState, nowMs }: { liveState: DashboardLiveState; nowMs: number }) {
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-2" role="status" aria-live="polite">
+      {DASHBOARD_LIVE_SCOPES.map((scope) => {
+        const label = dashboardLiveLabel(liveState[scope], nowMs);
+        return (
+          <span
+            key={scope}
+            className={cn(
+              "inline-flex min-h-7 items-center gap-1 rounded-md border px-2.5 text-xs",
+              liveToneClass(label.tone)
+            )}
+          >
+            <span className="font-medium capitalize">{scope}</span>
+            <span>{label.text.replace(/^SSE\s+/, "")}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function liveToneClass(tone: "ok" | "warning" | "danger" | "muted") {
+  if (tone === "ok") return "border-success-border bg-success-bg text-success-fg";
+  if (tone === "warning") return "border-warning-border bg-warning-bg text-warning-fg";
+  if (tone === "danger") return "border-danger-border bg-danger-bg text-danger-fg";
+  return "border-border bg-surface-2 text-muted";
 }
 
 function Sidebar({

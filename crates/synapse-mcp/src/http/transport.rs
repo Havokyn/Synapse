@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use synapse_action::ActionHandle;
 use synapse_action::ActionStateSnapshot;
-use synapse_core::Health;
+use synapse_core::{EventFilter, EventSource, Health};
 use synapse_storage::{Db, cf};
 use tokio::{
     net::TcpListener,
@@ -530,6 +530,11 @@ fn router(
         .route("/dashboard", get(dashboard_index))
         .route("/dashboard/assets/{asset}", get(dashboard_asset))
         .route("/dashboard/state.json", get(dashboard_state))
+        .route(
+            "/dashboard/events/subscribe",
+            post(dashboard_events_subscribe)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/dashboard/agent-terminal/{spawn_id}/ws",
             get(dashboard_agent_terminal_ws),
@@ -1459,6 +1464,34 @@ struct DashboardStateResponse {
     local_models: DashboardPanel,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DashboardEventScope {
+    Fleet,
+    Agent,
+    Tasks,
+    System,
+    Audit,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardEventSubscribeRequest {
+    scope: DashboardEventScope,
+    #[serde(default)]
+    snapshot_first: bool,
+}
+
+#[derive(Serialize)]
+struct DashboardEventSubscribeResponse {
+    ok: bool,
+    source_of_truth: &'static str,
+    scope: DashboardEventScope,
+    subscription_id: String,
+    event_url: String,
+    replay_contract: &'static str,
+}
+
 #[derive(Serialize)]
 struct DashboardPanel {
     status: &'static str,
@@ -1511,6 +1544,83 @@ impl DashboardPanel {
             error: Some(error.to_string()),
         }
     }
+}
+
+fn dashboard_event_subscription(
+    scope: DashboardEventScope,
+) -> (EventFilter, Vec<String>, &'static str) {
+    match scope {
+        DashboardEventScope::Fleet => (
+            EventFilter::All,
+            vec![
+                crate::server::agent_state::AGENT_STATE_EVENT_KIND.to_owned(),
+                "workspace.put".to_owned(),
+            ],
+            "agent state + workspace events",
+        ),
+        DashboardEventScope::Agent => (
+            EventFilter::All,
+            vec![
+                crate::server::agent_state::AGENT_STATE_EVENT_KIND.to_owned(),
+                "profile-changed".to_owned(),
+                "scope-transitioned".to_owned(),
+                "workspace.put".to_owned(),
+            ],
+            "agent state + profile/workspace events",
+        ),
+        DashboardEventScope::Tasks => (
+            EventFilter::All,
+            vec![
+                crate::server::agent_state::AGENT_STATE_EVENT_KIND.to_owned(),
+                "workspace.put".to_owned(),
+            ],
+            "task/attention state events",
+        ),
+        DashboardEventScope::System => (
+            EventFilter::Or {
+                args: vec![
+                    EventFilter::Source {
+                        source: EventSource::System,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::Filesystem,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::Process,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::Clipboard,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::PerceptionAudio,
+                    },
+                ],
+            },
+            Vec::new(),
+            "system/process/filesystem/audio events",
+        ),
+        DashboardEventScope::Audit => (
+            EventFilter::Or {
+                args: vec![
+                    EventFilter::Source {
+                        source: EventSource::ActionEmitter,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::Reflex,
+                    },
+                    EventFilter::Source {
+                        source: EventSource::System,
+                    },
+                ],
+            },
+            Vec::new(),
+            "command/audit-relevant system events",
+        ),
+    }
+}
+
+fn dashboard_event_url(subscription_id: &str) -> String {
+    format!("/events?subscription_id={subscription_id}")
 }
 
 #[derive(Serialize)]
@@ -2725,6 +2835,43 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         local_models: local_model_panel(&state, &tool_names),
     };
     with_dashboard_security_headers(Json(response).into_response())
+}
+
+async fn dashboard_events_subscribe(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardEventSubscribeRequest>,
+) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    let (filter, kinds, source_of_truth) = dashboard_event_subscription(request.scope);
+    let subscription_id =
+        match state
+            .sse_state
+            .subscribe(filter, kinds, request.snapshot_first, None)
+        {
+            Ok(subscription_id) => subscription_id,
+            Err(error) => {
+                return with_dashboard_security_headers(dashboard_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.code(),
+                    &error.message(),
+                    Some(serde_json::json!({ "scope": request.scope })),
+                ));
+            }
+        };
+    with_dashboard_security_headers(
+        Json(DashboardEventSubscribeResponse {
+            ok: true,
+            source_of_truth,
+            scope: request.scope,
+            event_url: dashboard_event_url(&subscription_id),
+            subscription_id,
+            replay_contract: "browser EventSource reconnect sends Last-Event-ID to /events with the stable subscription_id query parameter",
+        })
+        .into_response(),
+    )
 }
 
 async fn dashboard_audit_query(
@@ -4403,12 +4550,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-Bpv19k_h.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-CPtgUsZA.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-eG7sayus.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-C4M-_bne.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-Bpv19k_h.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-CPtgUsZA.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-eG7sayus.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-C4M-_bne.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -4760,6 +4907,53 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_event_scope_filters_are_panel_scoped() {
+        let agent_state = dashboard_scope_test_event(
+            EventSource::System,
+            crate::server::agent_state::AGENT_STATE_EVENT_KIND,
+        );
+        let profile_changed = dashboard_scope_test_event(EventSource::System, "profile-changed");
+        let audit = dashboard_scope_test_event(EventSource::ActionEmitter, "command_finished");
+        let filesystem = dashboard_scope_test_event(EventSource::Filesystem, "file_changed");
+
+        assert!(dashboard_scope_matches(
+            DashboardEventScope::Fleet,
+            &agent_state
+        ));
+        assert!(dashboard_scope_matches(
+            DashboardEventScope::Agent,
+            &profile_changed
+        ));
+        assert!(dashboard_scope_matches(
+            DashboardEventScope::Tasks,
+            &agent_state
+        ));
+        assert!(dashboard_scope_matches(DashboardEventScope::Audit, &audit));
+        assert!(dashboard_scope_matches(
+            DashboardEventScope::System,
+            &filesystem
+        ));
+
+        assert!(!dashboard_scope_matches(DashboardEventScope::Fleet, &audit));
+        assert!(!dashboard_scope_matches(
+            DashboardEventScope::Tasks,
+            &profile_changed
+        ));
+        assert!(!dashboard_scope_matches(
+            DashboardEventScope::Audit,
+            &filesystem
+        ));
+    }
+
+    #[test]
+    fn dashboard_event_url_keeps_subscription_id_for_last_event_id_replay() {
+        assert_eq!(
+            dashboard_event_url("sub-01234567-89ab-cdef"),
+            "/events?subscription_id=sub-01234567-89ab-cdef"
+        );
+    }
+
+    #[test]
     fn dashboard_bundle_contains_terminal_ws_contract() {
         assert!(DASHBOARD_APP_SOURCE.contains("/dashboard/agent-terminal/"));
         assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_CLIENT_PAUSE"));
@@ -4767,6 +4961,22 @@ mod tests {
         assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_CLIENT_INPUT"));
         assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_SERVER_OUTPUT"));
         assert!(DASHBOARD_JS.contains("/dashboard/agent-terminal/"));
+    }
+
+    fn dashboard_scope_matches(scope: DashboardEventScope, event: &synapse_core::Event) -> bool {
+        let (filter, kinds, _) = dashboard_event_subscription(scope);
+        (kinds.is_empty() || kinds.iter().any(|kind| kind == &event.kind)) && filter.matches(event)
+    }
+
+    fn dashboard_scope_test_event(source: EventSource, kind: &str) -> synapse_core::Event {
+        synapse_core::Event {
+            seq: 1,
+            at: chrono::Utc::now(),
+            source,
+            kind: kind.to_owned(),
+            data: serde_json::json!({}),
+            correlations: Vec::new(),
+        }
     }
 
     #[test]

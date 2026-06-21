@@ -8,7 +8,6 @@ import "@/styles.css";
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchInterval: 3000,
       refetchOnWindowFocus: true,
       staleTime: 2500,
       retry: 1
