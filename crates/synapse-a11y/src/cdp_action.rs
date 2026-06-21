@@ -24,8 +24,10 @@ use chromiumoxide::cdp::browser_protocol::input::{
     InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, GetLayoutMetricsParams, GetNavigationHistoryParams, NavigateParams,
-    NavigateToHistoryEntryParams, ReloadParams, SetDocumentContentParams, Viewport,
+    AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, GetLayoutMetricsParams,
+    GetNavigationHistoryParams, NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
+    RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier, SetDocumentContentParams,
+    Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::target::TargetId;
 use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
@@ -186,6 +188,13 @@ pub struct CdpEvaluateResult {
     /// `Runtime.RemoteObject.unserializableValue` (e.g. "Infinity", "NaN",
     /// "-0", bigint literals) when the value cannot be represented as JSON.
     pub unserializable_value: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpInitScriptResult {
+    pub target_id: String,
+    pub identifier: String,
+    pub state: CdpPageState,
 }
 
 /// Selector resolution engine for [`cdp_locate`] (#1110–#1119), giving Synapse
@@ -1065,6 +1074,89 @@ pub async fn cdp_evaluate_on_element(
             return_by_value,
             returns.result,
         ))
+    })
+    .await
+}
+
+/// Adds a script that evaluates before page scripts on every new document for a
+/// CDP page target. Background-safe: this never activates the tab or uses OS
+/// foreground input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the Page command or post-command readback fails.
+pub async fn cdp_add_init_script_target(
+    endpoint: &str,
+    target_id: &str,
+    source: &str,
+    world_name: Option<&str>,
+    include_command_line_api: Option<bool>,
+    run_immediately: Option<bool>,
+) -> A11yResult<CdpInitScriptResult> {
+    let source = source.to_owned();
+    let world_name = world_name.map(ToOwned::to_owned);
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        let mut builder = AddScriptToEvaluateOnNewDocumentParams::builder().source(source);
+        if let Some(world_name) = world_name {
+            builder = builder.world_name(world_name);
+        }
+        if let Some(include_command_line_api) = include_command_line_api {
+            builder = builder.include_command_line_api(include_command_line_api);
+        }
+        if let Some(run_immediately) = run_immediately {
+            builder = builder.run_immediately(run_immediately);
+        }
+        let params = builder.build().map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("build Page.addScriptToEvaluateOnNewDocument params: {err}"),
+        })?;
+        let added = page
+            .execute(params)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Page.addScriptToEvaluateOnNewDocument: {err}"),
+            })?
+            .result;
+        let state = read_page_state(&page).await?;
+        Ok(CdpInitScriptResult {
+            target_id,
+            identifier: added.identifier.inner().clone(),
+            state,
+        })
+    })
+    .await
+}
+
+/// Removes a script previously installed with
+/// [`cdp_add_init_script_target`]. Background-safe: this never activates the tab
+/// or uses OS foreground input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the Page command or post-command readback fails.
+pub async fn cdp_remove_init_script_target(
+    endpoint: &str,
+    target_id: &str,
+    identifier: &str,
+) -> A11yResult<CdpInitScriptResult> {
+    let identifier = identifier.to_owned();
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        page.execute(RemoveScriptToEvaluateOnNewDocumentParams::new(
+            ScriptIdentifier::new(identifier.clone()),
+        ))
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Page.removeScriptToEvaluateOnNewDocument({identifier:?}): {err}"),
+        })?;
+        let state = read_page_state(&page).await?;
+        Ok(CdpInitScriptResult {
+            target_id,
+            identifier,
+            state,
+        })
     })
     .await
 }

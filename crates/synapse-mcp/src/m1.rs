@@ -1213,6 +1213,81 @@ pub struct BrowserEvaluateResponse {
     pub required_foreground: bool,
 }
 
+/// Operation for `browser_add_init_script`.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserInitScriptOperation {
+    /// Add a script via Page.addScriptToEvaluateOnNewDocument.
+    #[default]
+    Add,
+    /// Remove a previously added script by CDP script identifier.
+    Remove,
+}
+
+/// Parameters for `browser_add_init_script` (#1068): install or remove a
+/// Playwright-style init script on the calling session's owned CDP page target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserAddInitScriptParams {
+    /// Add or remove an init script. Defaults to `add`.
+    #[serde(default)]
+    pub operation: BrowserInitScriptOperation,
+    /// CDP TargetID to mutate. Defaults to the active session CDP target. Must be
+    /// owned by this session; the human foreground tab is never an implicit
+    /// fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// JavaScript source for `operation=add`. It runs before page scripts on
+    /// subsequent new documents/navigations for this page target.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Script identifier returned by `operation=add`; required for
+    /// `operation=remove`.
+    #[serde(default)]
+    pub identifier: Option<String>,
+    /// Optional isolated-world name (`worldName`) for the init script.
+    #[serde(default)]
+    pub world_name: Option<String>,
+    /// Expose command-line API helpers to the script. Defaults to CDP false.
+    #[serde(default)]
+    pub include_command_line_api: Option<bool>,
+    /// Run immediately in existing execution contexts as well as future
+    /// documents. Defaults to CDP false.
+    #[serde(default)]
+    pub run_immediately: Option<bool>,
+}
+
+/// Response for `browser_add_init_script`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserAddInitScriptResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: BrowserInitScriptOperation,
+    pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_len: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_command_line_api: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_immediately: Option<bool>,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+}
+
 /// Parameters for `browser_content` (#1158): return the full serialized HTML of
 /// the calling session's owned CDP page target.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]

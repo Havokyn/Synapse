@@ -1,7 +1,8 @@
 use super::{
-    BrowserAdoptActiveTabParams, BrowserAdoptActiveTabResponse, BrowserConsoleMessagesParams,
-    BrowserConsoleMessagesResponse, BrowserContentParams, BrowserContentResponse,
-    BrowserEvaluateParams, BrowserEvaluateResponse, BrowserInspectParams, BrowserInspectResponse,
+    BrowserAddInitScriptParams, BrowserAddInitScriptResponse, BrowserAdoptActiveTabParams,
+    BrowserAdoptActiveTabResponse, BrowserConsoleMessagesParams, BrowserConsoleMessagesResponse,
+    BrowserContentParams, BrowserContentResponse, BrowserEvaluateParams, BrowserEvaluateResponse,
+    BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
     BrowserSetContentParams, BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams,
     BrowserTabsResponse, CaptureScreenshotFormat, CaptureScreenshotParams,
@@ -1792,6 +1793,67 @@ impl SynapseService {
                 await_promise,
                 return_by_value,
             )
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Add or remove a Playwright-style init script for the calling session's owned browser tab via raw CDP Page.addScriptToEvaluateOnNewDocument / Page.removeScriptToEvaluateOnNewDocument. operation defaults to add: provide source, and the script runs before page scripts on every subsequent new document/navigation for that target. operation=remove requires the returned identifier. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+    )]
+    pub async fn browser_add_init_script(
+        &self,
+        params: Parameters<BrowserAddInitScriptParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserAddInitScriptResponse>, ErrorData> {
+        const TOOL: &str = "browser_add_init_script";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_add_init_script"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        validate_browser_add_init_script_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "operation": params.0.operation,
+            "source_len": params.0.source.as_deref().map(str::len),
+            "identifier": params.0.identifier.as_deref(),
+            "world_name": params.0.world_name.as_deref(),
+            "include_command_line_api": params.0.include_command_line_api,
+            "run_immediately": params.0.run_immediately,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "operation": params.0.operation,
+            "source_len": params.0.source.as_deref().map(str::len),
+            "identifier": params.0.identifier.as_deref(),
+            "world_name": params.0.world_name.as_deref(),
+            "include_command_line_api": params.0.include_command_line_api,
+            "run_immediately": params.0.run_immediately,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_add_init_script_impl(&session_id, window_hwnd, &cdp_target_id, &params.0)
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
@@ -3985,6 +4047,120 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_add_init_script_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &BrowserAddInitScriptParams,
+    ) -> Result<BrowserAddInitScriptResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(
+                "browser_add_init_script",
+                window_hwnd,
+            ));
+        };
+        let result = match params.operation {
+            BrowserInitScriptOperation::Add => {
+                let source = params.source.as_deref().ok_or_else(|| {
+                    mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_add_init_script operation=add requires source",
+                    )
+                })?;
+                synapse_a11y::cdp_add_init_script_target(
+                    &endpoint,
+                    cdp_target_id,
+                    source,
+                    params.world_name.as_deref(),
+                    params.include_command_line_api,
+                    params.run_immediately,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_add_init_script raw CDP Page.addScriptToEvaluateOnNewDocument failed: {error}"
+                        ),
+                    )
+                })?
+            }
+            BrowserInitScriptOperation::Remove => {
+                let identifier = params.identifier.as_deref().ok_or_else(|| {
+                    mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_add_init_script operation=remove requires identifier",
+                    )
+                })?;
+                synapse_a11y::cdp_remove_init_script_target(
+                    &endpoint,
+                    cdp_target_id,
+                    identifier,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_add_init_script raw CDP Page.removeScriptToEvaluateOnNewDocument failed: {error}"
+                        ),
+                    )
+                })?
+            }
+        };
+        tracing::info!(
+            code = "CDP_BACKGROUND_INIT_SCRIPT",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %result.target_id,
+            operation = ?params.operation,
+            identifier = %result.identifier,
+            source_len = params.source.as_deref().map(str::len),
+            target_url = %result.state.url,
+            "readback=Page.addScriptToEvaluateOnNewDocument/Page.removeScriptToEvaluateOnNewDocument outcome=init_script_mutated"
+        );
+        Ok(BrowserAddInitScriptResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: result.target_id,
+            operation: params.operation,
+            identifier: result.identifier,
+            source_len: (params.operation == BrowserInitScriptOperation::Add)
+                .then(|| params.source.as_deref().map(str::len))
+                .flatten(),
+            world_name: params.world_name.clone(),
+            include_command_line_api: params.include_command_line_api,
+            run_immediately: params.run_immediately,
+            url: result.state.url,
+            title: result.state.title,
+            ready_state: result.state.ready_state,
+            readback_backend:
+                "Page.addScriptToEvaluateOnNewDocument/Page.removeScriptToEvaluateOnNewDocument"
+                    .to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_add_init_script_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _params: &BrowserAddInitScriptParams,
+    ) -> Result<BrowserAddInitScriptResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_add_init_script is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
     async fn browser_content_impl(
         &self,
         session_id: &str,
@@ -5406,6 +5582,9 @@ fn console_message_from_entry(entry: synapse_a11y::ConsoleEntry) -> ConsoleMessa
 /// helper bundles, but bounded so a single tool call cannot ship an unbounded
 /// payload through the protocol.
 const BROWSER_EVALUATE_MAX_EXPRESSION_BYTES: usize = 1_048_576;
+const BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES: usize = BROWSER_EVALUATE_MAX_EXPRESSION_BYTES;
+const BROWSER_INIT_SCRIPT_MAX_IDENTIFIER_CHARS: usize = 512;
+const BROWSER_INIT_SCRIPT_MAX_WORLD_NAME_CHARS: usize = 256;
 
 fn validate_browser_evaluate_params(params: &BrowserEvaluateParams) -> Result<(), ErrorData> {
     if params.expression.trim().is_empty() {
@@ -5435,6 +5614,118 @@ fn validate_browser_evaluate_params(params: &BrowserEvaluateParams) -> Result<()
                 "browser_evaluate accepts at most {BROWSER_EVALUATE_MAX_ARGS} args; got {}",
                 args.len()
             ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_browser_add_init_script_params(
+    params: &BrowserAddInitScriptParams,
+) -> Result<(), ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    if let Some(world_name) = params.world_name.as_deref() {
+        validate_browser_init_script_world_name(world_name)?;
+    }
+    match params.operation {
+        BrowserInitScriptOperation::Add => {
+            let source = params.source.as_deref().ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_add_init_script operation=add requires source",
+                )
+            })?;
+            if source.trim().is_empty() {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_add_init_script source must not be empty",
+                ));
+            }
+            if source.len() > BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    format!(
+                        "browser_add_init_script source is {} bytes; the maximum is {BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES} bytes",
+                        source.len()
+                    ),
+                ));
+            }
+            if let Some(identifier) = params.identifier.as_deref()
+                && !identifier.trim().is_empty()
+            {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_add_init_script operation=add returns identifier; do not supply one",
+                ));
+            }
+        }
+        BrowserInitScriptOperation::Remove => {
+            let identifier = params.identifier.as_deref().ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_add_init_script operation=remove requires identifier",
+                )
+            })?;
+            validate_browser_init_script_identifier(identifier)?;
+            if params.source.is_some()
+                || params.world_name.is_some()
+                || params.include_command_line_api.is_some()
+                || params.run_immediately.is_some()
+            {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_add_init_script operation=remove only accepts cdp_target_id, window_hwnd, operation, and identifier",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_browser_init_script_identifier(identifier: &str) -> Result<(), ErrorData> {
+    if identifier.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_add_init_script identifier must not be empty",
+        ));
+    }
+    if identifier.chars().count() > BROWSER_INIT_SCRIPT_MAX_IDENTIFIER_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "browser_add_init_script identifier must be at most {BROWSER_INIT_SCRIPT_MAX_IDENTIFIER_CHARS} Unicode scalar values"
+            ),
+        ));
+    }
+    if identifier.contains('\0') {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_add_init_script identifier must not contain NUL",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_browser_init_script_world_name(world_name: &str) -> Result<(), ErrorData> {
+    if world_name.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_add_init_script world_name must not be empty when supplied",
+        ));
+    }
+    if world_name.chars().count() > BROWSER_INIT_SCRIPT_MAX_WORLD_NAME_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "browser_add_init_script world_name must be at most {BROWSER_INIT_SCRIPT_MAX_WORLD_NAME_CHARS} Unicode scalar values"
+            ),
+        ));
+    }
+    if world_name.contains('\0') {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_add_init_script world_name must not contain NUL",
         ));
     }
     Ok(())
@@ -8021,21 +8312,23 @@ fn escape_json_pointer(segment: &str) -> String {
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, CdpTargetOwner, MAX_BROWSER_SET_CONTENT_HTML_BYTES,
-        SessionTarget, SynapseService, TargetWire, attach_find_hygiene_annotations,
-        attach_ocr_hygiene_annotations, cdp_activate_resolution_request_details,
-        cdp_target_info_resolution_request_details, chrome_capture_visible_tab_data_url_to_bgra,
-        chrome_page_vitals_info, hidden_desktop_pip_ended_response, hidden_worker_target_miss,
-        mcp_error, ocr_cache_key, page_text_info_from_parts, perception_window_hwnd,
-        resolve_capture_target_window_context, select_single_active_browser_tab, sha256_hex,
-        target_wire, template_value, unavailable_page_vitals_info,
+        BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES,
+        CdpTargetOwner, MAX_BROWSER_SET_CONTENT_HTML_BYTES, SessionTarget, SynapseService,
+        TargetWire, attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
+        cdp_activate_resolution_request_details, cdp_target_info_resolution_request_details,
+        chrome_capture_visible_tab_data_url_to_bgra, chrome_page_vitals_info,
+        hidden_desktop_pip_ended_response, hidden_worker_target_miss, mcp_error, ocr_cache_key,
+        page_text_info_from_parts, perception_window_hwnd, resolve_capture_target_window_context,
+        select_single_active_browser_tab, sha256_hex, target_wire, template_value,
+        unavailable_page_vitals_info, validate_browser_add_init_script_params,
         validate_browser_evaluate_params, validate_browser_set_content_params,
         validate_target_window,
     };
     use crate::m1::{
-        BrowserEvaluateParams, BrowserSetContentParams, BrowserTabEntry, BrowserTabsResponse,
-        CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult, FindResultKind,
-        HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus,
+        BrowserAddInitScriptParams, BrowserEvaluateParams, BrowserInitScriptOperation,
+        BrowserSetContentParams, BrowserTabEntry, BrowserTabsResponse, CdpActivateTabParams,
+        CdpTargetInfoParams, FindResponse, FindResult, FindResultKind, HiddenDesktopPipFrameParams,
+        HiddenDesktopPipStreamStatus,
     };
     use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
     use base64::Engine as _;
@@ -8227,6 +8520,136 @@ mod tests {
         assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
         println!(
             "readback=browser_evaluate validation edges all rejected with TOOL_PARAMS_INVALID"
+        );
+    }
+
+    #[test]
+    fn browser_add_init_script_params_validation_edges() {
+        assert!(
+            validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+                operation: BrowserInitScriptOperation::Add,
+                cdp_target_id: Some("target-123".to_owned()),
+                window_hwnd: None,
+                source: Some("window.__synapse = 1;".to_owned()),
+                identifier: None,
+                world_name: Some("synapse_init".to_owned()),
+                include_command_line_api: Some(false),
+                run_immediately: Some(true),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+                operation: BrowserInitScriptOperation::Remove,
+                cdp_target_id: None,
+                window_hwnd: None,
+                source: None,
+                identifier: Some("script-1".to_owned()),
+                world_name: None,
+                include_command_line_api: None,
+                run_immediately: None,
+            })
+            .is_ok()
+        );
+
+        for blank in ["", "   ", "\t\n"] {
+            let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+                operation: BrowserInitScriptOperation::Add,
+                source: Some(blank.to_owned()),
+                ..Default::default()
+            })
+            .expect_err("blank init script source must be rejected");
+            let code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        }
+
+        let oversize = "x".repeat(BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES + 1);
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Add,
+            source: Some(oversize),
+            ..Default::default()
+        })
+        .expect_err("oversize init script source must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Add,
+            source: Some("window.__synapse = 1;".to_owned()),
+            identifier: Some("script-1".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("add must not accept caller-supplied identifier");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Remove,
+            ..Default::default()
+        })
+        .expect_err("remove requires identifier");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Remove,
+            identifier: Some("script-1".to_owned()),
+            source: Some("window.__synapse = 1;".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("remove must reject ignored source");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Add,
+            cdp_target_id: Some("   ".to_owned()),
+            source: Some("window.__synapse = 1;".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("blank cdp_target_id must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_add_init_script_params(&BrowserAddInitScriptParams {
+            operation: BrowserInitScriptOperation::Add,
+            source: Some("window.__synapse = 1;".to_owned()),
+            world_name: Some("   ".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("blank world_name must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        println!(
+            "readback=browser_add_init_script validation edges all rejected with TOOL_PARAMS_INVALID"
         );
     }
 
