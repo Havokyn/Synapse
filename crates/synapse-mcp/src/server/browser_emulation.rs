@@ -1,4 +1,4 @@
-//! Browser emulation tools (#1173/#1174/#1175).
+//! Browser emulation tools (#1173/#1174/#1175/#1176).
 
 use super::{
     ErrorData, Json, Parameters, SynapseService,
@@ -17,6 +17,7 @@ use synapse_core::error_codes;
 const RESIZE_TOOL: &str = "browser_resize";
 const DEVICE_TOOL: &str = "browser_device";
 const GEOLOCATION_TOOL: &str = "browser_geolocation";
+const LOCALE_TOOL: &str = "browser_locale";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +38,19 @@ pub enum BrowserDeviceOperation {
 pub enum BrowserGeolocationOperation {
     Set,
     Reset,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserLocaleOperation {
+    Set,
+    Reset,
+}
+
+impl Default for BrowserLocaleOperation {
+    fn default() -> Self {
+        Self::Set
+    }
 }
 
 impl Default for BrowserGeolocationOperation {
@@ -163,6 +177,28 @@ pub struct BrowserGeolocationParams {
     pub grant_permission: Option<bool>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocaleParams {
+    /// CDP TargetID to emulate. Defaults to the active session CDP target. Must
+    /// be owned by this session; the human foreground tab is never a fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// `set` applies locale/timezone overrides; `reset` restores host defaults.
+    #[serde(default)]
+    pub operation: BrowserLocaleOperation,
+    /// ICU/BCP-style locale for operation=set, such as `fr_FR` or `fr-FR`.
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// IANA timezone id for operation=set, such as `Europe/Paris`.
+    #[serde(default)]
+    pub timezone_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserViewportOverride {
@@ -198,6 +234,15 @@ pub struct BrowserGeolocationOverride {
     pub heading: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocaleOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -286,6 +331,19 @@ pub struct BrowserGeolocationReadback {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct BrowserLocaleReadback {
+    pub locale: String,
+    pub calendar: String,
+    pub numbering_system: String,
+    pub time_zone: String,
+    pub sample_number: String,
+    pub sample_date: String,
+    pub date_string: String,
+    pub timezone_offset_minutes: i64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserDeviceResponse {
     pub session_id: String,
     pub window_hwnd: i64,
@@ -330,6 +388,27 @@ pub struct BrowserGeolocationResponse {
     pub source_of_truth: String,
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocaleResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: BrowserLocaleOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<BrowserLocaleOverride>,
+    pub page_url: String,
+    pub page_title: String,
+    pub ready_state: String,
+    pub locale: BrowserLocaleReadback,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+    pub source_of_truth: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct NormalizedBrowserResizeParams {
     operation: BrowserResizeOperation,
@@ -349,6 +428,12 @@ struct NormalizedBrowserGeolocationParams {
     operation: BrowserGeolocationOperation,
     geolocation: Option<BrowserGeolocationOverride>,
     grant_permission: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NormalizedBrowserLocaleParams {
+    operation: BrowserLocaleOperation,
+    requested: Option<BrowserLocaleOverride>,
 }
 
 #[tool_router(router = browser_emulation_tool_router, vis = "pub(super)")]
@@ -524,6 +609,62 @@ impl SynapseService {
             .browser_geolocation_impl(&session_id, window_hwnd, &cdp_target_id, &geolocation)
             .await;
         self.audit_action_result_for_session(GEOLOCATION_TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Set or reset locale and timezone emulation for the calling session's owned raw-CDP browser tab. operation=set applies locale with Emulation.setLocaleOverride and/or timezone_id with Emulation.setTimezoneOverride, then reads back Intl.DateTimeFormat().resolvedOptions(), formatted number/date samples, and Date string/offset through Runtime.evaluate. operation=reset clears both overrides to host defaults. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent FSV readback for Intl.DateTimeFormat().resolvedOptions().timeZone and locale-sensitive number/date formatting."
+    )]
+    pub async fn browser_locale(
+        &self,
+        params: Parameters<BrowserLocaleParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserLocaleResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = LOCALE_TOOL,
+            "tool.invocation kind=browser_locale"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let locale = validate_browser_locale_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "operation": locale.operation,
+            "requested": &locale.requested,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            LOCALE_TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            LOCALE_TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "operation": locale.operation,
+            "requested": &locale.requested,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(
+            LOCALE_TOOL,
+            &request_details,
+            &session_id,
+        )?;
+        let result = self
+            .browser_locale_impl(&session_id, window_hwnd, &cdp_target_id, &locale)
+            .await;
+        self.audit_action_result_for_session(LOCALE_TOOL, &result, &session_id)?;
         result.map(Json)
     }
 
@@ -704,6 +845,58 @@ impl SynapseService {
         ))
     }
 
+    #[cfg(windows)]
+    async fn browser_locale_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &NormalizedBrowserLocaleParams,
+    ) -> Result<BrowserLocaleResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(LOCALE_TOOL, window_hwnd));
+        };
+        let result = match params.operation {
+            BrowserLocaleOperation::Set => {
+                let requested = params
+                    .requested
+                    .as_ref()
+                    .expect("validated locale override");
+                synapse_a11y::cdp_set_locale_timezone_override(
+                    &endpoint,
+                    cdp_target_id,
+                    synapse_a11y::CdpLocaleTimezoneOverride {
+                        locale: requested.locale.clone(),
+                        timezone_id: requested.timezone_id.clone(),
+                    },
+                )
+                .await
+            }
+            BrowserLocaleOperation::Reset => {
+                synapse_a11y::cdp_reset_locale_timezone_override(&endpoint, cdp_target_id).await
+            }
+        }
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("{LOCALE_TOOL} raw CDP locale/timezone emulation failed: {error}"),
+            )
+        })?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_LOCALE_TIMEZONE_EMULATION",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            operation = ?params.operation,
+            locale = %result.readback.locale,
+            time_zone = %result.readback.time_zone,
+            sample_number = %result.readback.sample_number,
+            "readback=Emulation.locale_timezone+Runtime.evaluate outcome=intl_state"
+        );
+        Ok(browser_locale_response(session_id, window_hwnd, result))
+    }
+
     #[cfg(not(windows))]
     async fn browser_resize_impl(
         &self,
@@ -743,6 +936,20 @@ impl SynapseService {
         Err(mcp_error(
             error_codes::A11Y_NOT_AVAILABLE,
             "browser_geolocation is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_locale_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _params: &NormalizedBrowserLocaleParams,
+    ) -> Result<BrowserLocaleResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_locale is only available on Windows in this build",
         ))
     }
 }
@@ -957,6 +1164,43 @@ fn validate_browser_geolocation_params(
     })
 }
 
+fn validate_browser_locale_params(
+    params: &BrowserLocaleParams,
+) -> Result<NormalizedBrowserLocaleParams, ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    if params.operation == BrowserLocaleOperation::Reset {
+        reject_locale_field(params.locale.as_ref(), "locale", "reset")?;
+        reject_locale_field(params.timezone_id.as_ref(), "timezone_id", "reset")?;
+        return Ok(NormalizedBrowserLocaleParams {
+            operation: BrowserLocaleOperation::Reset,
+            requested: None,
+        });
+    }
+
+    if params.locale.is_none() && params.timezone_id.is_none() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{LOCALE_TOOL} operation=set requires locale and/or timezone_id"),
+        ));
+    }
+    if let Some(locale) = params.locale.as_deref() {
+        validate_locale_value(locale)?;
+    }
+    if let Some(timezone_id) = params.timezone_id.as_deref() {
+        validate_timezone_value(timezone_id)?;
+    }
+
+    Ok(NormalizedBrowserLocaleParams {
+        operation: BrowserLocaleOperation::Set,
+        requested: Some(BrowserLocaleOverride {
+            locale: params.locale.clone(),
+            timezone_id: params.timezone_id.clone(),
+        }),
+    })
+}
+
 fn validate_dimension(field: &str, value: u32) -> Result<(), ErrorData> {
     if value == 0 || value > synapse_a11y::CDP_DEVICE_METRICS_MAX_DIMENSION {
         return Err(mcp_error(
@@ -1018,6 +1262,64 @@ fn validate_geolocation_optional_finite(field: &str, value: Option<f64>) -> Resu
                 format!("{GEOLOCATION_TOOL} {field} must be finite"),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_locale_value(value: &str) -> Result<(), ErrorData> {
+    if value.trim() != value || value.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{LOCALE_TOOL} locale must be non-empty without surrounding whitespace"),
+        ));
+    }
+    if value.chars().count() > synapse_a11y::CDP_LOCALE_MAX_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{LOCALE_TOOL} locale must be at most {} characters",
+                synapse_a11y::CDP_LOCALE_MAX_CHARS
+            ),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{LOCALE_TOOL} locale must contain only ASCII letters, digits, '_' or '-'"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_timezone_value(value: &str) -> Result<(), ErrorData> {
+    if value.trim() != value || value.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{LOCALE_TOOL} timezone_id must be non-empty without surrounding whitespace"),
+        ));
+    }
+    if value.chars().count() > synapse_a11y::CDP_TIMEZONE_MAX_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{LOCALE_TOOL} timezone_id must be at most {} characters",
+                synapse_a11y::CDP_TIMEZONE_MAX_CHARS
+            ),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '+'))
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{LOCALE_TOOL} timezone_id must contain only ASCII letters, digits, '/', '_', '-' or '+'"
+            ),
+        ));
     }
     Ok(())
 }
@@ -1086,6 +1388,17 @@ fn reject_geolocation_field<T>(
         Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!("{GEOLOCATION_TOOL} {field} is not valid for operation={operation}"),
+        ))
+    }
+}
+
+fn reject_locale_field<T>(value: Option<T>, field: &str, operation: &str) -> Result<(), ErrorData> {
+    if value.is_none() {
+        Ok(())
+    } else {
+        Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{LOCALE_TOOL} {field} is not valid for operation={operation}"),
         ))
     }
 }
@@ -1245,6 +1558,48 @@ fn browser_geolocation_response(
         required_foreground: false,
         source_of_truth:
             "raw CDP Runtime.evaluate navigator.permissions + navigator.geolocation".to_owned(),
+    }
+}
+
+fn browser_locale_response(
+    session_id: &str,
+    window_hwnd: i64,
+    result: synapse_a11y::CdpLocaleTimezoneResult,
+) -> BrowserLocaleResponse {
+    BrowserLocaleResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "raw_cdp".to_owned(),
+        endpoint: result.endpoint,
+        cdp_target_id: result.cdp_target_id,
+        operation: match result.operation.as_str() {
+            "reset" => BrowserLocaleOperation::Reset,
+            _ => BrowserLocaleOperation::Set,
+        },
+        requested: result.requested.map(|requested| BrowserLocaleOverride {
+            locale: requested.locale,
+            timezone_id: requested.timezone_id,
+        }),
+        page_url: result.page_url,
+        page_title: result.page_title,
+        ready_state: result.ready_state,
+        locale: BrowserLocaleReadback {
+            locale: result.readback.locale,
+            calendar: result.readback.calendar,
+            numbering_system: result.readback.numbering_system,
+            time_zone: result.readback.time_zone,
+            sample_number: result.readback.sample_number,
+            sample_date: result.readback.sample_date,
+            date_string: result.readback.date_string,
+            timezone_offset_minutes: result.readback.timezone_offset_minutes,
+        },
+        readback_backend:
+            "Emulation.setLocaleOverride + Emulation.setTimezoneOverride + Runtime.evaluate"
+                .to_owned(),
+        backend_tier_used: "cdp".to_owned(),
+        required_foreground: false,
+        source_of_truth: "raw CDP Runtime.evaluate Intl.DateTimeFormat/NumberFormat and Date"
+            .to_owned(),
     }
 }
 
@@ -1576,6 +1931,98 @@ mod tests {
             Some(37.7749)
         );
         assert!(response.geolocation.error.is_none());
+        assert!(!response.required_foreground);
+    }
+
+    #[test]
+    fn browser_locale_validation_edges() {
+        let both = validate_browser_locale_params(&BrowserLocaleParams {
+            locale: Some("fr_FR".to_owned()),
+            timezone_id: Some("Europe/Paris".to_owned()),
+            ..BrowserLocaleParams::default()
+        })
+        .expect("valid locale/timezone override");
+        let requested = both.requested.expect("requested override");
+        assert_eq!(requested.locale.as_deref(), Some("fr_FR"));
+        assert_eq!(requested.timezone_id.as_deref(), Some("Europe/Paris"));
+
+        assert!(
+            validate_browser_locale_params(&BrowserLocaleParams {
+                ..BrowserLocaleParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_locale_params(&BrowserLocaleParams {
+                locale: Some(" fr_FR ".to_owned()),
+                ..BrowserLocaleParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_locale_params(&BrowserLocaleParams {
+                timezone_id: Some("Europe Paris".to_owned()),
+                ..BrowserLocaleParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_locale_params(&BrowserLocaleParams {
+                operation: BrowserLocaleOperation::Reset,
+                timezone_id: Some("Europe/Paris".to_owned()),
+                ..BrowserLocaleParams::default()
+            })
+            .is_err()
+        );
+
+        let reset = validate_browser_locale_params(&BrowserLocaleParams {
+            operation: BrowserLocaleOperation::Reset,
+            ..BrowserLocaleParams::default()
+        })
+        .expect("valid reset");
+        assert_eq!(reset.operation, BrowserLocaleOperation::Reset);
+        assert!(reset.requested.is_none());
+    }
+
+    #[test]
+    fn browser_locale_response_maps_readback() {
+        let response = browser_locale_response(
+            "session-1",
+            0x2200,
+            synapse_a11y::CdpLocaleTimezoneResult {
+                endpoint: "ws://127.0.0.1/devtools/browser/1".to_owned(),
+                cdp_target_id: "target-1".to_owned(),
+                operation: "set".to_owned(),
+                requested: Some(synapse_a11y::CdpLocaleTimezoneOverride {
+                    locale: Some("fr_FR".to_owned()),
+                    timezone_id: Some("Europe/Paris".to_owned()),
+                }),
+                page_url: "https://example.test/".to_owned(),
+                page_title: "Example".to_owned(),
+                ready_state: "complete".to_owned(),
+                readback: synapse_a11y::CdpLocaleTimezoneReadback {
+                    locale: "fr-FR".to_owned(),
+                    calendar: "gregory".to_owned(),
+                    numbering_system: "latn".to_owned(),
+                    time_zone: "Europe/Paris".to_owned(),
+                    sample_number: "1 234 567,89".to_owned(),
+                    sample_date: "jeudi 2 janvier 2020 a 04:04:05 UTC+1".to_owned(),
+                    date_string: "Thu Jan 02 2020 04:04:05 GMT+0100".to_owned(),
+                    timezone_offset_minutes: -60,
+                },
+            },
+        );
+
+        assert_eq!(response.operation, BrowserLocaleOperation::Set);
+        assert_eq!(response.locale.locale, "fr-FR");
+        assert_eq!(response.locale.time_zone, "Europe/Paris");
+        assert_eq!(
+            response
+                .requested
+                .as_ref()
+                .and_then(|requested| requested.timezone_id.as_deref()),
+            Some("Europe/Paris")
+        );
         assert!(!response.required_foreground);
     }
 }
