@@ -47,7 +47,7 @@ const TARGET_ACT_STATUS_OK: &str = "ok";
 const TARGET_ACT_STATUS_VERIFY_NEEDED: &str = "verify_needed";
 const TARGET_ACT_STATUS_REFUSED: &str = "refused";
 const TARGET_ACT_STATUS_ERROR: &str = "error";
-const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, insert_text, append_text, set_selection, click, type, key, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window";
+const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, insert_text, append_text, set_selection, click, tap, type, key, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window";
 
 #[derive(Clone, Debug, JsonSchema)]
 #[schemars(transparent)]
@@ -205,7 +205,7 @@ pub struct TargetActResponse {
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267/#1299/#1300). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers, by native/UIA role/name/automation_id resolved at action time, or by CSS selector through the safe normal-Chrome bridge; verb=insert_text replaces the current selection/caret text on an observed native editable element_id via exact native readback, or types text at the current caret after an optional target focus/click; verb=append_text appends to an observed native editable element_id via exact native readback, or moves the current caret to the end with Ctrl+End and types text; verb=set_selection sets an exact start/end selection on an observed web/native editable element; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=key presses a raw key/chord such as Ctrl+End or Tab; verb=press presses a named button/link in the session-owned tab, or a raw key/chord when key/keys is supplied; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
+        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267/#1299/#1300). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers, by native/UIA role/name/automation_id resolved at action time, or by CSS selector through the safe normal-Chrome bridge; verb=insert_text replaces the current selection/caret text on an observed native editable element_id via exact native readback, or types text at the current caret after an optional target focus/click; verb=append_text appends to an observed native editable element_id via exact native readback, or moves the current caret to the end with Ctrl+End and types text; verb=set_selection sets an exact start/end selection on an observed web/native editable element; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=tap touch-taps a raw-CDP browser target element or viewport coordinate with Input.dispatchTouchEvent touchStart/touchEnd and never falls back to mouse click; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=key presses a raw key/chord such as Ctrl+End or Tab; verb=press presses a named button/link in the session-owned tab, or a raw key/chord when key/keys is supplied; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
     )]
     pub async fn target_act(
         &self,
@@ -455,6 +455,7 @@ impl SynapseService {
                     }
                 }
             }
+            "tap" => target_act_touch_tap(self, &params, &request_context).await?,
             "type" => {
                 if target_act_has_any_locator(&params) {
                     return Err(mcp_error(
@@ -2462,6 +2463,433 @@ async fn target_act_coordinate_click(
     }
 }
 
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct TargetActTapElement {
+    backend_node_id: i64,
+    target_id: String,
+    resolved_by: String,
+    match_count: Option<usize>,
+    returned_count: Option<usize>,
+    element_id: Option<String>,
+}
+
+#[cfg(windows)]
+async fn target_act_touch_tap(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    let session_id = target_act_session_id(request_context, "tap")?;
+    if params.clicks.is_some() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=tap does not accept clicks; a touch tap is always one touchStart/touchEnd sequence",
+        ));
+    }
+    let coordinate = target_act_coordinate(params)?;
+    if coordinate.is_some() && target_act_has_any_locator(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=tap accepts either viewport x/y coordinates or an element/DOM locator, not both",
+        ));
+    }
+    let request_details = json!({
+        "session_id": &session_id,
+        "verb": "tap",
+        "coordinate_present": coordinate.is_some(),
+        "selector_present": params.selector.as_ref().is_some_and(|value| !value.trim().is_empty()),
+        "element_id_present": params.element_id.as_ref().is_some_and(|value| !value.trim().is_empty()),
+        "role": params.role.as_deref(),
+        "name_present": params.name.as_ref().is_some_and(|value| !value.trim().is_empty()),
+        "requires_raw_cdp": true,
+        "delegated_tool": "synapse_a11y.cdp_touch_tap",
+        "method": "Input.dispatchTouchEvent",
+        "non_touch_fallback": "none; use verb=click explicitly for mouse behavior",
+        "required_foreground": false,
+    });
+    let Some(target) = service.session_target(Some(&session_id))? else {
+        let error = mcp_error(
+            error_codes::TARGET_NOT_SET,
+            "target_act verb=tap requires this MCP session to own a raw-CDP browser target; bind one with cdp_open_tab/set_target first",
+        );
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "synapse_a11y.cdp_touch_tap",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    };
+    if let Err(error) =
+        service.ensure_target_claim_allows_session("target_act", &session_id, &target)
+    {
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "synapse_a11y.cdp_touch_tap",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    }
+    let SessionTarget::Cdp {
+        window_hwnd,
+        cdp_target_id,
+    } = target
+    else {
+        let error = mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            "target_act verb=tap supports raw-CDP browser targets only; native/window targets have no touch semantics, and the explicit non-touch fallback is verb=click",
+        );
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "synapse_a11y.cdp_touch_tap",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    };
+    let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+        let error = mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!(
+                "target_act verb=tap requires a raw CDP debugging endpoint for window 0x{window_hwnd:x}; the normal chrome.tabs bridge cannot dispatch Input.dispatchTouchEvent. Use verb=click for mouse fallback or bind a raw-CDP tab with touch emulation enabled."
+            ),
+        );
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "synapse_a11y.cdp_touch_tap",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    };
+
+    let mut request_details = request_details;
+    if let Some(object) = request_details.as_object_mut() {
+        object.insert("window_hwnd".to_owned(), json!(window_hwnd));
+        object.insert("cdp_target_id".to_owned(), json!(&cdp_target_id));
+    }
+    service.audit_action_started_with_details_for_session(
+        "target_act",
+        &request_details,
+        &session_id,
+    )?;
+    let result =
+        target_act_touch_tap_dispatch(&endpoint, window_hwnd, &cdp_target_id, coordinate, params)
+            .await;
+    service.audit_action_result_for_session("target_act", &result, &session_id)?;
+    match result {
+        Ok(result) => Ok((
+            "synapse_a11y.cdp_touch_tap",
+            true,
+            TARGET_ACT_STATUS_OK,
+            result,
+        )),
+        Err(error) => Ok((
+            "synapse_a11y.cdp_touch_tap",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("synapse_a11y.cdp_touch_tap", error),
+        )),
+    }
+}
+
+#[cfg(not(windows))]
+async fn target_act_touch_tap(
+    _service: &SynapseService,
+    _params: &TargetActParams,
+    _request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    let error = mcp_error(
+        error_codes::ACTION_TARGET_INVALID,
+        "target_act verb=tap requires Windows raw-CDP action support for Input.dispatchTouchEvent; use verb=click explicitly for non-touch mouse behavior",
+    );
+    Ok((
+        "synapse_a11y.cdp_touch_tap",
+        false,
+        target_act_error_status(&error),
+        target_act_error_result("target_act", error),
+    ))
+}
+
+#[cfg(windows)]
+async fn target_act_touch_tap_dispatch(
+    endpoint: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    coordinate: Option<TargetActCoordinate>,
+    params: &TargetActParams,
+) -> Result<Value, ErrorData> {
+    if let Some(coordinate) = coordinate {
+        if coordinate.space != TargetActCoordinateSpace::Viewport {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "target_act verb=tap coordinate input must use coordinate_space=viewport because Input.dispatchTouchEvent consumes viewport CSS pixels; got {}",
+                    coordinate.space.as_bridge_str()
+                ),
+            ));
+        }
+        let point = synapse_a11y::CdpActionPoint {
+            x: f64::from(coordinate.x),
+            y: f64::from(coordinate.y),
+        };
+        let tap = synapse_a11y::cdp_touch_tap_target(endpoint, cdp_target_id, point)
+            .await
+            .map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!(
+                        "target_act tap Input.dispatchTouchEvent failed for target {cdp_target_id:?}: {error}"
+                    ),
+                )
+            })?;
+        let mut result = target_act_result(&tap)?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert("ok".to_owned(), json!(true));
+            object.insert("resolved_by".to_owned(), json!("viewport_coordinate"));
+            object.insert("backend_node_id".to_owned(), Value::Null);
+            object.insert("window_hwnd".to_owned(), json!(window_hwnd));
+            object.insert("readback_backend".to_owned(), json!("raw_cdp"));
+            object.insert("method".to_owned(), json!("Input.dispatchTouchEvent"));
+        }
+        return Ok(result);
+    }
+
+    let element = target_act_tap_element(endpoint, window_hwnd, cdp_target_id, params).await?;
+    let tap = synapse_a11y::cdp_touch_tap_node(
+        endpoint,
+        "",
+        Some(&element.target_id),
+        element.backend_node_id,
+    )
+    .await
+    .map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "target_act tap Input.dispatchTouchEvent failed for backendNodeId {} in target {:?}: {error}",
+                element.backend_node_id, element.target_id
+            ),
+        )
+    })?;
+    let mut result = target_act_result(&tap)?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("ok".to_owned(), json!(true));
+        object.insert("resolved_by".to_owned(), json!(element.resolved_by));
+        object.insert("backend_node_id".to_owned(), json!(element.backend_node_id));
+        object.insert("element_id".to_owned(), json!(element.element_id));
+        object.insert("match_count".to_owned(), json!(element.match_count));
+        object.insert("returned_count".to_owned(), json!(element.returned_count));
+        object.insert("window_hwnd".to_owned(), json!(window_hwnd));
+        object.insert("readback_backend".to_owned(), json!("raw_cdp"));
+        object.insert("method".to_owned(), json!("Input.dispatchTouchEvent"));
+    }
+    Ok(result)
+}
+
+#[cfg(windows)]
+async fn target_act_tap_element(
+    endpoint: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    params: &TargetActParams,
+) -> Result<TargetActTapElement, ErrorData> {
+    if let Some(raw) = params
+        .element_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let raw = raw.trim();
+        if target_act_has_dom_locator(params) {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "target_act verb=tap accepts an element_id or a DOM locator, not both",
+            ));
+        }
+        if let Ok(element_id) = ElementId::parse(raw)
+            && let Some(backend_node_id) = synapse_a11y::cdp_backend_from_element_id(&element_id)
+        {
+            let target_id = synapse_a11y::cdp_target_from_element_id(&element_id)
+                .unwrap_or_else(|| cdp_target_id.to_owned());
+            if !target_id.eq_ignore_ascii_case(cdp_target_id) {
+                return Err(mcp_error(
+                    error_codes::ACTION_TARGET_INVALID,
+                    format!(
+                        "target_act verb=tap element_id belongs to CDP target {target_id:?}, but this session target is {cdp_target_id:?}"
+                    ),
+                ));
+            }
+            return Ok(TargetActTapElement {
+                backend_node_id,
+                target_id,
+                resolved_by: "observed_cdp_element_id".to_owned(),
+                match_count: None,
+                returned_count: None,
+                element_id: Some(element_id.to_string()),
+            });
+        }
+        if target_act_click_element_id_can_be_dom_id(raw) {
+            let selector = target_act_dom_id_selector(raw)?;
+            return target_act_locate_tap_element(
+                endpoint,
+                window_hwnd,
+                cdp_target_id,
+                synapse_a11y::CdpLocateRequest {
+                    engine: synapse_a11y::CdpLocateEngine::Css,
+                    query: selector,
+                    strict: true,
+                    limit: 2,
+                    ..Default::default()
+                },
+                "dom_id",
+            )
+            .await;
+        }
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=tap element_id must be an observed CDP web element id or a plain DOM id; use selector/role/name for DOM locator taps",
+        ));
+    }
+
+    if let Some(selector) = params
+        .selector
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return target_act_locate_tap_element(
+            endpoint,
+            window_hwnd,
+            cdp_target_id,
+            synapse_a11y::CdpLocateRequest {
+                engine: synapse_a11y::CdpLocateEngine::Css,
+                query: selector.to_owned(),
+                strict: true,
+                limit: 2,
+                ..Default::default()
+            },
+            "selector",
+        )
+        .await;
+    }
+
+    if let Some(role) = trimmed_non_empty_string(params.role.as_deref()) {
+        return target_act_locate_tap_element(
+            endpoint,
+            window_hwnd,
+            cdp_target_id,
+            synapse_a11y::CdpLocateRequest {
+                engine: synapse_a11y::CdpLocateEngine::Role,
+                query: role,
+                name: trimmed_non_empty_string(params.name.as_deref()),
+                strict: true,
+                limit: 2,
+                ..Default::default()
+            },
+            "role",
+        )
+        .await;
+    }
+
+    if let Some(name) = trimmed_non_empty_string(params.name.as_deref()) {
+        return target_act_locate_tap_element(
+            endpoint,
+            window_hwnd,
+            cdp_target_id,
+            synapse_a11y::CdpLocateRequest {
+                engine: synapse_a11y::CdpLocateEngine::Text,
+                query: name,
+                strict: true,
+                limit: 2,
+                ..Default::default()
+            },
+            "name_text",
+        )
+        .await;
+    }
+
+    Err(mcp_error(
+        error_codes::TOOL_PARAMS_INVALID,
+        "target_act verb=tap requires viewport x/y, an observed CDP element_id, selector, role, or name",
+    ))
+}
+
+#[cfg(windows)]
+async fn target_act_locate_tap_element(
+    endpoint: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    request: synapse_a11y::CdpLocateRequest,
+    resolved_by: &'static str,
+) -> Result<TargetActTapElement, ErrorData> {
+    let located = synapse_a11y::cdp_locate(endpoint, cdp_target_id, request)
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("target_act tap raw CDP locator resolution failed: {error}"),
+            )
+        })?;
+    let Some(backend_node_id) = located.backend_node_ids.first().copied() else {
+        return Err(mcp_error(
+            error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+            format!(
+                "target_act verb=tap found no element for {} query {:?} in target {:?}",
+                located.engine, located.query, located.target_id
+            ),
+        ));
+    };
+    Ok(TargetActTapElement {
+        backend_node_id,
+        target_id: located.target_id.clone(),
+        resolved_by: resolved_by.to_owned(),
+        match_count: Some(located.match_count),
+        returned_count: Some(located.returned_count),
+        element_id: Some(
+            synapse_a11y::cdp_element_id_for_target(
+                window_hwnd,
+                &located.target_id,
+                backend_node_id,
+            )
+            .to_string(),
+        ),
+    })
+}
+
+fn target_act_dom_id_selector(value: &str) -> Result<String, ErrorData> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=tap DOM element_id must be non-empty visible text",
+        ));
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("[id=\"{escaped}\"]"))
+}
+
 fn target_act_has_any_locator(params: &TargetActParams) -> bool {
     params
         .element_id
@@ -4440,6 +4868,33 @@ mod tests {
             target_act_has_any_locator(&params),
             "mixed selector/coordinate input must be detected before routing"
         );
+    }
+
+    #[test]
+    fn target_act_tap_viewport_coordinate_deserializes() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "tap",
+            "x": 52,
+            "y": 191,
+            "coordinate_space": "viewport"
+        }))
+        .expect("tap coordinate params should deserialize");
+        let coordinate = target_act_coordinate(&params)
+            .expect("coordinate should validate")
+            .expect("coordinate should be present");
+
+        assert_eq!(params.verb.as_str(), "tap");
+        assert_eq!(coordinate.x, 52);
+        assert_eq!(coordinate.y, 191);
+        assert_eq!(coordinate.space, TargetActCoordinateSpace::Viewport);
+    }
+
+    #[test]
+    fn target_act_tap_dom_id_selector_escapes_css_string() {
+        let selector = target_act_dom_id_selector(r#"apply"now\button"#)
+            .expect("visible DOM id should become a selector");
+
+        assert_eq!(selector, r#"[id="apply\"now\\button"]"#);
     }
 
     #[test]

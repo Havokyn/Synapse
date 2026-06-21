@@ -4,7 +4,7 @@
 //! [`crate::CDP_RUNTIME_PREFIX`] sentinel), the action layer routes it here
 //! instead of UIA/`SendInput`. We attach CDP, locate the page that owns the
 //! node, scroll it into view, resolve its live box model, and dispatch via
-//! `Input.dispatchMouseEvent` / `Input.insertText` in **viewport CSS
+//! `Input.dispatchMouseEvent` / `Input.dispatchTouchEvent` / `Input.insertText` in **viewport CSS
 //! coordinates** — which sidesteps the DPI / scroll / window-content-origin
 //! mapping that screen-coordinate clicking would need, and works regardless of
 //! the node's initial scroll position.
@@ -24,7 +24,7 @@ use chromiumoxide::cdp::browser_protocol::dom::{
 };
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
-    InsertTextParams, MouseButton,
+    DispatchTouchEventParams, DispatchTouchEventType, InsertTextParams, MouseButton, TouchPoint,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, EventLoadingFailed, EventLoadingFinished,
@@ -51,7 +51,7 @@ use crate::{A11yError, A11yResult, cdp_dom::rect_from_quad};
 const CDP_INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Where a CDP action landed, in viewport CSS coordinates (diagnostics).
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize)]
 pub struct CdpActionPoint {
     pub x: f64,
     pub y: f64,
@@ -73,6 +73,18 @@ pub struct CdpMouseStrokeResult {
     pub start: CdpActionPoint,
     pub end: CdpActionPoint,
     pub duration_ms: f64,
+}
+
+/// Dispatch summary for a CDP touch tap.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpTouchTapResult {
+    pub target_id: String,
+    pub point: CdpActionPoint,
+    pub dispatched_events: Vec<String>,
+    pub max_touch_points: i64,
+    pub ontouchstart_available: bool,
+    pub touch_emulation_detected: bool,
+    pub non_touch_fallback: String,
 }
 
 /// One CDP wheel event in viewport CSS pixels.
@@ -548,6 +560,29 @@ pub async fn cdp_click_node(
     .await
 }
 
+/// Touch-taps a web node with `Input.dispatchTouchEvent` (`touchStart` then
+/// `touchEnd`) after scrolling it into view. Returns the viewport point tapped.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/node cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if box-model resolution or dispatch fails.
+pub async fn cdp_touch_tap_node(
+    endpoint: &str,
+    page_title_hint: &str,
+    target_id_hint: Option<&str>,
+    backend_node_id: i64,
+) -> A11yResult<CdpTouchTapResult> {
+    with_node_center(
+        endpoint,
+        page_title_hint,
+        target_id_hint,
+        backend_node_id,
+        |page, center| async move { dispatch_touch_tap_on_page(&page, center).await },
+    )
+    .await
+}
+
 /// Focuses a web input node and inserts `text` (as if typed).
 ///
 /// # Errors
@@ -851,6 +886,25 @@ pub async fn cdp_mouse_stroke_target(
         end,
         duration_ms,
     })
+}
+
+/// Touch-taps viewport CSS coordinates in a specific CDP page target without
+/// moving the OS cursor or activating the browser window.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the point is invalid or CDP dispatch fails.
+pub async fn cdp_touch_tap_target(
+    endpoint: &str,
+    target_id: &str,
+    point: CdpActionPoint,
+) -> A11yResult<CdpTouchTapResult> {
+    validate_cdp_action_point(point, "touch tap")?;
+    with_target_page(endpoint, target_id, |page| async move {
+        dispatch_touch_tap_on_page(&page, point).await
+    })
+    .await
 }
 
 /// Reads the target page's active DOM element, value, and selection without
@@ -3359,6 +3413,96 @@ fn mouse_event_with_buttons(
     params
 }
 
+fn touch_event(
+    kind: DispatchTouchEventType,
+    point: Option<CdpActionPoint>,
+) -> A11yResult<DispatchTouchEventParams> {
+    let touch_points = match point {
+        Some(point) => vec![touch_point(point)?],
+        None => Vec::new(),
+    };
+    Ok(DispatchTouchEventParams::new(kind, touch_points))
+}
+
+fn touch_point(point: CdpActionPoint) -> A11yResult<TouchPoint> {
+    validate_cdp_action_point(point, "touch point")?;
+    TouchPoint::builder()
+        .x(point.x)
+        .y(point.y)
+        .id(1.0)
+        .radius_x(1.0)
+        .radius_y(1.0)
+        .force(1.0)
+        .build()
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("build Input.dispatchTouchEvent touch point: {err}"),
+        })
+}
+
+fn validate_cdp_action_point(point: CdpActionPoint, label: &str) -> A11yResult<()> {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "CDP {label} requires finite viewport coordinates, got x={} y={}",
+                point.x, point.y
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CdpTouchInputState {
+    max_touch_points: i64,
+    ontouchstart_available: bool,
+}
+
+async fn dispatch_touch_tap_on_page(
+    page: &chromiumoxide::Page,
+    point: CdpActionPoint,
+) -> A11yResult<CdpTouchTapResult> {
+    validate_cdp_action_point(point, "touch tap")?;
+    let touch_state = read_touch_input_state(page).await.unwrap_or_default();
+    page.execute(touch_event(
+        DispatchTouchEventType::TouchStart,
+        Some(point),
+    )?)
+    .await
+    .map_err(|err| dispatch_err(&err))?;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    page.execute(touch_event(DispatchTouchEventType::TouchEnd, None)?)
+        .await
+        .map_err(|err| dispatch_err(&err))?;
+    Ok(CdpTouchTapResult {
+        target_id: page.target_id().inner().clone(),
+        point,
+        dispatched_events: vec!["touchStart".to_owned(), "touchEnd".to_owned()],
+        max_touch_points: touch_state.max_touch_points,
+        ontouchstart_available: touch_state.ontouchstart_available,
+        touch_emulation_detected: touch_state.max_touch_points > 0
+            || touch_state.ontouchstart_available,
+        non_touch_fallback:
+            "none; use mouse click explicitly when touch semantics are not required".to_owned(),
+    })
+}
+
+async fn read_touch_input_state(page: &chromiumoxide::Page) -> A11yResult<CdpTouchInputState> {
+    page.evaluate_expression(
+        r#"(() => ({
+            max_touch_points: Number(navigator.maxTouchPoints || 0),
+            ontouchstart_available: Boolean("ontouchstart" in window)
+        }))()"#,
+    )
+    .await
+    .map_err(|err| A11yError::CdpAxtreeFailed {
+        detail: format!("Runtime.evaluate touch input state: {err}"),
+    })?
+    .into_value::<CdpTouchInputState>()
+    .map_err(|err| A11yError::CdpAxtreeFailed {
+        detail: format!("Runtime.evaluate touch input state decode: {err}"),
+    })
+}
+
 fn mouse_button_bit(button: &MouseButton) -> i64 {
     match button {
         MouseButton::Left => 1,
@@ -4055,6 +4199,29 @@ mod tests {
         assert_eq!(message["params"]["button"], json!("left"));
         assert_eq!(message["params"]["buttons"], json!(1));
         assert_eq!(message["params"]["clickCount"], json!(1));
+    }
+
+    #[test]
+    fn touch_event_message_uses_cdp_wire_values() {
+        let point = CdpActionPoint { x: 52.0, y: 191.0 };
+        let start = serde_json::to_value(
+            touch_event(DispatchTouchEventType::TouchStart, Some(point))
+                .expect("touch start params"),
+        )
+        .expect("serialize touch start");
+        let end = serde_json::to_value(
+            touch_event(DispatchTouchEventType::TouchEnd, None).expect("touch end params"),
+        )
+        .expect("serialize touch end");
+
+        println!("readback=touch_event start={start} end={end}");
+        assert_eq!(start["type"], json!("touchStart"));
+        assert_eq!(start["touchPoints"][0]["x"], json!(52.0));
+        assert_eq!(start["touchPoints"][0]["y"], json!(191.0));
+        assert_eq!(start["touchPoints"][0]["id"], json!(1.0));
+        assert_eq!(start["touchPoints"][0]["force"], json!(1.0));
+        assert_eq!(end["type"], json!("touchEnd"));
+        assert_eq!(end.get("touchPoints"), None);
     }
 
     #[test]
