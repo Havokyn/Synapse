@@ -14,14 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams as FetchContinueRequestParams, DisableParams as FetchDisableParams,
     EnableParams as FetchEnableParams, EventRequestPaused as FetchEventRequestPaused,
-    FulfillRequestParams as FetchFulfillRequestParams, HeaderEntry as FetchHeaderEntry,
-    RequestId as FetchRequestId, RequestPattern as FetchRequestPattern,
-    RequestStage as FetchRequestStage,
+    FailRequestParams as FetchFailRequestParams, FulfillRequestParams as FetchFulfillRequestParams,
+    HeaderEntry as FetchHeaderEntry, RequestId as FetchRequestId,
+    RequestPattern as FetchRequestPattern, RequestStage as FetchRequestStage,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-    EnableParams as NetworkEnableParams, EventLoadingFailed, EventLoadingFinished,
-    EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, GetResponseBodyParams,
-    Headers, ResourceType as NetworkResourceType, Response,
+    EnableParams as NetworkEnableParams, ErrorReason as NetworkErrorReason, EventLoadingFailed,
+    EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams,
+    GetResponseBodyParams, Headers, ResourceType as NetworkResourceType, Response,
 };
 use chromiumoxide::{Browser, Page};
 use futures_util::StreamExt as _;
@@ -213,6 +213,7 @@ pub struct CdpFetchInterceptionStatus {
     pub paused_count: u64,
     pub continued_count: u64,
     pub fulfilled_count: u64,
+    pub failed_count: u64,
     pub continue_error_count: u64,
     pub last_request_id: Option<String>,
     pub last_url: Option<String>,
@@ -238,10 +239,18 @@ pub struct CdpFetchRouteFulfill {
     pub body_base64: Option<String>,
 }
 
+/// Network error used by a Fetch route abort rule.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CdpFetchRouteAbort {
+    /// CDP Network.ErrorReason, e.g. `BlockedByClient` or `Aborted`.
+    pub error_reason: String,
+}
+
 /// Action for a Fetch route rule.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum CdpFetchRouteAction {
     Fulfill(CdpFetchRouteFulfill),
+    Abort(CdpFetchRouteAbort),
 }
 
 /// Per-target Fetch route rule. Rules are evaluated in insertion order; the
@@ -422,6 +431,7 @@ struct FetchInterceptionCounters {
     paused_count: u64,
     continued_count: u64,
     fulfilled_count: u64,
+    failed_count: u64,
     continue_error_count: u64,
     last_request_id: Option<String>,
     last_url: Option<String>,
@@ -440,6 +450,11 @@ struct FetchInterceptionSlot {
     _browser: Browser,
     handler_task: JoinHandle<()>,
     listener_task: JoinHandle<()>,
+}
+
+enum FetchRouteApplied {
+    Fulfilled,
+    Failed,
 }
 
 impl Drop for FetchInterceptionSlot {
@@ -821,11 +836,19 @@ pub async fn fetch_interception_ensure(
                 Some(rule) => {
                     let route_id = rule.id.clone();
                     match fetch_apply_route(&listener_page, event, &rule).await {
-                        Ok(()) => {
+                        Ok(applied) => {
                             if let Ok(mut counters) = pump_counters.lock() {
                                 counters.last_route_id = Some(route_id);
-                                counters.fulfilled_count =
-                                    counters.fulfilled_count.saturating_add(1);
+                                match applied {
+                                    FetchRouteApplied::Fulfilled => {
+                                        counters.fulfilled_count =
+                                            counters.fulfilled_count.saturating_add(1);
+                                    }
+                                    FetchRouteApplied::Failed => {
+                                        counters.failed_count =
+                                            counters.failed_count.saturating_add(1);
+                                    }
+                                }
                             }
                         }
                         Err(error) => {
@@ -1074,6 +1097,7 @@ fn fetch_interception_status_from_slot(
         paused_count: counters.as_ref().map_or(0, |c| c.paused_count),
         continued_count: counters.as_ref().map_or(0, |c| c.continued_count),
         fulfilled_count: counters.as_ref().map_or(0, |c| c.fulfilled_count),
+        failed_count: counters.as_ref().map_or(0, |c| c.failed_count),
         continue_error_count: counters.as_ref().map_or(0, |c| c.continue_error_count),
         last_request_id: counters.as_ref().and_then(|c| c.last_request_id.clone()),
         last_url: counters.as_ref().and_then(|c| c.last_url.clone()),
@@ -1167,7 +1191,7 @@ async fn fetch_apply_route(
     page: &Page,
     event: &FetchEventRequestPaused,
     rule: &CdpFetchRouteRule,
-) -> A11yResult<()> {
+) -> A11yResult<FetchRouteApplied> {
     match &rule.action {
         CdpFetchRouteAction::Fulfill(fulfill) => {
             let params = fetch_fulfill_params(event.request_id.clone(), fulfill)?;
@@ -1176,7 +1200,16 @@ async fn fetch_apply_route(
                 .map_err(|err| A11yError::CdpAxtreeFailed {
                     detail: format!("Fetch.fulfillRequest route_id={}: {err}", rule.id),
                 })?;
-            Ok(())
+            Ok(FetchRouteApplied::Fulfilled)
+        }
+        CdpFetchRouteAction::Abort(abort) => {
+            let params = fetch_fail_params(event.request_id.clone(), abort)?;
+            page.execute(params)
+                .await
+                .map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("Fetch.failRequest route_id={}: {err}", rule.id),
+                })?;
+            Ok(FetchRouteApplied::Failed)
         }
     }
 }
@@ -1207,6 +1240,29 @@ fn fetch_fulfill_params(
         })
 }
 
+fn fetch_fail_params(
+    request_id: FetchRequestId,
+    abort: &CdpFetchRouteAbort,
+) -> A11yResult<FetchFailRequestParams> {
+    validate_fetch_route_abort(abort)?;
+    let error_reason = abort
+        .error_reason
+        .parse::<NetworkErrorReason>()
+        .map_err(|error| A11yError::CdpAttachFailed {
+            detail: format!(
+                "Fetch route abort error_reason {:?} is invalid: {error}",
+                abort.error_reason
+            ),
+        })?;
+    FetchFailRequestParams::builder()
+        .request_id(request_id)
+        .error_reason(error_reason)
+        .build()
+        .map_err(|detail| A11yError::CdpAttachFailed {
+            detail: format!("Fetch.failRequest route params: {detail}"),
+        })
+}
+
 fn validate_fetch_route_rule(rule: &CdpFetchRouteRule) -> A11yResult<()> {
     normalize_route_id(&rule.id)?;
     if rule.url.trim() != rule.url || rule.url.is_empty() {
@@ -1229,6 +1285,7 @@ fn validate_fetch_route_rule(rule: &CdpFetchRouteRule) -> A11yResult<()> {
     }
     match &rule.action {
         CdpFetchRouteAction::Fulfill(fulfill) => validate_fetch_route_fulfill(fulfill)?,
+        CdpFetchRouteAction::Abort(abort) => validate_fetch_route_abort(abort)?,
     }
     Ok(())
 }
@@ -1259,6 +1316,26 @@ fn validate_fetch_route_fulfill(fulfill: &CdpFetchRouteFulfill) -> A11yResult<()
         }
     }
     Ok(())
+}
+
+fn validate_fetch_route_abort(abort: &CdpFetchRouteAbort) -> A11yResult<()> {
+    if abort.error_reason.trim() != abort.error_reason || abort.error_reason.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail:
+                "Fetch route abort error_reason must be non-empty without surrounding whitespace"
+                    .to_owned(),
+        });
+    }
+    abort
+        .error_reason
+        .parse::<NetworkErrorReason>()
+        .map(|_| ())
+        .map_err(|error| A11yError::CdpAttachFailed {
+            detail: format!(
+                "Fetch route abort error_reason {:?} is invalid: {error}",
+                abort.error_reason
+            ),
+        })
 }
 
 fn normalize_route_id(route_id: &str) -> A11yResult<&str> {
@@ -1749,19 +1826,31 @@ mod tests {
 
         rule.url = "https://example.test/*".to_owned();
         rule.match_kind = CdpFetchRouteMatchKind::Glob;
-        let CdpFetchRouteAction::Fulfill(fulfill) = &mut rule.action;
+        let fulfill = match &mut rule.action {
+            CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
+            CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
+        };
         fulfill.status = 99;
+        assert!(validate_fetch_route_rule(&rule).is_err());
+
+        rule.action = CdpFetchRouteAction::Abort(CdpFetchRouteAbort {
+            error_reason: "NotAReason".to_owned(),
+        });
         assert!(validate_fetch_route_rule(&rule).is_err());
     }
 
     #[test]
     fn fetch_fulfill_params_serializes_status_headers_phrase_and_body() {
-        let CdpFetchRouteAction::Fulfill(fulfill) = fulfill_rule(
+        let fulfill = match fulfill_rule(
             "route-1",
             "https://example.test/*",
             CdpFetchRouteMatchKind::Glob,
         )
-        .action;
+        .action
+        {
+            CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
+            CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
+        };
         let params = fetch_fulfill_params(FetchRequestId::from("intercept-1".to_owned()), &fulfill)
             .expect("fulfill params");
         let value = serde_json::to_value(params).expect("params json");
@@ -1772,5 +1861,20 @@ mod tests {
         assert_eq!(value["body"], "eyJvayI6dHJ1ZX0=");
         assert_eq!(value["responseHeaders"][0]["name"], "content-type");
         assert_eq!(value["responseHeaders"][0]["value"], "application/json");
+    }
+
+    #[test]
+    fn fetch_fail_params_serializes_error_reason() {
+        let params = fetch_fail_params(
+            FetchRequestId::from("intercept-1".to_owned()),
+            &CdpFetchRouteAbort {
+                error_reason: "BlockedByClient".to_owned(),
+            },
+        )
+        .expect("fail params");
+        let value = serde_json::to_value(params).expect("params json");
+
+        assert_eq!(value["requestId"], "intercept-1");
+        assert_eq!(value["errorReason"], "BlockedByClient");
     }
 }

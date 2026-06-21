@@ -265,6 +265,8 @@ pub enum BrowserRouteOperation {
     /// Add or replace a route that fulfills matching requests.
     #[default]
     AddFulfill,
+    /// Add or replace a route that aborts matching requests.
+    AddAbort,
     /// Remove one route by id.
     Remove,
     /// Clear all routes for the target and disable Fetch interception.
@@ -284,6 +286,48 @@ pub enum BrowserRouteMatchKind {
     Regex,
 }
 
+/// CDP network error reason for `browser_route` add_abort (#1085).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRouteErrorReason {
+    Failed,
+    Aborted,
+    TimedOut,
+    AccessDenied,
+    ConnectionClosed,
+    ConnectionReset,
+    ConnectionRefused,
+    ConnectionAborted,
+    ConnectionFailed,
+    NameNotResolved,
+    InternetDisconnected,
+    AddressUnreachable,
+    #[default]
+    BlockedByClient,
+    BlockedByResponse,
+}
+
+impl BrowserRouteErrorReason {
+    fn as_cdp_str(self) -> &'static str {
+        match self {
+            BrowserRouteErrorReason::Failed => "Failed",
+            BrowserRouteErrorReason::Aborted => "Aborted",
+            BrowserRouteErrorReason::TimedOut => "TimedOut",
+            BrowserRouteErrorReason::AccessDenied => "AccessDenied",
+            BrowserRouteErrorReason::ConnectionClosed => "ConnectionClosed",
+            BrowserRouteErrorReason::ConnectionReset => "ConnectionReset",
+            BrowserRouteErrorReason::ConnectionRefused => "ConnectionRefused",
+            BrowserRouteErrorReason::ConnectionAborted => "ConnectionAborted",
+            BrowserRouteErrorReason::ConnectionFailed => "ConnectionFailed",
+            BrowserRouteErrorReason::NameNotResolved => "NameNotResolved",
+            BrowserRouteErrorReason::InternetDisconnected => "InternetDisconnected",
+            BrowserRouteErrorReason::AddressUnreachable => "AddressUnreachable",
+            BrowserRouteErrorReason::BlockedByClient => "BlockedByClient",
+            BrowserRouteErrorReason::BlockedByResponse => "BlockedByResponse",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserRouteHeader {
@@ -292,8 +336,8 @@ pub struct BrowserRouteHeader {
 }
 
 /// Parameters for `browser_route` (#1084): add/list/remove/clear target-scoped
-/// Fetch routes. `add_fulfill` arms the target and fulfills matching requests;
-/// unmatched requests continue by default.
+/// Fetch routes. `add_fulfill` fulfills matching requests; `add_abort` fails
+/// matching requests; unmatched requests continue by default.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserRouteParams {
@@ -335,6 +379,9 @@ pub struct BrowserRouteParams {
     /// Base64-encoded response body. Mutually exclusive with `body`.
     #[serde(default)]
     pub body_base64: Option<String>,
+    /// CDP Network.ErrorReason for `add_abort`. Defaults to `blocked_by_client`.
+    #[serde(default)]
+    pub error_reason: Option<BrowserRouteErrorReason>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -367,7 +414,10 @@ pub struct BrowserRouteRuleResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<String>,
     pub action: String,
-    pub status: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_phrase: Option<String>,
     pub headers: Vec<BrowserRouteHeader>,
@@ -386,6 +436,7 @@ pub struct BrowserRouteFetchStatus {
     pub paused_count: u64,
     pub continued_count: u64,
     pub fulfilled_count: u64,
+    pub failed_count: u64,
     pub continue_error_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_request_id: Option<String>,
@@ -550,7 +601,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Add/list/remove/clear Fetch route rules for the calling session's owned browser tab. The default add_fulfill operation arms target-scoped raw CDP Fetch interception, fulfills matching URL glob/regex requests with status/headers/body, and continues unmatched requests by default. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Add/list/remove/clear Fetch route rules for the calling session's owned browser tab. The default add_fulfill operation arms target-scoped raw CDP Fetch interception and fulfills matching URL glob/regex requests with status/headers/body; add_abort fails matching requests with Fetch.failRequest and a CDP Network.ErrorReason. Unmatched requests continue by default. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
     )]
     pub async fn browser_route(
         &self,
@@ -577,6 +628,7 @@ impl SynapseService {
             "header_count": params.0.headers.len(),
             "body_len": params.0.body.as_deref().map(str::len),
             "body_base64_len": params.0.body_base64.as_deref().map(str::len),
+            "error_reason": params.0.error_reason,
             "required_foreground": false,
             "phase": "target_resolution",
         });
@@ -815,7 +867,7 @@ impl SynapseService {
         let mut route_removed = false;
         let mut cleared_count = 0usize;
         let fetch_status = match route.operation {
-            BrowserRouteOperation::AddFulfill => {
+            BrowserRouteOperation::AddFulfill | BrowserRouteOperation::AddAbort => {
                 let ensure =
                     synapse_a11y::fetch_interception_ensure(&endpoint, cdp_target_id, Vec::new())
                         .await
@@ -998,7 +1050,7 @@ fn validate_browser_route_params(
         validate_cdp_target_id(target_id)?;
     }
     let route_id = match params.operation {
-        BrowserRouteOperation::AddFulfill => params
+        BrowserRouteOperation::AddFulfill | BrowserRouteOperation::AddAbort => params
             .route_id
             .as_deref()
             .map(validate_route_id)
@@ -1031,6 +1083,12 @@ fn validate_browser_route_params(
                 .clone()
                 .expect("add_fulfill always has a generated route id"),
         )?),
+        BrowserRouteOperation::AddAbort => Some(normalize_route_abort(
+            params,
+            route_id
+                .clone()
+                .expect("add_abort always has a generated route id"),
+        )?),
         BrowserRouteOperation::Remove
         | BrowserRouteOperation::Clear
         | BrowserRouteOperation::List => None,
@@ -1046,27 +1104,18 @@ fn normalize_route_fulfill(
     params: &BrowserRouteParams,
     route_id: String,
 ) -> Result<synapse_a11y::CdpFetchRouteRule, ErrorData> {
-    let url = validate_route_url(params.url.as_deref().ok_or_else(|| {
-        mcp_error(
-            error_codes::TOOL_PARAMS_INVALID,
-            format!("{ROUTE_TOOL} url is required for add_fulfill"),
-        )
-    })?)?;
-    if matches!(params.match_kind, BrowserRouteMatchKind::Regex) {
-        regex::Regex::new(&url).map_err(|error| {
-            mcp_error(
-                error_codes::TOOL_PARAMS_INVALID,
-                format!("{ROUTE_TOOL} url regex is invalid: {error}"),
-            )
-        })?;
-    }
-    let resource_type =
-        validate_resource_type_for_tool(ROUTE_TOOL, params.resource_type.as_deref())?;
+    let (url, resource_type) = normalize_route_match(params, "add_fulfill")?;
     let status = params.status.unwrap_or(200);
     if !(100..=599).contains(&status) {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!("{ROUTE_TOOL} status must be 100..=599"),
+        ));
+    }
+    if params.error_reason.is_some() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} error_reason is only valid for add_abort"),
         ));
     }
     let response_phrase = validate_route_response_phrase(params.response_phrase.as_deref())?;
@@ -1087,6 +1136,62 @@ fn normalize_route_fulfill(
             body_base64,
         }),
     })
+}
+
+fn normalize_route_abort(
+    params: &BrowserRouteParams,
+    route_id: String,
+) -> Result<synapse_a11y::CdpFetchRouteRule, ErrorData> {
+    let (url, resource_type) = normalize_route_match(params, "add_abort")?;
+    if params.status.is_some()
+        || params.response_phrase.is_some()
+        || !params.headers.is_empty()
+        || params.body.is_some()
+        || params.body_base64.is_some()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{ROUTE_TOOL} status, response_phrase, headers, body, and body_base64 are only valid for add_fulfill"
+            ),
+        ));
+    }
+    let error_reason = params.error_reason.unwrap_or_default();
+    Ok(synapse_a11y::CdpFetchRouteRule {
+        id: route_id,
+        url,
+        match_kind: match params.match_kind {
+            BrowserRouteMatchKind::Glob => synapse_a11y::CdpFetchRouteMatchKind::Glob,
+            BrowserRouteMatchKind::Regex => synapse_a11y::CdpFetchRouteMatchKind::Regex,
+        },
+        resource_type,
+        action: synapse_a11y::CdpFetchRouteAction::Abort(synapse_a11y::CdpFetchRouteAbort {
+            error_reason: error_reason.as_cdp_str().to_owned(),
+        }),
+    })
+}
+
+fn normalize_route_match(
+    params: &BrowserRouteParams,
+    operation: &str,
+) -> Result<(String, Option<String>), ErrorData> {
+    let url = validate_route_url(params.url.as_deref().ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} url is required for {operation}"),
+        )
+    })?)?;
+    if matches!(params.match_kind, BrowserRouteMatchKind::Regex) {
+        regex::Regex::new(&url).map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("{ROUTE_TOOL} url regex is invalid: {error}"),
+            )
+        })?;
+    }
+    let resource_type =
+        validate_resource_type_for_tool(ROUTE_TOOL, params.resource_type.as_deref())?;
+    Ok((url, resource_type))
 }
 
 fn validate_browser_network_requests_params(
@@ -1701,6 +1806,7 @@ fn browser_route_fetch_status_from_a11y(
             paused_count: status.paused_count,
             continued_count: status.continued_count,
             fulfilled_count: status.fulfilled_count,
+            failed_count: status.failed_count,
             continue_error_count: status.continue_error_count,
             last_request_id: status.last_request_id,
             last_url: status.last_url,
@@ -1716,6 +1822,7 @@ fn browser_route_fetch_status_from_a11y(
             paused_count: 0,
             continued_count: 0,
             fulfilled_count: 0,
+            failed_count: 0,
             continue_error_count: 0,
             last_request_id: None,
             last_url: None,
@@ -1736,7 +1843,8 @@ fn browser_route_rule_to_wire(rule: &synapse_a11y::CdpFetchRouteRule) -> Browser
             },
             resource_type: rule.resource_type.clone(),
             action: "fulfill".to_owned(),
-            status: fulfill.status,
+            status: Some(fulfill.status),
+            error_reason: None,
             response_phrase: fulfill.response_phrase.clone(),
             headers: fulfill
                 .headers
@@ -1750,6 +1858,21 @@ fn browser_route_rule_to_wire(rule: &synapse_a11y::CdpFetchRouteRule) -> Browser
                 .body_base64
                 .as_ref()
                 .map(|body| body.chars().count()),
+        },
+        synapse_a11y::CdpFetchRouteAction::Abort(abort) => BrowserRouteRuleResponse {
+            id: rule.id.clone(),
+            url: rule.url.clone(),
+            match_kind: match rule.match_kind {
+                synapse_a11y::CdpFetchRouteMatchKind::Glob => BrowserRouteMatchKind::Glob,
+                synapse_a11y::CdpFetchRouteMatchKind::Regex => BrowserRouteMatchKind::Regex,
+            },
+            resource_type: rule.resource_type.clone(),
+            action: "abort".to_owned(),
+            status: None,
+            error_reason: Some(abort.error_reason.clone()),
+            response_phrase: None,
+            headers: Vec::new(),
+            body_base64_len_chars: None,
         },
     }
 }
@@ -1993,6 +2116,7 @@ mod tests {
         assert_eq!(route.resource_type.as_deref(), Some("XHR"));
         let fulfill = match route.action {
             synapse_a11y::CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
+            synapse_a11y::CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
         };
         assert_eq!(fulfill.status, 200);
         assert_eq!(fulfill.headers[0].0, "content-type");
@@ -2000,6 +2124,29 @@ mod tests {
             fulfill.body_base64.as_deref(),
             Some(BASE64_STANDARD.encode("{\"ok\":true}").as_str())
         );
+    }
+
+    #[test]
+    fn browser_route_add_abort_validation_defaults_to_blocked_by_client() {
+        let normalized = validate_browser_route_params(&BrowserRouteParams {
+            operation: BrowserRouteOperation::AddAbort,
+            route_id: Some("block-images".to_owned()),
+            url: Some("https://example.test/assets/*".to_owned()),
+            resource_type: Some("Image".to_owned()),
+            ..Default::default()
+        })
+        .expect("valid abort params pass");
+
+        assert_eq!(normalized.operation, BrowserRouteOperation::AddAbort);
+        assert_eq!(normalized.route_id.as_deref(), Some("block-images"));
+        let route = normalized.route.expect("route normalized");
+        assert_eq!(route.id, "block-images");
+        assert_eq!(route.resource_type.as_deref(), Some("Image"));
+        let abort = match route.action {
+            synapse_a11y::CdpFetchRouteAction::Abort(abort) => abort,
+            synapse_a11y::CdpFetchRouteAction::Fulfill(_) => panic!("expected abort rule"),
+        };
+        assert_eq!(abort.error_reason, "BlockedByClient");
     }
 
     #[test]
@@ -2055,6 +2202,21 @@ mod tests {
                 ..Default::default()
             })
             .expect_err("bad header name must be rejected"),
+            validate_browser_route_params(&BrowserRouteParams {
+                operation: BrowserRouteOperation::AddAbort,
+                route_id: Some("abort-with-body".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                body: Some("plain".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("abort rejects fulfill-only fields"),
+            validate_browser_route_params(&BrowserRouteParams {
+                route_id: Some("fulfill-with-reason".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                error_reason: Some(BrowserRouteErrorReason::Aborted),
+                ..Default::default()
+            })
+            .expect_err("fulfill rejects error_reason"),
         ] {
             let code = error
                 .data
@@ -2085,10 +2247,32 @@ mod tests {
         let wire = browser_route_rule_to_wire(&rule);
         assert_eq!(wire.id, "api-users");
         assert_eq!(wire.match_kind, BrowserRouteMatchKind::Regex);
-        assert_eq!(wire.status, 204);
+        assert_eq!(wire.status, Some(204));
+        assert_eq!(wire.error_reason, None);
         assert_eq!(wire.response_phrase.as_deref(), Some("No Content"));
         assert_eq!(wire.headers[0].name, "x-test");
         assert_eq!(wire.body_base64_len_chars, Some(8));
+    }
+
+    #[test]
+    fn browser_route_rule_wire_maps_abort_reason() {
+        let rule = synapse_a11y::CdpFetchRouteRule {
+            id: "block-images".to_owned(),
+            url: "https://example.test/assets/*".to_owned(),
+            match_kind: synapse_a11y::CdpFetchRouteMatchKind::Glob,
+            resource_type: Some("Image".to_owned()),
+            action: synapse_a11y::CdpFetchRouteAction::Abort(synapse_a11y::CdpFetchRouteAbort {
+                error_reason: "BlockedByClient".to_owned(),
+            }),
+        };
+
+        let wire = browser_route_rule_to_wire(&rule);
+        assert_eq!(wire.id, "block-images");
+        assert_eq!(wire.action, "abort");
+        assert_eq!(wire.status, None);
+        assert_eq!(wire.error_reason.as_deref(), Some("BlockedByClient"));
+        assert!(wire.headers.is_empty());
+        assert_eq!(wire.body_base64_len_chars, None);
     }
 
     #[test]
@@ -2104,6 +2288,7 @@ mod tests {
                 paused_count: 3,
                 continued_count: 1,
                 fulfilled_count: 2,
+                failed_count: 1,
                 continue_error_count: 0,
                 last_request_id: Some("fetch-1".to_owned()),
                 last_url: Some("https://example.test/api".to_owned()),
@@ -2117,6 +2302,7 @@ mod tests {
         assert!(wire.newly_armed);
         assert_eq!(wire.route_count, 2);
         assert_eq!(wire.fulfilled_count, 2);
+        assert_eq!(wire.failed_count, 1);
         assert_eq!(wire.last_route_id.as_deref(), Some("api-users"));
     }
 
