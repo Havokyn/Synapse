@@ -233,6 +233,8 @@ export function FleetRow({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const tokenLabel = formatAgentTokens(agent.usage);
+  const costLabel = formatAgentCost(agent.usage);
   return (
     <button
       type="button"
@@ -245,15 +247,50 @@ export function FleetRow({
       <span className="min-w-0">
         <span className="block truncate text-sm font-medium text-primary">{agent.id}</span>
         <span className="mt-1 block truncate text-sm text-secondary">{agent.summary}</span>
-        <span className="mt-2 flex gap-3 text-xs text-muted">
+        <span className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
           <span>{agent.kind}</span>
           <span>{agent.lastSeenMs === undefined ? agent.lifecycle : timeAgo(agent.lastSeenMs)}</span>
           <span>{agent.diffStats.actions} actions</span>
+          {tokenLabel ? <span>{tokenLabel}</span> : null}
+          {costLabel ? <span>{costLabel}</span> : null}
         </span>
       </span>
       <StatusBadge status={agent.status} />
     </button>
   );
+}
+
+export function formatAgentTokens(usage?: AgentSummary["usage"]): string {
+  if (!usage) return "";
+  const total =
+    usage.inputTokens +
+    usage.outputTokens +
+    usage.cacheReadInputTokens +
+    usage.cacheCreationInputTokens +
+    usage.reasoningOutputTokens;
+  return total > 0 ? `${compactNumber(total)} tokens` : "";
+}
+
+export function formatAgentUsageDetail(usage?: AgentSummary["usage"]): string {
+  if (!usage) return "";
+  const parts: string[] = [];
+  if (usage.inputTokens) parts.push(`${compactNumber(usage.inputTokens)} in`);
+  if (usage.outputTokens) parts.push(`${compactNumber(usage.outputTokens)} out`);
+  if (usage.cacheReadInputTokens) parts.push(`${compactNumber(usage.cacheReadInputTokens)} cache-read`);
+  if (usage.cacheCreationInputTokens) parts.push(`${compactNumber(usage.cacheCreationInputTokens)} cache-create`);
+  if (usage.reasoningOutputTokens) parts.push(`${compactNumber(usage.reasoningOutputTokens)} reasoning`);
+  return parts.join(" · ");
+}
+
+export function formatAgentCost(usage?: AgentSummary["usage"]): string {
+  if (!usage || usage.totalCostMicroUsd === undefined) return "";
+  const usd = usage.totalCostMicroUsd / 1_000_000;
+  if (usd > 0 && usd < 0.01) return `$${usd.toFixed(4)}`;
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(usd);
+}
+
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1, notation: "compact" }).format(value);
 }
 
 /// True when a transcript row carries anything a human can read: assistant /
@@ -395,6 +432,8 @@ export function AgentPeek({ agent }: { agent?: AgentSummary }) {
   if (!agent) {
     return <EmptyState title="No agent selected" />;
   }
+  const usageDetail = formatAgentUsageDetail(agent.usage);
+  const costLabel = formatAgentCost(agent.usage);
   return (
     <Tabs defaultValue="timeline">
       <TabsList aria-label="Agent detail surfaces">
@@ -409,6 +448,8 @@ export function AgentPeek({ agent }: { agent?: AgentSummary }) {
           <MetricRow label="Lifecycle" value={agent.lifecycle} />
           <MetricRow label="Actions" value={agent.diffStats.actions} />
           <MetricRow label="Transcripts" value={agent.diffStats.transcripts} />
+          <MetricRow label="Usage" value={usageDetail || "none"} />
+          <MetricRow label="Cost" value={costLabel || "none"} />
           <MetricRow label="Reason" value={agent.reason || "none"} />
         </div>
       </TabsContent>

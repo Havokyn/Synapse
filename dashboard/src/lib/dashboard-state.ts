@@ -72,7 +72,18 @@ export interface AgentSummary {
     transcripts: number;
     actions: number;
   };
+  usage?: AgentUsageSummary;
   raw: unknown;
+}
+
+export interface AgentUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  reasoningOutputTokens: number;
+  totalCostMicroUsd?: number;
+  sourceLine?: number;
 }
 
 export interface AttachedAgentRegistry {
@@ -806,12 +817,7 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
   const unbound = asArray<Record<string, unknown>>(sessionData.unbound_agent_states);
   const transcripts = asArray<Record<string, unknown>>(asRecord(state.agent_transcripts.data).rows);
   const actions = asArray<Record<string, unknown>>(asRecord(state.command_audit.data).rows);
-
-  const transcriptCounts = new Map<string, number>();
-  for (const row of transcripts) {
-    const spawnId = rawText(row.spawn_id);
-    if (spawnId) transcriptCounts.set(spawnId, (transcriptCounts.get(spawnId) ?? 0) + 1);
-  }
+  const transcriptStats = buildTranscriptStats(transcripts);
 
   const actionCounts = new Map<string, number>();
   for (const row of actions) {
@@ -841,6 +847,7 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
         const countsAsLive = Boolean(row.counts_as_live);
         const terminal = terminalStatus(stateName, reason);
         const killable = !terminal && countsAsLive && Boolean(killHandle.available);
+        const stats = findTranscriptStats(transcriptStats, spawnId, sessionId, id);
         return {
           id,
           spawnId: spawnId || undefined,
@@ -849,16 +856,17 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
           kind: rawText(row.kind || "agent"),
           lifecycle: countsAsLive ? "live" : rawText(row.lifecycle || "observed"),
           status: terminal ?? statusFromAgentState(stateName, reason),
-          summary: [processSummary, windowTitle, source].filter(Boolean).join(" / "),
+          summary: stats?.latestSummary || [processSummary, windowTitle, source].filter(Boolean).join(" / "),
           lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
           lastAction: source,
           target: windowTitle,
           reason,
           diffStats: {
             events: 1,
-            transcripts: transcriptCounts.get(spawnId || id) ?? 0,
+            transcripts: stats?.count ?? 0,
             actions: actionCounts.get(sessionId || id) ?? 0
           },
+          usage: stats?.usage,
           raw: row
         } satisfies AgentSummary;
       })
@@ -872,6 +880,7 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     const stateName = rawText(agentState.state || row.lifecycle);
     const lastSeenMs = Number(row.last_seen_ms_ago);
     const lastAction = rawText(row.last_action);
+    const stats = findTranscriptStats(transcriptStats, spawnId, sessionId);
     return {
       id: sessionId,
       spawnId: spawnId || undefined,
@@ -880,16 +889,17 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
       kind: rawText(row.agent_kind || row.client_name || "agent"),
       lifecycle: rawText(row.lifecycle),
       status: statusFromLiveSession(stateName, lastSeenMs, lastAction, rawText(agentState.reason_code)),
-      summary: lastAction || stateName || "session live",
+      summary: stats?.latestSummary || lastAction || stateName || "session live",
       lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
       lastAction,
       target: row.active_target ? rawText(row.active_target) : "",
       reason: rawText(agentState.reason_code),
       diffStats: {
         events: 1,
-        transcripts: transcriptCounts.get(sessionId) ?? 0,
+        transcripts: stats?.count ?? 0,
         actions: actionCounts.get(sessionId) ?? 0
       },
+      usage: stats?.usage,
       raw: row
     } satisfies AgentSummary;
   });
@@ -899,6 +909,7 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     const spawnId = rawText(row.spawn_id);
     const stateName = rawText(row.state);
     const reason = rawText(row.reason_code);
+    const stats = findTranscriptStats(transcriptStats, spawnId, id);
     // Ambient agents (discovered from ~/.claude/projects, not spawned by
     // Synapse) may be live or terminal. Render their server-authoritative
     // lifecycle directly, but keep terminal history out of attention counts.
@@ -914,16 +925,17 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
         kind: `${rawText(row.agent_kind || "claude")} · ambient`,
         lifecycle: stateName || "ambient",
         status: statusFromAgentState(stateName, reason),
-        summary: lastTool ? `tool: ${lastTool}` : stateName || "observed",
+        summary: stats?.latestSummary || (lastTool ? `tool: ${lastTool}` : stateName || "observed"),
         lastSeenMs: Number.isFinite(silentMs) ? silentMs : undefined,
         lastAction: lastTool,
         target: "",
         reason,
         diffStats: {
           events: 1,
-          transcripts: transcriptCounts.get(spawnId) ?? 0,
+          transcripts: stats?.count ?? 0,
           actions: actionCounts.get(id) ?? 0
         },
+        usage: stats?.usage,
         raw: row
       } satisfies AgentSummary;
     }
@@ -935,21 +947,118 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
       kind: rawText(row.agent_kind || "agent"),
       lifecycle: stateName || "unbound",
       status: statusFromHistorical(stateName, reason),
-      summary: [stateName, reason].filter(Boolean).join(" / ") || "historical state",
+      summary: stats?.latestSummary || [stateName, reason].filter(Boolean).join(" / ") || "historical state",
       lastSeenMs: undefined,
       lastAction: "",
       target: "",
       reason,
       diffStats: {
         events: 1,
-        transcripts: transcriptCounts.get(id) ?? 0,
+        transcripts: stats?.count ?? 0,
         actions: actionCounts.get(id) ?? 0
       },
+      usage: stats?.usage,
       raw: row
     } satisfies AgentSummary;
   });
 
   return [...live, ...historical].filter((agent) => agent.id);
+}
+
+interface TranscriptAgentStats {
+  count: number;
+  latestLine: number;
+  latestSummary: string;
+  usage?: AgentUsageSummary;
+  usageLine: number;
+}
+
+function buildTranscriptStats(rows: Record<string, unknown>[]): Map<string, TranscriptAgentStats> {
+  const stats = new Map<string, TranscriptAgentStats>();
+  rows.forEach((row, index) => {
+    const id = rawText(row.spawn_id || row.session_id);
+    if (!id) return;
+    const line = transcriptLineNumber(row, index);
+    const record = asRecord(row.record);
+    const current = stats.get(id) ?? { count: 0, latestLine: -1, latestSummary: "", usageLine: -1 };
+    current.count += 1;
+
+    const summary = transcriptSummary(record);
+    if (summary && line >= current.latestLine) {
+      current.latestLine = line;
+      current.latestSummary = summary;
+    }
+
+    const usage = transcriptUsage(record, line);
+    if (usage && line >= current.usageLine) {
+      current.usageLine = line;
+      current.usage = usage;
+    }
+
+    stats.set(id, current);
+  });
+  return stats;
+}
+
+function findTranscriptStats(stats: Map<string, TranscriptAgentStats>, ...ids: Array<string | undefined>) {
+  for (const id of ids) {
+    if (!id) continue;
+    const match = stats.get(id);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function transcriptLineNumber(row: Record<string, unknown>, fallback: number): number {
+  const line = Number(row.line_no ?? row.line ?? row.sequence ?? row.seq);
+  return Number.isFinite(line) ? line : fallback;
+}
+
+function transcriptSummary(record: Record<string, unknown>): string {
+  const text = rawText(record.content_summary).trim();
+  if (text) return text;
+  const sourceError = rawText(record.source_error || record.parse_error).trim();
+  if (sourceError) return sourceError;
+  const toolCalls = asArray<Record<string, unknown>>(record.tool_calls).map(asRecord);
+  const toolNames = toolCalls.map((call) => rawText(call.tool_name)).filter(Boolean);
+  if (toolNames.length > 0) return `tool: ${toolNames.slice(0, 3).join(", ")}`;
+  return "";
+}
+
+function transcriptUsage(record: Record<string, unknown>, sourceLine: number): AgentUsageSummary | undefined {
+  const usage = asRecord(record.usage);
+  if (Object.keys(usage).length === 0) return undefined;
+  const summary: AgentUsageSummary = {
+    inputTokens: usageNumber(usage.input_tokens),
+    outputTokens: usageNumber(usage.output_tokens),
+    cacheReadInputTokens: usageNumber(usage.cache_read_input_tokens ?? usage.cached_input_tokens),
+    cacheCreationInputTokens: usageNumber(usage.cache_creation_input_tokens),
+    reasoningOutputTokens: usageNumber(usage.reasoning_output_tokens),
+    totalCostMicroUsd: optionalUsageNumber(usage.total_cost_micro_usd),
+    sourceLine
+  };
+  if (
+    summary.inputTokens ||
+    summary.outputTokens ||
+    summary.cacheReadInputTokens ||
+    summary.cacheCreationInputTokens ||
+    summary.reasoningOutputTokens ||
+    summary.totalCostMicroUsd !== undefined
+  ) {
+    return summary;
+  }
+  return undefined;
+}
+
+function usageNumber(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function optionalUsageNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
 
 export function attachedAgentRegistry(state?: DashboardState): AttachedAgentRegistry | null {

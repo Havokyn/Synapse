@@ -143,4 +143,68 @@ describe("buildAgents live session status", () => {
 
     assert.equal(agents[0].status, "stuck");
   });
+
+  test("derives latest transcript summary and usage for fleet rows", () => {
+    const state = dashboardState({
+      sessions: [
+        {
+          session_id: "session-with-spawn",
+          spawn_id: "agent-spawn-usage",
+          lifecycle: "live",
+          agent_kind: "codex",
+          last_seen_ms_ago: 50,
+          last_action: "tools/call:health",
+          agent_state: {
+            state: "live",
+            reason_code: "working"
+          }
+        }
+      ],
+      unbound_agent_states: []
+    });
+    state.agent_transcripts = panel({
+      rows: [
+        {
+          spawn_id: "agent-spawn-usage",
+          line_no: 1,
+          record: {
+            content_summary: "Older turn",
+            usage: {
+              input_tokens: 10,
+              output_tokens: 2
+            }
+          }
+        },
+        {
+          spawn_id: "agent-spawn-usage",
+          line_no: 2,
+          record: {
+            content_summary: "Latest agent_query-style activity summary",
+            usage: {
+              input_tokens: 1000,
+              output_tokens: 200,
+              cache_read_input_tokens: 5000,
+              cache_creation_input_tokens: 300,
+              reasoning_output_tokens: 50,
+              total_cost_micro_usd: 12345
+            }
+          }
+        }
+      ]
+    });
+
+    const [agent] = buildAgents(state);
+
+    assert.equal(agent.summary, "Latest agent_query-style activity summary");
+    assert.equal(agent.diffStats.transcripts, 2);
+    assert.deepEqual(agent.usage, {
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadInputTokens: 5000,
+      cacheCreationInputTokens: 300,
+      reasoningOutputTokens: 50,
+      totalCostMicroUsd: 12345,
+      sourceLine: 2
+    });
+  });
 });

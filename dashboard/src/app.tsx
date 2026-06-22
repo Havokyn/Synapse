@@ -52,6 +52,8 @@ import {
   DataTable,
   EmptyState,
   FleetRow,
+  formatAgentCost,
+  formatAgentTokens,
   MetricRow,
   PageHeader,
   RawValue,
@@ -4004,6 +4006,16 @@ function FleetTable({
           id: "diff",
           header: "Diff",
           cell: ({ row }) => `${row.original.diffStats.actions}/${row.original.diffStats.transcripts}`
+        },
+        {
+          id: "tokens",
+          header: "Tokens",
+          cell: ({ row }) => formatAgentTokens(row.original.usage) || "none"
+        },
+        {
+          id: "cost",
+          header: "Cost",
+          cell: ({ row }) => formatAgentCost(row.original.usage) || "none"
         },
         {
           id: "actions",
