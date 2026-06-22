@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-popup-intent-v4";
-const BRIDGE_BUILD_SHA256 = "c0af1d9073b8b4c7a66996f075bfdc150982675c5990f16cdd9f2dd6bc686154";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-actionability-v11";
+const BRIDGE_BUILD_SHA256 = "0f7195ec4fa4b0a38ee3aba9da66c3f4c97105fa151c2cbbed012352f573de80";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -16,6 +16,9 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "setContent",
   "ariaSnapshot",
   "assertPoll",
+  "locateElements",
+  "inspectElement",
+  "scrollIntoView",
   "clock",
   "pageEvents",
   "domAction",
@@ -314,6 +317,9 @@ function commandRequiresExternalPopupSuppression(kind) {
     "setContent",
     "ariaSnapshot",
     "assertPoll",
+    "locateElements",
+    "inspectElement",
+    "scrollIntoView",
     "clock",
     "pageEvents",
     "navigateTab",
@@ -757,6 +763,12 @@ async function handleCommand(command) {
       result = await handleAriaSnapshot(params);
     } else if (kind === "assertPoll") {
       result = await handleAssertPoll(params);
+    } else if (kind === "locateElements") {
+      result = await handleLocateElements(params);
+    } else if (kind === "inspectElement") {
+      result = await handleInspectElement(params);
+    } else if (kind === "scrollIntoView") {
+      result = await handleScrollIntoView(params);
     } else if (kind === "clock") {
       result = await handleClock(params);
     } else if (kind === "pageEvents") {
@@ -1322,6 +1334,221 @@ async function handleAssertPoll(params) {
   };
 }
 
+async function handleLocateElements(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  const locator = plainObjectOrEmpty(params.locator);
+  const limit = normalizeAssertLimit(params.limit);
+  const root = parseChromeBridgeElementId(locator.root_element_id, selected.tabId, "locateElements");
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: root.frameId === null ? { tabId: selected.tabId, allFrames: true } : { tabId: selected.tabId, frameIds: [root.frameId] },
+      func: runAssertPollInPage,
+      args: [{ locator, limit, rootPath: root.path }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript locateElements(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(results);
+  const resultFrames = frames.filter((frame) => frame.result && typeof frame.result === "object");
+  if (resultFrames.length === 0) {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript locateElements returned no structured result");
+  }
+  const failingFrame = resultFrames.find((frame) => frame.result && frame.result.ok === false);
+  if (failingFrame) {
+    throw bridgeError(
+      String(failingFrame.result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `locateElements failed: ${String(failingFrame.result.error_detail || "")}`
+    );
+  }
+  const matchCount = resultFrames.reduce((sum, frame) => {
+    const value = frame.result?.match_count;
+    return sum + (Number.isSafeInteger(value) && value > 0 ? value : 0);
+  }, 0);
+  if (locator.strict === true && !Number.isSafeInteger(locator.nth) && matchCount > 1) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `strict mode: ${String(locator.engine || "css")} selector ${JSON.stringify(locator.query || "")} resolved to ${matchCount} elements; refine the query, set nth, or disable strict`
+    );
+  }
+  const elementIds = [];
+  for (const frame of resultFrames) {
+    if (!Number.isSafeInteger(frame.frame_id)) {
+      continue;
+    }
+    const localIds = Array.isArray(frame.result?.local_element_ids)
+      ? frame.result.local_element_ids
+      : (frame.result?.local_element_id ? [frame.result.local_element_id] : []);
+    for (const localId of localIds) {
+      if (elementIds.length >= limit) {
+        break;
+      }
+      elementIds.push(chromeBridgeElementId(selected.tabId, frame.frame_id, String(localId)));
+    }
+    if (elementIds.length >= limit) {
+      break;
+    }
+  }
+  const nthSet = Number.isSafeInteger(locator.nth);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    engine: String(locator.engine || "css").toLowerCase(),
+    query: String(locator.query || ""),
+    match_count: matchCount,
+    returned_count: elementIds.length,
+    truncated: !nthSet && matchCount > elementIds.length,
+    element_ids: elementIds,
+    readback_backend: "chrome.scripting.executeScript(debugger-free DOM locator)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleInspectElement(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const parsed = parseChromeBridgeElementId(params.elementId, selected.tabId, "inspectElement");
+  if (parsed.frameId === null || !parsed.path) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "inspectElement requires a normal bridge element id with frame and path");
+  }
+  const maxHtmlBytes = normalizeInspectMaxHtmlBytes(params.maxHtmlBytes);
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, frameIds: [parsed.frameId] },
+      func: runBridgeElementCommandInPage,
+      args: [{ operation: "inspect", elementPath: parsed.path, maxHtmlBytes }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript inspectElement(${selected.tabId}, frame=${parsed.frameId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(injected);
+  const frame = frames.find((item) => item.result) || null;
+  const result = frame?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript inspectElement returned no structured result");
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `inspectElement failed: ${String(result.error_detail || "")}`
+    );
+  }
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    element_id: params.elementId,
+    url: result.url || state.url || "",
+    title: result.title || state.title || "",
+    ready_state: result.ready_state || state.ready_state || "",
+    element: result.element,
+    readback_backend: "chrome.scripting.executeScript(debugger-free DOM inspect + elementFromPoint)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_id: parsed.frameId,
+    frame_document_id: frame?.document_id,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleScrollIntoView(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const parsed = parseChromeBridgeElementId(params.elementId, selected.tabId, "scrollIntoView");
+  if (parsed.frameId === null || !parsed.path) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "scrollIntoView requires a normal bridge element id with frame and path");
+  }
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, frameIds: [parsed.frameId] },
+      func: runBridgeElementCommandInPage,
+      args: [{ operation: "scroll", elementPath: parsed.path }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript scrollIntoView(${selected.tabId}, frame=${parsed.frameId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(injected);
+  const frame = frames.find((item) => item.result) || null;
+  const result = frame?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript scrollIntoView returned no structured result");
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `scrollIntoView failed: ${String(result.error_detail || "")}`
+    );
+  }
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    element_id: params.elementId,
+    url: result.url || state.url || "",
+    title: result.title || state.title || "",
+    ready_state: result.ready_state || state.ready_state || "",
+    scroll: {
+      target_id: state.target_id || selected.target.id,
+      element_id: params.elementId,
+      ...result.scroll
+    },
+    readback_backend: "chrome.scripting.executeScript(debugger-free Element.scrollIntoView + geometry readback)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_id: parsed.frameId,
+    frame_document_id: frame?.document_id,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 async function handleClock(params) {
   const selected = await selectTabTarget(params, { requireTargetId: true });
   const operation = normalizeClockOperation(params.operation);
@@ -1758,6 +1985,8 @@ async function handleDomAction(params) {
   const selected = await selectTabTarget(params, { requireTargetId: true });
   const action = normalizeDomAction(params.action);
   const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const autoWait = Boolean(params.autoWait);
+  const autoWaitTimeoutMs = normalizeDomActionAutoWaitTimeout(params.autoWaitTimeoutMs, autoWait);
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
@@ -1784,6 +2013,8 @@ async function handleDomAction(params) {
     button: normalizeMouseButton(params.button, "domAction"),
     modifiers: normalizeClickModifiers(params.modifiers, "domAction"),
     position: normalizeClickPosition(params, "domAction"),
+    autoWait,
+    autoWaitTimeoutMs,
     maxPageTextChars: MAX_PAGE_TEXT_CHARS
   };
   let injected;
@@ -2900,11 +3131,15 @@ function runAssertPollInPage(request) {
     return resolved;
   }
   const candidates = resolved.elements;
-  const selected = candidates.slice(0, limit)[0] || null;
+  const returned = candidates.slice(0, limit);
+  const selected = returned[0] || null;
   return {
     ok: true,
     match_count: candidates.length,
+    returned_count: returned.length,
     local_element_id: selected ? domPath(selected) : null,
+    local_element_ids: returned.map(domPath),
+    truncated: candidates.length > returned.length && !Number.isSafeInteger(loc.nth),
     element_state: selected ? elementState(selected) : null,
     url: String(location.href || ""),
     title: String(document.title || ""),
@@ -3308,6 +3543,1098 @@ function runAssertPollInPage(request) {
       ...extra
     };
   }
+}
+
+async function runBridgeElementCommandInPage(request) {
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const operation = String(request?.operation || "inspect");
+  const element = elementByPath(request?.elementPath);
+  if (!element) {
+    return fail(ERROR_ELEMENT_NOT_FOUND, `element path ${JSON.stringify(request?.elementPath)} was not found`);
+  }
+  if (operation === "scroll") {
+    return await scrollCommand(element);
+  }
+  return await inspectCommand(element);
+
+  async function inspectCommand(target) {
+    const maxHtmlBytes = Number.isSafeInteger(request?.maxHtmlBytes)
+      ? Math.max(0, Math.min(request.maxHtmlBytes, 2 * 1024 * 1024))
+      : 256 * 1024;
+    const inspection = elementInspection(target, maxHtmlBytes);
+    inspection.actionability = await actionability(target);
+    return {
+      ok: true,
+      element: inspection,
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || "")
+    };
+  }
+
+  async function scrollCommand(target) {
+    const beforeContainer = nearestScrollContainer(target);
+    const before = scrollSnapshot(target, beforeContainer);
+    let scrollPerformed = false;
+    if (!rectFullyInViewport(before.viewport_rect) || !rectFullyInScrollContainer(before.viewport_rect, before.scroll_container)) {
+      try {
+        target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        scrollPerformed = true;
+      } catch (error) {
+        try {
+          target.scrollIntoView();
+          scrollPerformed = true;
+        } catch (_) {
+          return fail("CHROME_DOM_ELEMENT_NOT_ACTIONABLE", `scrollIntoView failed: ${errorMessage(error)}`);
+        }
+      }
+    }
+    if (scrollPerformed) {
+      await twoAnimationFrames();
+    }
+    const afterContainer = nearestScrollContainer(target);
+    const after = scrollSnapshot(target, afterContainer);
+    return {
+      ok: true,
+      scroll: {
+        before_viewport: before.viewport,
+        after_viewport: after.viewport,
+        before_box_model: before.box_model,
+        after_box_model: after.box_model,
+        before_scroll_container: before.scroll_container,
+        after_scroll_container: after.scroll_container,
+        window_scroll_changed:
+          before.viewport.scroll_x !== after.viewport.scroll_x ||
+          before.viewport.scroll_y !== after.viewport.scroll_y,
+        container_scroll_changed: scrollContainerChanged(before.scroll_container, after.scroll_container),
+        scroll_performed: scrollPerformed,
+        node_fully_in_viewport_after: rectFullyInViewport(after.viewport_rect),
+        readback_backend: "Element.scrollIntoView({block:nearest,inline:nearest}) when needed + getBoundingClientRect + scroll container readback"
+      },
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || "")
+    };
+  }
+
+  function elementInspection(target, maxHtmlBytes) {
+    const max = Number.isSafeInteger(maxHtmlBytes) && maxHtmlBytes >= 0 ? maxHtmlBytes : 0;
+    const outer = stringValue(target.outerHTML);
+    const inner = stringValue(target.innerHTML);
+    const innerText = stringValue(target.innerText);
+    const textContent = stringValue(target.textContent);
+    const attributes = {};
+    for (const attr of Array.from(target.attributes || [])) {
+      attributes[attr.name] = String(attr.value ?? "");
+    }
+    const rect = viewportRect(target);
+    const scrollX = Number(window.scrollX || 0);
+    const scrollY = Number(window.scrollY || 0);
+    return {
+      tag_name: stringValue(target.tagName),
+      outer_html: sliceChars(outer, max),
+      inner_html: sliceChars(inner, max),
+      inner_text: sliceChars(innerText, max),
+      text_content: sliceChars(textContent, max),
+      html_truncated:
+        outer.length > max ||
+        inner.length > max ||
+        innerText.length > max ||
+        textContent.length > max,
+      max_html_bytes: max,
+      attributes,
+      input_value: "value" in target ? stringValue(target.value) : null,
+      is_visible: isVisible(target),
+      is_enabled: isEnabled(target),
+      is_checked: isChecked(target),
+      is_editable: isEditable(target),
+      bounding_box: {
+        x: rect.left + scrollX,
+        y: rect.top + scrollY,
+        viewport_x: rect.left,
+        viewport_y: rect.top,
+        width: rect.width,
+        height: rect.height
+      },
+      device_pixel_ratio: Number(window.devicePixelRatio || 1)
+    };
+  }
+
+  async function actionability(target) {
+    const firstBox = boxModel(target);
+    await twoAnimationFrames();
+    const secondBox = boxModel(target);
+    const dom = domState(target);
+    const visible = dom.attached && isVisible(target) && Boolean(firstBox?.content?.width > 0 && firstBox?.content?.height > 0);
+    const runningAnimation = hasRunningAnimation(target);
+    const stable = !runningAnimation && boxesStable(firstBox, secondBox);
+    const hit = hitTest(target, firstBox);
+    const failures = [];
+    if (!dom.attached) {
+      failures.push(failure("attached", "detached", "target element is not connected to the document"));
+    }
+    if (!visible) {
+      failures.push(failure("visible", "not_visible", "target element has no visible rendered box"));
+    }
+    if (!stable) {
+      failures.push(failure(
+        "stable",
+        runningAnimation ? "animation_running" : "box_changed",
+        runningAnimation
+          ? "target element has a running CSS/Web Animation"
+          : "target element box changed between animation-frame samples"
+      ));
+    }
+    if (!dom.enabled) {
+      failures.push(failure("enabled", "disabled", "target element is disabled or aria-disabled"));
+    }
+    if (!hit.receives_events) {
+      failures.push(failure(
+        "receives_events",
+        "obscured",
+        hit.top_node_description
+          ? `action point is covered by ${hit.top_node_description}`
+          : "document.elementFromPoint did not resolve to the target or one of its descendants"
+      ));
+    }
+    const actionReady = dom.attached && visible && stable && dom.enabled && hit.receives_events;
+    return {
+      target_id: "",
+      backend_node_id: 0,
+      attached: dom.attached,
+      visible,
+      stable,
+      enabled: dom.enabled,
+      editable: dom.editable,
+      receives_events: hit.receives_events,
+      action_ready: actionReady,
+      editable_action_ready: actionReady && dom.editable,
+      failure_reasons: failures,
+      box_model: firstBox,
+      second_box_model: secondBox,
+      box_model_error: firstBox ? null : "getBoundingClientRect returned no box",
+      second_box_model_error: secondBox ? null : "second getBoundingClientRect returned no box",
+      dom_state: dom,
+      hit_test: hit
+    };
+  }
+
+  function domState(target) {
+    const style = target instanceof Element ? window.getComputedStyle(target) : null;
+    const rect = viewportRect(target);
+    const disabled = Boolean(target.disabled);
+    const ariaDisabled = String(target.getAttribute?.("aria-disabled") || "").toLowerCase() === "true";
+    const readonly = Boolean(target.readOnly);
+    const enabled = !disabled && !ariaDisabled;
+    return {
+      attached: Boolean(target && target.isConnected),
+      tag_name: tag(target),
+      id: stringValue(target.id),
+      class_name: stringValue(target.className),
+      name_attr: stringValue(target.getAttribute?.("name")),
+      type_attr: stringValue(target.getAttribute?.("type")),
+      display: stringValue(style?.display),
+      visibility: stringValue(style?.visibility),
+      pointer_events: stringValue(style?.pointerEvents),
+      disabled,
+      aria_disabled: ariaDisabled,
+      readonly,
+      enabled,
+      editable: isEditable(target),
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      },
+      node_description: nodeDescription(target)
+    };
+  }
+
+  function boxModel(target) {
+    if (!(target instanceof Element) || typeof target.getBoundingClientRect !== "function") {
+      return null;
+    }
+    const rect = target.getBoundingClientRect();
+    if (!rect) {
+      return null;
+    }
+    const pageRect = {
+      x: Number(rect.left || 0) + Number(window.scrollX || 0),
+      y: Number(rect.top || 0) + Number(window.scrollY || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    };
+    return {
+      content: pageRect,
+      border: { ...pageRect },
+      width: Math.round(pageRect.width),
+      height: Math.round(pageRect.height)
+    };
+  }
+
+  function hitTest(target, model) {
+    if (!model || !model.content || model.content.width <= 0 || model.content.height <= 0) {
+      return {
+        point: null,
+        receives_events: false,
+        top_backend_node_id: null,
+        top_frame_id: null,
+        target_or_descendant_from_point: false,
+        top_node_description: null,
+        error: "no action point"
+      };
+    }
+    const rect = viewportRect(target);
+    const point = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    };
+    let top = null;
+    let error = null;
+    try {
+      top = document.elementFromPoint(point.x, point.y);
+    } catch (caught) {
+      error = errorMessage(caught);
+    }
+    const targetOrDescendant = top instanceof Element && (top === target || target.contains(top));
+    return {
+      point,
+      receives_events: Boolean(targetOrDescendant),
+      top_backend_node_id: null,
+      top_frame_id: null,
+      target_or_descendant_from_point: Boolean(targetOrDescendant),
+      top_node_description: top instanceof Element ? nodeDescription(top) : null,
+      error
+    };
+  }
+
+  function scrollSnapshot(target, scrollContainer) {
+    const rect = viewportRect(target);
+    return {
+      viewport: {
+        inner_width: Math.trunc(Number(window.innerWidth || 0)),
+        inner_height: Math.trunc(Number(window.innerHeight || 0)),
+        scroll_x: Number(window.scrollX || 0),
+        scroll_y: Number(window.scrollY || 0),
+        device_pixel_ratio: Number(window.devicePixelRatio || 1)
+      },
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      },
+      box_model: boxModel(target),
+      scroll_container: scrollContainerSnapshot(scrollContainer)
+    };
+  }
+
+  function nearestScrollContainer(target) {
+    let current = target instanceof Element ? target.parentElement : null;
+    while (current && current !== document.documentElement) {
+      const style = window.getComputedStyle(current);
+      const overflow = `${style.overflow || ""} ${style.overflowX || ""} ${style.overflowY || ""}`;
+      const scrollableStyle = /(auto|scroll|overlay)/i.test(overflow);
+      const scrollableGeometry =
+        current.scrollHeight > current.clientHeight ||
+        current.scrollWidth > current.clientWidth;
+      if (scrollableStyle && scrollableGeometry) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function scrollContainerSnapshot(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    const rect = viewportRect(target);
+    return {
+      element_id: domPath(target),
+      tag_name: tag(target),
+      id: stringValue(target.id),
+      class_name: stringValue(target.className),
+      scroll_top: Number(target.scrollTop || 0),
+      scroll_left: Number(target.scrollLeft || 0),
+      scroll_height: Number(target.scrollHeight || 0),
+      scroll_width: Number(target.scrollWidth || 0),
+      client_height: Number(target.clientHeight || 0),
+      client_width: Number(target.clientWidth || 0),
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      }
+    };
+  }
+
+  function scrollContainerChanged(before, after) {
+    if (!before && !after) {
+      return false;
+    }
+    if (!before || !after) {
+      return true;
+    }
+    return before.scroll_top !== after.scroll_top || before.scroll_left !== after.scroll_left;
+  }
+
+  function rectFullyInViewport(rect) {
+    if (!rect) {
+      return false;
+    }
+    const epsilon = 0.5;
+    return (
+      rect.x >= -epsilon &&
+      rect.y >= -epsilon &&
+      rect.x + rect.width <= Number(window.innerWidth || 0) + epsilon &&
+      rect.y + rect.height <= Number(window.innerHeight || 0) + epsilon
+    );
+  }
+
+  function rectFullyInScrollContainer(rect, scrollContainer) {
+    if (!rect || !scrollContainer || !scrollContainer.viewport_rect) {
+      return true;
+    }
+    const container = scrollContainer.viewport_rect;
+    const epsilon = 0.5;
+    return (
+      rect.x >= container.x - epsilon &&
+      rect.y >= container.y - epsilon &&
+      rect.x + rect.width <= container.x + container.width + epsilon &&
+      rect.y + rect.height <= container.y + container.height + epsilon
+    );
+  }
+
+  function boxesStable(a, b) {
+    if (!a || !b || !a.content || !b.content) {
+      return false;
+    }
+    const epsilon = 0.25;
+    return (
+      Math.abs(a.content.x - b.content.x) <= epsilon &&
+      Math.abs(a.content.y - b.content.y) <= epsilon &&
+      Math.abs(a.content.width - b.content.width) <= epsilon &&
+      Math.abs(a.content.height - b.content.height) <= epsilon
+    );
+  }
+
+  function hasRunningAnimation(target) {
+    if (!(target instanceof Element) || typeof target.getAnimations !== "function") {
+      return false;
+    }
+    try {
+      return target.getAnimations({ subtree: false }).some((animation) => animation.playState === "running");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function elementByPath(path) {
+    if (!path) {
+      return null;
+    }
+    const parts = String(path).split(".").map((part) => Number(part));
+    let current = document.documentElement;
+    if (parts[0] !== 0) {
+      return null;
+    }
+    for (const index of parts.slice(1)) {
+      if (!current || !Number.isSafeInteger(index) || index < 0) {
+        return null;
+      }
+      current = current.children[index] || null;
+    }
+    return current instanceof Element ? current : null;
+  }
+
+  function domPath(target) {
+    const parts = [];
+    let current = target;
+    while (current && current instanceof Element && current !== document.documentElement) {
+      const parent = current.parentElement;
+      if (!parent) {
+        break;
+      }
+      parts.unshift(Array.prototype.indexOf.call(parent.children, current));
+      current = parent;
+    }
+    parts.unshift(0);
+    return parts.join(".");
+  }
+
+  function viewportRect(target) {
+    if (!(target instanceof Element) || typeof target.getBoundingClientRect !== "function") {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    }
+    const rect = target.getBoundingClientRect();
+    return {
+      left: Number(rect.left || 0),
+      top: Number(rect.top || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    };
+  }
+
+  function isVisible(target) {
+    if (!(target instanceof Element) || !target.isConnected) {
+      return false;
+    }
+    const style = window.getComputedStyle(target);
+    if (!style || style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") {
+      return false;
+    }
+    if (Number(style.opacity) === 0) {
+      return false;
+    }
+    const rects = target.getClientRects();
+    return rects && rects.length > 0 && Array.from(rects).some((rect) => rect.width > 0 && rect.height > 0);
+  }
+
+  function isEnabled(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    if (Boolean(target.disabled)) {
+      return false;
+    }
+    return String(target.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+  }
+
+  function isEditable(target) {
+    if (!(target instanceof Element) || !isEnabled(target)) {
+      return false;
+    }
+    const lower = tag(target);
+    if (lower === "textarea") {
+      return !Boolean(target.readOnly);
+    }
+    if (lower === "input") {
+      const type = String(target.getAttribute("type") || "text").toLowerCase();
+      const editableTypes = new Set(["text", "search", "url", "tel", "email", "password", "number", "date", "datetime-local", "month", "time", "week", "color"]);
+      return editableTypes.has(type) && !Boolean(target.readOnly);
+    }
+    return Boolean(
+      target.isContentEditable ||
+        String(target.getAttribute("contenteditable") || "").toLowerCase() === "true" ||
+        String(target.getAttribute("role") || "").toLowerCase() === "textbox"
+    );
+  }
+
+  function isChecked(target) {
+    if (target && "checked" in target) {
+      return Boolean(target.checked);
+    }
+    return String(target?.getAttribute?.("aria-checked") || "").toLowerCase() === "true";
+  }
+
+  function nodeDescription(target) {
+    if (!(target instanceof Element)) {
+      return "";
+    }
+    const id = target.id ? `#${target.id}` : "";
+    const cls = typeof target.className === "string" && target.className.trim()
+      ? `.${target.className.trim().split(/\s+/).slice(0, 3).join(".")}`
+      : "";
+    const name = target.getAttribute("name") ? `[name="${target.getAttribute("name")}"]` : "";
+    return `${tag(target)}${id}${cls}${name}`;
+  }
+
+  function failure(predicate, reason, detail) {
+    return { predicate, reason, detail };
+  }
+
+  function twoAnimationFrames() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) {
+          return;
+        }
+        done = true;
+        resolve();
+      };
+      setTimeout(finish, 100);
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+      }
+    });
+  }
+
+  function sliceChars(value, max) {
+    return Array.from(String(value || "")).slice(0, Math.max(0, max)).join("");
+  }
+
+  function stringValue(value) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+
+  function tag(target) {
+    return stringValue(target?.tagName).toLowerCase();
+  }
+
+  function errorMessage(error) {
+    return error && error.message ? String(error.message) : String(error);
+  }
+
+  function fail(errorCode, errorDetail, extra = {}) {
+    return {
+      ok: false,
+      error_code: errorCode,
+      error_detail: errorDetail,
+      ...extra
+    };
+  }
+}
+
+async function inspectElementInPage(request) {
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const element = bridgeElementByPath(request?.elementPath);
+  if (!element) {
+    return bridgeFail(ERROR_ELEMENT_NOT_FOUND, `element path ${JSON.stringify(request?.elementPath)} was not found`);
+  }
+  const maxHtmlBytes = Number.isSafeInteger(request?.maxHtmlBytes)
+    ? Math.max(0, Math.min(request.maxHtmlBytes, 2 * 1024 * 1024))
+    : 256 * 1024;
+  const inspection = bridgeElementInspection(element, maxHtmlBytes);
+  inspection.actionability = await bridgeActionability(element);
+  return {
+    ok: true,
+    element: inspection,
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || "")
+  };
+}
+
+async function scrollElementIntoViewInPage(request) {
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const element = bridgeElementByPath(request?.elementPath);
+  if (!element) {
+    return bridgeFail(ERROR_ELEMENT_NOT_FOUND, `element path ${JSON.stringify(request?.elementPath)} was not found`);
+  }
+  const beforeContainer = bridgeNearestScrollContainer(element);
+  const before = bridgeScrollSnapshot(element, beforeContainer);
+  let scrollPerformed = false;
+  if (!bridgeRectFullyInViewport(before.viewport_rect) || !bridgeRectFullyInScrollContainer(before.viewport_rect, before.scroll_container)) {
+    try {
+      element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      scrollPerformed = true;
+    } catch (error) {
+      try {
+        element.scrollIntoView();
+        scrollPerformed = true;
+      } catch (_) {
+        return bridgeFail("CHROME_DOM_ELEMENT_NOT_ACTIONABLE", `scrollIntoView failed: ${bridgeErrorMessage(error)}`);
+      }
+    }
+  }
+  if (scrollPerformed) {
+    await bridgeTwoAnimationFrames();
+  }
+  const afterContainer = bridgeNearestScrollContainer(element);
+  const after = bridgeScrollSnapshot(element, afterContainer);
+  return {
+    ok: true,
+    scroll: {
+      before_viewport: before.viewport,
+      after_viewport: after.viewport,
+      before_box_model: before.box_model,
+      after_box_model: after.box_model,
+      before_scroll_container: before.scroll_container,
+      after_scroll_container: after.scroll_container,
+      window_scroll_changed:
+        before.viewport.scroll_x !== after.viewport.scroll_x ||
+        before.viewport.scroll_y !== after.viewport.scroll_y,
+      container_scroll_changed: bridgeScrollContainerChanged(before.scroll_container, after.scroll_container),
+      scroll_performed: scrollPerformed,
+      node_fully_in_viewport_after: bridgeRectFullyInViewport(after.viewport_rect),
+      readback_backend: "Element.scrollIntoView({block:nearest,inline:nearest}) when needed + getBoundingClientRect + scroll container readback"
+    },
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || "")
+  };
+}
+
+function bridgeElementInspection(element, maxHtmlBytes) {
+  const max = Number.isSafeInteger(maxHtmlBytes) && maxHtmlBytes >= 0 ? maxHtmlBytes : 0;
+  const outer = bridgeString(element.outerHTML);
+  const inner = bridgeString(element.innerHTML);
+  const innerText = bridgeString(element.innerText);
+  const textContent = bridgeString(element.textContent);
+  const attributes = {};
+  for (const attr of Array.from(element.attributes || [])) {
+    attributes[attr.name] = String(attr.value ?? "");
+  }
+  const rect = bridgeViewportRect(element);
+  const scrollX = Number(window.scrollX || 0);
+  const scrollY = Number(window.scrollY || 0);
+  return {
+    tag_name: bridgeString(element.tagName),
+    outer_html: bridgeSliceChars(outer, max),
+    inner_html: bridgeSliceChars(inner, max),
+    inner_text: bridgeSliceChars(innerText, max),
+    text_content: bridgeSliceChars(textContent, max),
+    html_truncated:
+      outer.length > max ||
+      inner.length > max ||
+      innerText.length > max ||
+      textContent.length > max,
+    max_html_bytes: max,
+    attributes,
+    input_value: "value" in element ? bridgeString(element.value) : null,
+    is_visible: bridgeIsVisible(element),
+    is_enabled: bridgeIsEnabled(element),
+    is_checked: bridgeIsChecked(element),
+    is_editable: bridgeIsEditable(element),
+    bounding_box: {
+      x: rect.left + scrollX,
+      y: rect.top + scrollY,
+      viewport_x: rect.left,
+      viewport_y: rect.top,
+      width: rect.width,
+      height: rect.height
+    },
+    device_pixel_ratio: Number(window.devicePixelRatio || 1)
+  };
+}
+
+async function bridgeActionability(element) {
+  const firstBox = bridgeBoxModel(element);
+  await bridgeTwoAnimationFrames();
+  const secondBox = bridgeBoxModel(element);
+  const domState = bridgeDomState(element);
+  const visible = domState.attached && bridgeIsVisible(element) && Boolean(firstBox?.content?.width > 0 && firstBox?.content?.height > 0);
+  const runningAnimation = bridgeHasRunningAnimation(element);
+  const stable = !runningAnimation && bridgeBoxesStable(firstBox, secondBox);
+  const hitTest = bridgeHitTest(element, firstBox);
+  const enabled = domState.enabled;
+  const editable = domState.editable;
+  const receivesEvents = hitTest.receives_events;
+  const failureReasons = [];
+  if (!domState.attached) {
+    failureReasons.push(bridgeFailure("attached", "detached", "target element is not connected to the document"));
+  }
+  if (!visible) {
+    failureReasons.push(bridgeFailure("visible", "not_visible", "target element has no visible rendered box"));
+  }
+  if (!stable) {
+    failureReasons.push(bridgeFailure(
+      "stable",
+      runningAnimation ? "animation_running" : "box_changed",
+      runningAnimation
+        ? "target element has a running CSS/Web Animation"
+        : "target element box changed between animation-frame samples"
+    ));
+  }
+  if (!enabled) {
+    failureReasons.push(bridgeFailure("enabled", "disabled", "target element is disabled or aria-disabled"));
+  }
+  if (!receivesEvents) {
+    failureReasons.push(bridgeFailure(
+      "receives_events",
+      "obscured",
+      hitTest.top_node_description
+        ? `action point is covered by ${hitTest.top_node_description}`
+        : "document.elementFromPoint did not resolve to the target or one of its descendants"
+    ));
+  }
+  const actionReady = domState.attached && visible && stable && enabled && receivesEvents;
+  return {
+    target_id: "",
+    backend_node_id: 0,
+    attached: domState.attached,
+    visible,
+    stable,
+    enabled,
+    editable,
+    receives_events: receivesEvents,
+    action_ready: actionReady,
+    editable_action_ready: actionReady && editable,
+    failure_reasons: failureReasons,
+    box_model: firstBox,
+    second_box_model: secondBox,
+    box_model_error: firstBox ? null : "getBoundingClientRect returned no box",
+    second_box_model_error: secondBox ? null : "second getBoundingClientRect returned no box",
+    dom_state: domState,
+    hit_test: hitTest
+  };
+}
+
+function bridgeDomState(element) {
+  const style = element instanceof Element ? window.getComputedStyle(element) : null;
+  const rect = bridgeViewportRect(element);
+  const disabled = Boolean(element.disabled);
+  const ariaDisabled = String(element.getAttribute?.("aria-disabled") || "").toLowerCase() === "true";
+  const readonly = Boolean(element.readOnly);
+  const enabled = !disabled && !ariaDisabled;
+  return {
+    attached: Boolean(element && element.isConnected),
+    tag_name: bridgeTag(element),
+    id: bridgeString(element.id),
+    class_name: bridgeString(element.className),
+    name_attr: bridgeString(element.getAttribute?.("name")),
+    type_attr: bridgeString(element.getAttribute?.("type")),
+    display: bridgeString(style?.display),
+    visibility: bridgeString(style?.visibility),
+    pointer_events: bridgeString(style?.pointerEvents),
+    disabled,
+    aria_disabled: ariaDisabled,
+    readonly,
+    enabled,
+    editable: bridgeIsEditable(element),
+    viewport_rect: {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height
+    },
+    node_description: bridgeNodeDescription(element)
+  };
+}
+
+function bridgeBoxModel(element) {
+  if (!(element instanceof Element) || typeof element.getBoundingClientRect !== "function") {
+    return null;
+  }
+  const rect = element.getBoundingClientRect();
+  if (!rect) {
+    return null;
+  }
+  const scrollX = Number(window.scrollX || 0);
+  const scrollY = Number(window.scrollY || 0);
+  const pageRect = {
+    x: Number(rect.left || 0) + scrollX,
+    y: Number(rect.top || 0) + scrollY,
+    width: Number(rect.width || 0),
+    height: Number(rect.height || 0)
+  };
+  return {
+    content: pageRect,
+    border: { ...pageRect },
+    width: Math.round(pageRect.width),
+    height: Math.round(pageRect.height)
+  };
+}
+
+function bridgeHitTest(element, boxModel) {
+  if (!boxModel || !boxModel.content || boxModel.content.width <= 0 || boxModel.content.height <= 0) {
+    return {
+      point: null,
+      receives_events: false,
+      top_backend_node_id: null,
+      top_frame_id: null,
+      target_or_descendant_from_point: false,
+      top_node_description: null,
+      error: "no action point"
+    };
+  }
+  const viewportRect = bridgeViewportRect(element);
+  const point = {
+    x: viewportRect.left + viewportRect.width / 2,
+    y: viewportRect.top + viewportRect.height / 2
+  };
+  let top = null;
+  let error = null;
+  try {
+    top = document.elementFromPoint(point.x, point.y);
+  } catch (caught) {
+    error = bridgeErrorMessage(caught);
+  }
+  const targetOrDescendant = top instanceof Element && (top === element || element.contains(top));
+  return {
+    point,
+    receives_events: Boolean(targetOrDescendant),
+    top_backend_node_id: null,
+    top_frame_id: null,
+    target_or_descendant_from_point: Boolean(targetOrDescendant),
+    top_node_description: top instanceof Element ? bridgeNodeDescription(top) : null,
+    error
+  };
+}
+
+function bridgeScrollSnapshot(element, scrollContainer) {
+  const viewportRect = bridgeViewportRect(element);
+  return {
+    viewport: {
+      inner_width: Math.trunc(Number(window.innerWidth || 0)),
+      inner_height: Math.trunc(Number(window.innerHeight || 0)),
+      scroll_x: Number(window.scrollX || 0),
+      scroll_y: Number(window.scrollY || 0),
+      device_pixel_ratio: Number(window.devicePixelRatio || 1)
+    },
+    viewport_rect: {
+      x: viewportRect.left,
+      y: viewportRect.top,
+      width: viewportRect.width,
+      height: viewportRect.height
+    },
+    box_model: bridgeBoxModel(element),
+    scroll_container: bridgeScrollContainerSnapshot(scrollContainer)
+  };
+}
+
+function bridgeNearestScrollContainer(element) {
+  let current = element instanceof Element ? element.parentElement : null;
+  while (current && current !== document.documentElement) {
+    const style = window.getComputedStyle(current);
+    const overflow = `${style.overflow || ""} ${style.overflowX || ""} ${style.overflowY || ""}`;
+    const scrollableStyle = /(auto|scroll|overlay)/i.test(overflow);
+    const scrollableGeometry =
+      current.scrollHeight > current.clientHeight ||
+      current.scrollWidth > current.clientWidth;
+    if (scrollableStyle && scrollableGeometry) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function bridgeScrollContainerSnapshot(element) {
+  if (!(element instanceof Element)) {
+    return null;
+  }
+  const rect = bridgeViewportRect(element);
+  return {
+    element_id: bridgeDomPath(element),
+    tag_name: bridgeTag(element),
+    id: bridgeString(element.id),
+    class_name: bridgeString(element.className),
+    scroll_top: Number(element.scrollTop || 0),
+    scroll_left: Number(element.scrollLeft || 0),
+    scroll_height: Number(element.scrollHeight || 0),
+    scroll_width: Number(element.scrollWidth || 0),
+    client_height: Number(element.clientHeight || 0),
+    client_width: Number(element.clientWidth || 0),
+    viewport_rect: {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height
+    }
+  };
+}
+
+function bridgeScrollContainerChanged(before, after) {
+  if (!before && !after) {
+    return false;
+  }
+  if (!before || !after) {
+    return true;
+  }
+  return before.scroll_top !== after.scroll_top || before.scroll_left !== after.scroll_left;
+}
+
+function bridgeRectFullyInViewport(rect) {
+  if (!rect) {
+    return false;
+  }
+  const epsilon = 0.5;
+  return (
+    rect.x >= -epsilon &&
+    rect.y >= -epsilon &&
+    rect.x + rect.width <= Number(window.innerWidth || 0) + epsilon &&
+    rect.y + rect.height <= Number(window.innerHeight || 0) + epsilon
+  );
+}
+
+function bridgeRectFullyInScrollContainer(rect, scrollContainer) {
+  if (!rect || !scrollContainer || !scrollContainer.viewport_rect) {
+    return true;
+  }
+  const container = scrollContainer.viewport_rect;
+  const epsilon = 0.5;
+  return (
+    rect.x >= container.x - epsilon &&
+    rect.y >= container.y - epsilon &&
+    rect.x + rect.width <= container.x + container.width + epsilon &&
+    rect.y + rect.height <= container.y + container.height + epsilon
+  );
+}
+
+function bridgeBoxesStable(a, b) {
+  if (!a || !b || !a.content || !b.content) {
+    return false;
+  }
+  const epsilon = 0.25;
+  return (
+    Math.abs(a.content.x - b.content.x) <= epsilon &&
+    Math.abs(a.content.y - b.content.y) <= epsilon &&
+    Math.abs(a.content.width - b.content.width) <= epsilon &&
+    Math.abs(a.content.height - b.content.height) <= epsilon
+  );
+}
+
+function bridgeHasRunningAnimation(element) {
+  if (!(element instanceof Element) || typeof element.getAnimations !== "function") {
+    return false;
+  }
+  try {
+    return element.getAnimations({ subtree: false }).some((animation) => animation.playState === "running");
+  } catch (_) {
+    return false;
+  }
+}
+
+function bridgeElementByPath(path) {
+  if (!path) {
+    return null;
+  }
+  const parts = String(path).split(".").map((part) => Number(part));
+  let current = document.documentElement;
+  if (parts[0] !== 0) {
+    return null;
+  }
+  for (const index of parts.slice(1)) {
+    if (!current || !Number.isSafeInteger(index) || index < 0) {
+      return null;
+    }
+    current = current.children[index] || null;
+  }
+  return current instanceof Element ? current : null;
+}
+
+function bridgeDomPath(element) {
+  const parts = [];
+  let current = element;
+  while (current && current instanceof Element && current !== document.documentElement) {
+    const parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+    parts.unshift(Array.prototype.indexOf.call(parent.children, current));
+    current = parent;
+  }
+  parts.unshift(0);
+  return parts.join(".");
+}
+
+function bridgeViewportRect(element) {
+  if (!(element instanceof Element) || typeof element.getBoundingClientRect !== "function") {
+    return { left: 0, top: 0, width: 0, height: 0 };
+  }
+  const rect = element.getBoundingClientRect();
+  return {
+    left: Number(rect.left || 0),
+    top: Number(rect.top || 0),
+    width: Number(rect.width || 0),
+    height: Number(rect.height || 0)
+  };
+}
+
+function bridgeIsVisible(element) {
+  if (!(element instanceof Element) || !element.isConnected) {
+    return false;
+  }
+  const style = window.getComputedStyle(element);
+  if (!style || style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") {
+    return false;
+  }
+  if (Number(style.opacity) === 0) {
+    return false;
+  }
+  const rects = element.getClientRects();
+  return rects && rects.length > 0 && Array.from(rects).some((rect) => rect.width > 0 && rect.height > 0);
+}
+
+function bridgeIsEnabled(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+  if (Boolean(element.disabled)) {
+    return false;
+  }
+  return String(element.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+}
+
+function bridgeIsEditable(element) {
+  if (!(element instanceof Element) || !bridgeIsEnabled(element)) {
+    return false;
+  }
+  const lower = bridgeTag(element);
+  if (lower === "textarea") {
+    return !Boolean(element.readOnly);
+  }
+  if (lower === "input") {
+    const type = String(element.getAttribute("type") || "text").toLowerCase();
+    const editableTypes = new Set(["text", "search", "url", "tel", "email", "password", "number", "date", "datetime-local", "month", "time", "week", "color"]);
+    return editableTypes.has(type) && !Boolean(element.readOnly);
+  }
+  return Boolean(
+    element.isContentEditable ||
+      String(element.getAttribute("contenteditable") || "").toLowerCase() === "true" ||
+      String(element.getAttribute("role") || "").toLowerCase() === "textbox"
+  );
+}
+
+function bridgeIsChecked(element) {
+  if (element && "checked" in element) {
+    return Boolean(element.checked);
+  }
+  return String(element?.getAttribute?.("aria-checked") || "").toLowerCase() === "true";
+}
+
+function bridgeNodeDescription(element) {
+  if (!(element instanceof Element)) {
+    return "";
+  }
+  const id = element.id ? `#${element.id}` : "";
+  const cls = typeof element.className === "string" && element.className.trim()
+    ? `.${element.className.trim().split(/\s+/).slice(0, 3).join(".")}`
+    : "";
+  const name = element.getAttribute("name") ? `[name="${element.getAttribute("name")}"]` : "";
+  return `${bridgeTag(element)}${id}${cls}${name}`;
+}
+
+function bridgeFailure(predicate, reason, detail) {
+  return { predicate, reason, detail };
+}
+
+function bridgeTwoAnimationFrames() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      resolve();
+    };
+    setTimeout(finish, 100);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    }
+  });
+}
+
+function bridgeSliceChars(value, max) {
+  return Array.from(String(value || "")).slice(0, Math.max(0, max)).join("");
+}
+
+function bridgeString(value) {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function bridgeTag(element) {
+  return bridgeString(element?.tagName).toLowerCase();
+}
+
+function bridgeErrorMessage(error) {
+  return error && error.message ? String(error.message) : String(error);
+}
+
+function bridgeFail(errorCode, errorDetail, extra = {}) {
+  return {
+    ok: false,
+    error_code: errorCode,
+    error_detail: errorDetail,
+    ...extra
+  };
 }
 
 function runAriaSnapshotInPage(request) {
@@ -4818,6 +6145,17 @@ function normalizeAssertLimit(value) {
   return number;
 }
 
+function normalizeInspectMaxHtmlBytes(value) {
+  if (value === undefined || value === null) {
+    return 256 * 1024;
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0 || number > 2 * 1024 * 1024) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "inspectElement maxHtmlBytes must be an integer from 0 through 2097152");
+  }
+  return number;
+}
+
 function parseChromeBridgeElementId(value, expectedTabId, commandName) {
   const raw = stringOrNull(value);
   if (!raw) {
@@ -5074,13 +6412,14 @@ function normalizeCoordinateSpace(value) {
   );
 }
 
-function performDomActionInPage(request) {
+async function performDomActionInPage(request) {
   const ERROR_SELECTOR_INVALID = "CHROME_DOM_SELECTOR_INVALID";
   const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
   const ERROR_ELEMENT_AMBIGUOUS = "CHROME_DOM_ELEMENT_AMBIGUOUS";
   const ERROR_ELEMENT_NOT_ACTIONABLE = "CHROME_DOM_ELEMENT_NOT_ACTIONABLE";
   const ERROR_ACTION_UNSUPPORTED = "CHROME_DOM_ACTION_UNSUPPORTED";
   const ERROR_POSTCONDITION_FAILED = "CHROME_DOM_ACTION_POSTCONDITION_FAILED";
+  const ERROR_BROWSER_WAIT_TIMEOUT = "BROWSER_WAIT_TIMEOUT";
 
   const action = String(request?.action || "").trim().toLowerCase();
   const locator = {
@@ -5103,6 +6442,10 @@ function performDomActionInPage(request) {
   const eventType = stringOrEmpty(request?.eventType);
   const eventInit = plainObjectOrEmpty(request?.eventInit);
   const resolveOnly = Boolean(request?.resolveOnly);
+  const autoWait = Boolean(request?.autoWait);
+  const autoWaitTimeoutMs = Number.isSafeInteger(request?.autoWaitTimeoutMs)
+    ? Math.max(50, Math.min(request.autoWaitTimeoutMs, 30000))
+    : 2000;
   const maxPageTextChars = Number.isSafeInteger(request?.maxPageTextChars)
     ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
     : 4096;
@@ -5124,14 +6467,15 @@ function performDomActionInPage(request) {
   const beforeElement = elementSummary(element);
 
   const bypassActionability = ["dispatch_event", "focus", "blur", "select_text"].includes(action);
-  if (!bypassActionability && !isElementEnabled(element)) {
+  const deferActionability = autoWait && !bypassActionability;
+  if (!bypassActionability && !deferActionability && !isElementEnabled(element)) {
     return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "resolved element is disabled or aria-disabled", {
       matched_count: resolved.matchedCount,
       resolved_by: resolved.resolvedBy,
       before_element: beforeElement
     });
   }
-  if (!bypassActionability && !isElementVisible(element) && action !== "submit") {
+  if (!bypassActionability && !deferActionability && !isElementVisible(element) && action !== "submit") {
     return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "resolved element is not visible/actionable", {
       matched_count: resolved.matchedCount,
       resolved_by: resolved.resolvedBy,
@@ -5146,6 +6490,7 @@ function performDomActionInPage(request) {
       resolved_by: resolved.resolvedBy,
       before_element: beforeElement,
       resolve_only: true,
+      auto_wait: autoWait,
       in_page_before_url: beforeUrl,
       in_page_after_url: String(location.href || ""),
       in_page_title: String(document.title || ""),
@@ -5157,6 +6502,42 @@ function performDomActionInPage(request) {
 
   const eventsDispatched = [];
   let actionReadback = {};
+  let autoWaitReadback = null;
+  if (autoWait && !bypassActionability) {
+    autoWaitReadback = await waitForDomActionability(element, action, autoWaitTimeoutMs);
+    if (!autoWaitReadback.ok) {
+      return fail(
+        ERROR_BROWSER_WAIT_TIMEOUT,
+        `domAction ${action} auto_wait timed out after ${autoWaitTimeoutMs} ms waiting for ${autoWaitReadback.requirement}; unmet predicates: ${autoWaitReadback.predicate_detail}`,
+        {
+          matched_count: resolved.matchedCount,
+          resolved_by: resolved.resolvedBy,
+          before_element: beforeElement,
+          auto_wait: true,
+          auto_wait_readback: autoWaitReadback,
+          source_of_truth: "Element.scrollIntoView({block:nearest,inline:nearest}) + getBoundingClientRect + elementFromPoint"
+        }
+      );
+    }
+  }
+  if (!bypassActionability && !isElementEnabled(element)) {
+    return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "resolved element is disabled or aria-disabled", {
+      matched_count: resolved.matchedCount,
+      resolved_by: resolved.resolvedBy,
+      before_element: beforeElement,
+      auto_wait: autoWait,
+      auto_wait_readback: autoWaitReadback
+    });
+  }
+  if (!bypassActionability && !isElementVisible(element) && action !== "submit") {
+    return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "resolved element is not visible/actionable", {
+      matched_count: resolved.matchedCount,
+      resolved_by: resolved.resolvedBy,
+      before_element: beforeElement,
+      auto_wait: autoWait,
+      auto_wait_readback: autoWaitReadback
+    });
+  }
   try {
     if (action === "click" || action === "press" || action === "dblclick") {
       actionReadback = performClick(element, action, clicks, clickOptions, eventsDispatched);
@@ -5184,6 +6565,8 @@ function performDomActionInPage(request) {
       matched_count: resolved.matchedCount,
       resolved_by: resolved.resolvedBy,
       before_element: beforeElement,
+      auto_wait: autoWait,
+      auto_wait_readback: autoWaitReadback,
       events_dispatched: eventsDispatched
     });
   }
@@ -5197,6 +6580,8 @@ function performDomActionInPage(request) {
     resolved_by: resolved.resolvedBy,
     before_element: beforeElement,
     after_element: afterElement,
+    auto_wait: autoWait,
+    auto_wait_readback: autoWaitReadback,
     events_dispatched: eventsDispatched,
     action_readback: actionReadback,
     in_page_before_url: beforeUrl,
@@ -5206,6 +6591,392 @@ function performDomActionInPage(request) {
     in_page_before_text: beforePageText,
     in_page_after_text: afterPageText
   };
+
+  async function waitForDomActionability(element, actionName, timeoutMs) {
+    const started = Date.now();
+    const deadline = started + timeoutMs;
+    const requirement = actionName === "clear" ? "editable_action_ready" : "action_ready";
+    let pollCount = 0;
+    let lastActionability = null;
+    let lastScroll = null;
+    while (true) {
+      lastScroll = await scrollIntoViewIfNeededSnapshot(element);
+      lastActionability = await domActionabilitySnapshot(element);
+      pollCount += 1;
+      const ready = requirement === "editable_action_ready"
+        ? lastActionability.editable_action_ready
+        : lastActionability.action_ready;
+      const unmetPredicates = actionabilityRelevantFailures(lastActionability, requirement);
+      const predicateDetail = unmetPredicates.length
+        ? unmetPredicates.map((failure) => failure.predicate).join(",")
+        : "unknown";
+      const readback = {
+        ok: Boolean(ready),
+        requirement,
+        timeout_ms: timeoutMs,
+        poll_count: pollCount,
+        elapsed_ms: Math.max(0, Date.now() - started),
+        unmet_predicates: unmetPredicates,
+        predicate_detail: predicateDetail,
+        last_actionability: lastActionability,
+        scroll: lastScroll
+      };
+      if (ready) {
+        return readback;
+      }
+      const now = Date.now();
+      if (now >= deadline) {
+        return readback;
+      }
+      await delay(Math.min(50, Math.max(0, deadline - now)));
+    }
+  }
+
+  async function domActionabilitySnapshot(element) {
+    const firstBox = domBoxModel(element);
+    await twoAnimationFramesLocal();
+    const secondBox = domBoxModel(element);
+    const attached = Boolean(element && element.isConnected);
+    const visible = attached && isElementVisible(element) && Boolean(firstBox?.content?.width > 0 && firstBox?.content?.height > 0);
+    const enabled = isElementEnabled(element);
+    const editable = Boolean(editableKind(element)) && !Boolean(element.disabled) && !Boolean(element.readOnly);
+    const runningAnimation = hasRunningAnimationLocal(element);
+    const stable = !runningAnimation && domBoxesStable(firstBox, secondBox);
+    const hitTest = domHitTest(element, firstBox);
+    const receivesEvents = hitTest.receives_events;
+    const failureReasons = [];
+    if (!attached) {
+      failureReasons.push(domFailure("attached", "detached", "target element is not connected to the document"));
+    }
+    if (!visible) {
+      failureReasons.push(domFailure("visible", "not_visible", "target element has no visible rendered box"));
+    }
+    if (!stable) {
+      failureReasons.push(domFailure(
+        "stable",
+        runningAnimation ? "animation_running" : "box_changed",
+        runningAnimation
+          ? "target element has a running CSS/Web Animation"
+          : "target element box changed between animation-frame samples"
+      ));
+    }
+    if (!enabled) {
+      failureReasons.push(domFailure("enabled", "disabled", "target element is disabled or aria-disabled"));
+    }
+    if (!editable && editableKind(element) && Boolean(element.readOnly)) {
+      failureReasons.push(domFailure("editable", "readonly", "target editable element is readonly"));
+    }
+    if (!receivesEvents) {
+      failureReasons.push(domFailure(
+        "receives_events",
+        "obscured",
+        hitTest.top_node_description
+          ? `action point is covered by ${hitTest.top_node_description}`
+          : "document.elementFromPoint did not resolve to the target or one of its descendants"
+      ));
+    }
+    const actionReady = attached && visible && stable && enabled && receivesEvents;
+    return {
+      attached,
+      visible,
+      stable,
+      enabled,
+      editable,
+      receives_events: receivesEvents,
+      action_ready: actionReady,
+      editable_action_ready: actionReady && editable,
+      failure_reasons: failureReasons,
+      box_model: firstBox,
+      second_box_model: secondBox,
+      hit_test: hitTest
+    };
+  }
+
+  async function scrollIntoViewIfNeededSnapshot(element) {
+    const beforeContainer = nearestScrollContainerLocal(element);
+    const before = domScrollSnapshot(element, beforeContainer);
+    let scrollPerformed = false;
+    if (!rectFullyInViewportLocal(before.viewport_rect) || !rectFullyInScrollContainerLocal(before.viewport_rect, before.scroll_container)) {
+      try {
+        element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        scrollPerformed = true;
+      } catch (_) {
+        try {
+          element.scrollIntoView();
+          scrollPerformed = true;
+        } catch (error) {
+          return {
+            ok: false,
+            error: errorMessageLocal(error),
+            before_viewport: before.viewport,
+            before_scroll_container: before.scroll_container,
+            scroll_performed: false
+          };
+        }
+      }
+    }
+    if (scrollPerformed) {
+      await twoAnimationFramesLocal();
+    }
+    const afterContainer = nearestScrollContainerLocal(element);
+    const after = domScrollSnapshot(element, afterContainer);
+    return {
+      ok: true,
+      before_viewport: before.viewport,
+      after_viewport: after.viewport,
+      before_box_model: before.box_model,
+      after_box_model: after.box_model,
+      before_scroll_container: before.scroll_container,
+      after_scroll_container: after.scroll_container,
+      window_scroll_changed:
+        before.viewport.scroll_x !== after.viewport.scroll_x ||
+        before.viewport.scroll_y !== after.viewport.scroll_y,
+      container_scroll_changed: scrollContainerChangedLocal(before.scroll_container, after.scroll_container),
+      node_fully_in_viewport_after: rectFullyInViewportLocal(after.viewport_rect),
+      scroll_performed: scrollPerformed
+    };
+  }
+
+  function actionabilityRelevantFailures(actionability, requirement) {
+    const includesEditable = requirement === "editable_action_ready";
+    return (Array.isArray(actionability?.failure_reasons) ? actionability.failure_reasons : [])
+      .filter((failure) =>
+        ["attached", "visible", "stable", "enabled", "receives_events"].includes(failure.predicate) ||
+        (includesEditable && failure.predicate === "editable")
+      )
+      .map((failure) => ({
+        predicate: failure.predicate,
+        reason: failure.reason,
+        detail: failure.detail
+      }));
+  }
+
+  function domHitTest(element, boxModel) {
+    if (!boxModel || !boxModel.content || boxModel.content.width <= 0 || boxModel.content.height <= 0) {
+      return {
+        point: null,
+        receives_events: false,
+        target_or_descendant_from_point: false,
+        top_node_description: null,
+        error: "no action point"
+      };
+    }
+    const rect = viewportRectLocal(element);
+    const point = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    };
+    let top = null;
+    let error = null;
+    try {
+      top = document.elementFromPoint(point.x, point.y);
+    } catch (caught) {
+      error = errorMessageLocal(caught);
+    }
+    const targetOrDescendant = top instanceof Element && (top === element || element.contains(top));
+    return {
+      point,
+      receives_events: Boolean(targetOrDescendant),
+      target_or_descendant_from_point: Boolean(targetOrDescendant),
+      top_node_description: top instanceof Element ? nodeDescriptionLocal(top) : null,
+      error
+    };
+  }
+
+  function domBoxModel(element) {
+    if (!(element instanceof Element) || typeof element.getBoundingClientRect !== "function") {
+      return null;
+    }
+    const rect = element.getBoundingClientRect();
+    if (!rect) {
+      return null;
+    }
+    const pageRect = {
+      x: Number(rect.left || 0) + Number(window.scrollX || 0),
+      y: Number(rect.top || 0) + Number(window.scrollY || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    };
+    return {
+      content: pageRect,
+      border: { ...pageRect },
+      width: Math.round(pageRect.width),
+      height: Math.round(pageRect.height)
+    };
+  }
+
+  function domScrollSnapshot(element, scrollContainer) {
+    const rect = viewportRectLocal(element);
+    return {
+      viewport: {
+        inner_width: Math.trunc(Number(window.innerWidth || 0)),
+        inner_height: Math.trunc(Number(window.innerHeight || 0)),
+        scroll_x: Number(window.scrollX || 0),
+        scroll_y: Number(window.scrollY || 0),
+        device_pixel_ratio: Number(window.devicePixelRatio || 1)
+      },
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      },
+      box_model: domBoxModel(element),
+      scroll_container: scrollContainerSnapshotLocal(scrollContainer)
+    };
+  }
+
+  function nearestScrollContainerLocal(element) {
+    let current = element instanceof Element ? element.parentElement : null;
+    while (current && current !== document.documentElement) {
+      const style = window.getComputedStyle(current);
+      const overflow = `${style.overflow || ""} ${style.overflowX || ""} ${style.overflowY || ""}`;
+      const scrollableStyle = /(auto|scroll|overlay)/i.test(overflow);
+      const scrollableGeometry =
+        current.scrollHeight > current.clientHeight ||
+        current.scrollWidth > current.clientWidth;
+      if (scrollableStyle && scrollableGeometry) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function scrollContainerSnapshotLocal(element) {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+    const rect = viewportRectLocal(element);
+    return {
+      tag_name: tag(element),
+      id: stringOrEmpty(element.id),
+      class_name: stringOrEmpty(element.className),
+      scroll_top: Number(element.scrollTop || 0),
+      scroll_left: Number(element.scrollLeft || 0),
+      scroll_height: Number(element.scrollHeight || 0),
+      scroll_width: Number(element.scrollWidth || 0),
+      client_height: Number(element.clientHeight || 0),
+      client_width: Number(element.clientWidth || 0),
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      }
+    };
+  }
+
+  function scrollContainerChangedLocal(before, after) {
+    if (!before && !after) {
+      return false;
+    }
+    if (!before || !after) {
+      return true;
+    }
+    return before.scroll_top !== after.scroll_top || before.scroll_left !== after.scroll_left;
+  }
+
+  function rectFullyInViewportLocal(rect) {
+    if (!rect) {
+      return false;
+    }
+    const epsilon = 0.5;
+    return (
+      rect.x >= -epsilon &&
+      rect.y >= -epsilon &&
+      rect.x + rect.width <= Number(window.innerWidth || 0) + epsilon &&
+      rect.y + rect.height <= Number(window.innerHeight || 0) + epsilon
+    );
+  }
+
+  function rectFullyInScrollContainerLocal(rect, scrollContainer) {
+    if (!rect || !scrollContainer || !scrollContainer.viewport_rect) {
+      return true;
+    }
+    const container = scrollContainer.viewport_rect;
+    const epsilon = 0.5;
+    return (
+      rect.x >= container.x - epsilon &&
+      rect.y >= container.y - epsilon &&
+      rect.x + rect.width <= container.x + container.width + epsilon &&
+      rect.y + rect.height <= container.y + container.height + epsilon
+    );
+  }
+
+  function domBoxesStable(first, second) {
+    if (!first || !second || !first.content || !second.content) {
+      return false;
+    }
+    const epsilon = 0.25;
+    return (
+      Math.abs(first.content.x - second.content.x) <= epsilon &&
+      Math.abs(first.content.y - second.content.y) <= epsilon &&
+      Math.abs(first.content.width - second.content.width) <= epsilon &&
+      Math.abs(first.content.height - second.content.height) <= epsilon
+    );
+  }
+
+  function hasRunningAnimationLocal(element) {
+    if (!(element instanceof Element) || typeof element.getAnimations !== "function") {
+      return false;
+    }
+    try {
+      return element.getAnimations({ subtree: false }).some((animation) => animation.playState === "running");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function viewportRectLocal(element) {
+    if (!(element instanceof Element) || typeof element.getBoundingClientRect !== "function") {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    }
+    const rect = element.getBoundingClientRect();
+    return {
+      left: Number(rect.left || 0),
+      top: Number(rect.top || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    };
+  }
+
+  function nodeDescriptionLocal(element) {
+    if (!(element instanceof Element)) {
+      return "";
+    }
+    const id = element.id ? `#${element.id}` : "";
+    const cls = typeof element.className === "string" && element.className.trim()
+      ? `.${element.className.trim().split(/\s+/).slice(0, 3).join(".")}`
+      : "";
+    const name = element.getAttribute("name") ? `[name="${element.getAttribute("name")}"]` : "";
+    return `${tag(element)}${id}${cls}${name}`;
+  }
+
+  function domFailure(predicate, reason, detail) {
+    return { predicate, reason, detail };
+  }
+
+  function twoAnimationFramesLocal() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) {
+          return;
+        }
+        done = true;
+        resolve();
+      };
+      setTimeout(finish, 100);
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+      }
+    });
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   function resolveDomActionElement(actionName, loc) {
     let candidates = [];
@@ -7283,6 +9054,20 @@ function normalizeWaitTimeout(value) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1 || number > 30000) {
     throw bridgeError(ERROR_ATTACH_FAILED, "waitTimeoutMs must be an integer from 1 through 30000");
+  }
+  return number;
+}
+
+function normalizeDomActionAutoWaitTimeout(value, enabled) {
+  if (!enabled) {
+    return 2000;
+  }
+  if (value === undefined || value === null) {
+    return 2000;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 50 || number > 30000) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "autoWaitTimeoutMs must be an integer from 50 through 30000");
   }
   return number;
 }

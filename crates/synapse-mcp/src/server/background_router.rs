@@ -25,7 +25,7 @@ use crate::m1::{
 };
 use crate::m2::{
     ActClickParams, ActFocusWindowParams, ActPressParams, ActSetFieldTextLocator,
-    ActSetFieldTextParams, ActTypeParams, default_verify_timeout_ms,
+    ActSetFieldTextParams, ActTypeParams, default_auto_wait_timeout_ms, default_verify_timeout_ms,
 };
 use crate::m4::{ActRunShellExecutionMode, ActRunShellParams};
 use rmcp::schemars::JsonSchema;
@@ -191,6 +191,14 @@ pub struct TargetActParams {
     /// bridge command budget and is capped by the daemon command timeout.
     #[serde(default)]
     pub wait_timeout_ms: Option<u64>,
+    /// Browser DOM action / delegated CDP field action: opt in to polling
+    /// actionability before dispatch. Default false preserves existing behavior.
+    #[serde(default)]
+    pub auto_wait: bool,
+    /// Auto-wait timeout in milliseconds when auto_wait=true.
+    #[serde(default = "default_auto_wait_timeout_ms")]
+    #[schemars(default = "default_auto_wait_timeout_ms", range(min = 50, max = 30000))]
+    pub auto_wait_timeout_ms: u32,
     /// `run_shell`: executable/program name (arguments go in `args`).
     #[serde(default)]
     pub command: Option<String>,
@@ -542,8 +550,8 @@ impl SynapseService {
                                 locator,
                                 text: params.text.unwrap_or_default(),
                                 verify_timeout_ms: default_verify_timeout_ms(),
-                                auto_wait: false,
-                                auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
+                                auto_wait: params.auto_wait,
+                                auto_wait_timeout_ms: params.auto_wait_timeout_ms,
                             }),
                             request_context,
                         )
@@ -2731,6 +2739,11 @@ async fn target_act_browser_dom_action(
         ));
     }
     target_act_validate_dom_locator(action, params)?;
+    crate::m2::validate_auto_wait_timeout(
+        "target_act",
+        params.auto_wait,
+        params.auto_wait_timeout_ms,
+    )?;
     let wait_timeout_ms = target_act_dom_wait_timeout(params.wait_timeout_ms)?;
     let click_count = target_act_dom_click_count(action, params.clicks)?;
     let click_position = target_act_click_position(params)?;
@@ -2754,6 +2767,8 @@ async fn target_act_browser_dom_action(
         "position": click_position.map(|(x, y)| json!({ "x": x, "y": y })),
         "clicks": click_count,
         "wait_timeout_ms": wait_timeout_ms,
+        "auto_wait": params.auto_wait,
+        "auto_wait_timeout_ms": params.auto_wait_timeout_ms,
         "required_foreground": false,
     });
     let (window_hwnd, cdp_target_id) = match service.audit_cdp_target_resolution_result(
@@ -2813,6 +2828,8 @@ async fn target_act_browser_dom_action(
         "position": click_position.map(|(x, y)| json!({ "x": x, "y": y })),
         "clicks": click_count,
         "wait_timeout_ms": wait_timeout_ms,
+        "auto_wait": params.auto_wait,
+        "auto_wait_timeout_ms": params.auto_wait_timeout_ms,
         "required_foreground": false,
     });
     service.audit_action_started_with_details_for_session(
@@ -2851,6 +2868,8 @@ async fn target_act_browser_dom_action(
             position_x: click_position.map(|(x, _)| x),
             position_y: click_position.map(|(_, y)| y),
             wait_timeout_ms,
+            auto_wait: params.auto_wait,
+            auto_wait_timeout_ms: params.auto_wait_timeout_ms,
         },
     )
     .await

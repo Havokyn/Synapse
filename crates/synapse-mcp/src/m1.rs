@@ -2449,7 +2449,7 @@ pub enum BrowserLayoutRelation {
 
 /// Parameters for `browser_locate` (#1110–#1119): resolve any Playwright-style
 /// selector to element ids in the calling session's owned CDP page target.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserLocateParams {
     /// The primary query: CSS/XPath text, visible text, ARIA role token, label /

@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-popup-intent-v4";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-actionability-v11";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "c0af1d9073b8b4c7a66996f075bfdc150982675c5990f16cdd9f2dd6bc686154";
+    "0f7195ec4fa4b0a38ee3aba9da66c3f4c97105fa151c2cbbed012352f573de80";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -59,6 +59,9 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "setContent",
     "ariaSnapshot",
     "assertPoll",
+    "locateElements",
+    "inspectElement",
+    "scrollIntoView",
     "clock",
     "pageEvents",
     "reloadSelf",
@@ -206,6 +209,7 @@ impl ChromeDebuggerBridgeError {
             Some(error_codes::CHROME_DOM_ACTION_POSTCONDITION_FAILED) => {
                 error_codes::CHROME_DOM_ACTION_POSTCONDITION_FAILED
             }
+            Some(error_codes::BROWSER_WAIT_TIMEOUT) => error_codes::BROWSER_WAIT_TIMEOUT,
             _ => error_codes::A11Y_CDP_ATTACH_FAILED,
         };
         Self {
@@ -1822,6 +1826,112 @@ pub(crate) struct ChromeDebuggerAssertPollResult {
     pub backend_tier_used: String,
     #[serde(default)]
     pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerLocateElementsResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub engine: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub match_count: usize,
+    #[serde(default)]
+    pub returned_count: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub element_ids: Vec<String>,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    #[serde(default)]
+    pub frame_result_count: u32,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerInspectElementResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub element_id: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub element: Value,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub frame_document_id: Option<String>,
+    #[serde(default)]
+    pub frame_result_count: u32,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerScrollIntoViewResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub element_id: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub scroll: Value,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub frame_document_id: Option<String>,
+    #[serde(default)]
+    pub frame_result_count: u32,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
     #[serde(default)]
@@ -4191,6 +4301,79 @@ pub(crate) async fn assert_poll(
     })
 }
 
+pub(crate) async fn locate_elements(
+    hwnd: i64,
+    target_id: &str,
+    locator: Value,
+    limit: usize,
+) -> Result<ChromeDebuggerLocateElementsResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "locateElements")?;
+    let result = bridge()
+        .send_command(
+            "locateElements",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "locator": locator,
+                "limit": limit,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerLocateElementsResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger locateElements response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn inspect_element(
+    hwnd: i64,
+    target_id: &str,
+    element_id: &str,
+    max_html_bytes: usize,
+) -> Result<ChromeDebuggerInspectElementResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "inspectElement")?;
+    let result = bridge()
+        .send_command(
+            "inspectElement",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "elementId": element_id,
+                "maxHtmlBytes": max_html_bytes,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerInspectElementResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger inspectElement response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn scroll_into_view(
+    hwnd: i64,
+    target_id: &str,
+    element_id: &str,
+) -> Result<ChromeDebuggerScrollIntoViewResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "scrollIntoView")?;
+    let result = bridge()
+        .send_command(
+            "scrollIntoView",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "elementId": element_id,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerScrollIntoViewResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger scrollIntoView response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn clock(
     hwnd: i64,
     target_id: &str,
@@ -4340,6 +4523,8 @@ pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
     pub position_x: Option<i32>,
     pub position_y: Option<i32>,
     pub wait_timeout_ms: u64,
+    pub auto_wait: bool,
+    pub auto_wait_timeout_ms: u32,
 }
 
 pub(crate) async fn dom_action(
@@ -4370,6 +4555,8 @@ pub(crate) async fn dom_action(
                 "positionX": request.position_x,
                 "positionY": request.position_y,
                 "waitTimeoutMs": request.wait_timeout_ms,
+                "autoWait": request.auto_wait,
+                "autoWaitTimeoutMs": request.auto_wait_timeout_ms,
             }),
         )
         .await
@@ -5241,6 +5428,60 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
         }),
+        "locateElements" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "engine": result.get("engine"),
+            "query": result.get("query"),
+            "match_count": result.get("match_count"),
+            "returned_count": result.get("returned_count"),
+            "truncated": result.get("truncated"),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "inspectElement" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "element_id": result.get("element_id"),
+            "tag_name": result.get("element").and_then(|value| value.get("tag_name")),
+            "is_visible": result.get("element").and_then(|value| value.get("is_visible")),
+            "is_enabled": result.get("element").and_then(|value| value.get("is_enabled")),
+            "action_ready": result
+                .get("element")
+                .and_then(|value| value.get("actionability"))
+                .and_then(|value| value.get("action_ready")),
+            "receives_events": result
+                .get("element")
+                .and_then(|value| value.get("actionability"))
+                .and_then(|value| value.get("receives_events")),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "scrollIntoView" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "element_id": result.get("element_id"),
+            "window_scroll_changed": result
+                .get("scroll")
+                .and_then(|value| value.get("window_scroll_changed")),
+            "container_scroll_changed": result
+                .get("scroll")
+                .and_then(|value| value.get("container_scroll_changed")),
+            "node_fully_in_viewport_after": result
+                .get("scroll")
+                .and_then(|value| value.get("node_fully_in_viewport_after")),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
         "clock" => json!({
             "target_id": result.get("target_id"),
             "tab_id": result.get("tab_id"),
@@ -5290,6 +5531,11 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
                 .and_then(|value| value.get("default_allowed")),
             "matched_count": result.get("matched_count"),
             "resolved_by": result.get("resolved_by"),
+            "auto_wait": result.get("auto_wait"),
+            "auto_wait_poll_count": result.get("auto_wait_readback")
+                .and_then(|value| value.get("poll_count")),
+            "auto_wait_unmet_predicates": result.get("auto_wait_readback")
+                .and_then(|value| value.get("unmet_predicates")),
             "readback_backend": result.get("readback_backend"),
             "frame_id": result.get("frame_id"),
             "frame_result_count": result.get("frame_result_count"),

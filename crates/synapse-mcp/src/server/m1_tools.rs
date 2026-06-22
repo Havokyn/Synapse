@@ -2790,7 +2790,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Typed introspection of a single DOM element in the calling session's owned background browser tab via raw CDP: tag_name, outer_html/inner_html/inner_text/text_content, the live attribute map, input value, boolean state queries (is_visible/is_enabled/is_checked/is_editable), page-relative bounding_box, and protocol-backed actionability predicates (attached, visible, stable, enabled, editable, receives_events) with structured failure reasons from DOM.getBoxModel + DOM.getNodeForLocation/elementFromPoint. The element id (from find/observe) carries its CDP target, which must be owned by this session; never the human foreground tab. Read-only, background-safe. HTML/text fields are truncated to max_html_bytes. Raw CDP only."
+        description = "Typed introspection of a single DOM element in the calling session's owned background browser tab: tag_name, outer_html/inner_html/inner_text/text_content, the live attribute map, input value, boolean state queries (is_visible/is_enabled/is_checked/is_editable), page-relative bounding_box, and actionability predicates (attached, visible, stable, enabled, editable, receives_events) with structured failure reasons. Uses raw CDP for CDP backend-node element ids or the debugger-free normal Chrome bridge for chrome-tab:* DOM-path element ids. Never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. HTML/text fields are truncated to max_html_bytes."
     )]
     pub async fn browser_inspect(
         &self,
@@ -2810,8 +2810,14 @@ impl SynapseService {
                 "browser_inspect requires a non-empty element_id",
             ));
         }
-        let (backend_node_id, element_target) =
-            parse_browser_evaluate_element(&params.0.element_id)?;
+        let bridge_element_target = parse_chrome_bridge_element_target(&params.0.element_id)?;
+        let (backend_node_id, element_target, is_bridge_element) =
+            if let Some(target) = bridge_element_target {
+                (None, target, true)
+            } else {
+                let (backend, target) = parse_browser_evaluate_element(&params.0.element_id)?;
+                (Some(backend), target, false)
+            };
         if let Some(explicit) = params.0.cdp_target_id.as_deref() {
             validate_cdp_target_id(explicit)?;
             if !element_target.eq_ignore_ascii_case(explicit) {
@@ -2858,22 +2864,32 @@ impl SynapseService {
             "required_foreground": false,
         });
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
-        let result = self
-            .browser_inspect_impl(
+        let result = if is_bridge_element {
+            self.browser_inspect_bridge_impl(
                 &session_id,
                 window_hwnd,
                 &cdp_target_id,
                 &params.0.element_id,
-                backend_node_id,
                 max_html_bytes,
             )
-            .await;
+            .await
+        } else {
+            self.browser_inspect_impl(
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                &params.0.element_id,
+                backend_node_id.expect("raw CDP element id has backend node id"),
+                max_html_bytes,
+            )
+            .await
+        };
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
 
     #[tool(
-        description = "Scroll a resolved DOM element in the calling session's owned background browser tab into view via raw CDP `DOM.scrollIntoViewIfNeeded`, returning before/after viewport, box-model, and nearest scroll-container readback. Handles off-screen nodes and nested scroll containers without activating the tab or using OS foreground input. The element id carries its CDP target and must belong to this session; raw CDP only."
+        description = "Scroll a resolved DOM element in the calling session's owned background browser tab into view, returning before/after viewport, box-model, and nearest scroll-container readback. Uses raw CDP `DOM.scrollIntoViewIfNeeded` for CDP backend-node element ids or debugger-free normal Chrome bridge `Element.scrollIntoView` for chrome-tab:* DOM-path element ids. Handles off-screen nodes and nested scroll containers without activating the tab or using OS foreground input. The element id carries its target and must belong to this session."
     )]
     pub async fn browser_scroll_into_view(
         &self,
@@ -2893,8 +2909,14 @@ impl SynapseService {
                 "browser_scroll_into_view requires a non-empty element_id",
             ));
         }
-        let (backend_node_id, element_target) =
-            parse_browser_evaluate_element(&params.0.element_id)?;
+        let bridge_element_target = parse_chrome_bridge_element_target(&params.0.element_id)?;
+        let (backend_node_id, element_target, is_bridge_element) =
+            if let Some(target) = bridge_element_target {
+                (None, target, true)
+            } else {
+                let (backend, target) = parse_browser_evaluate_element(&params.0.element_id)?;
+                (Some(backend), target, false)
+            };
         if let Some(explicit) = params.0.cdp_target_id.as_deref() {
             validate_cdp_target_id(explicit)?;
             if !element_target.eq_ignore_ascii_case(explicit) {
@@ -2934,21 +2956,30 @@ impl SynapseService {
             "required_foreground": false,
         });
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
-        let result = self
-            .browser_scroll_into_view_impl(
+        let result = if is_bridge_element {
+            self.browser_scroll_into_view_bridge_impl(
                 &session_id,
                 window_hwnd,
                 &cdp_target_id,
                 &params.0.element_id,
-                backend_node_id,
             )
-            .await;
+            .await
+        } else {
+            self.browser_scroll_into_view_impl(
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                &params.0.element_id,
+                backend_node_id.expect("raw CDP element id has backend node id"),
+            )
+            .await
+        };
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
 
     #[tool(
-        description = "Resolve any Playwright-style selector to element ids in the calling session's owned background browser tab via raw CDP — the full selector engine. engine ∈ css | xpath | text | role | label | placeholder | alttext | title | testid | layout (default css); `query` is the CSS/XPath text, visible text (getByText), ARIA role token (getByRole), label/placeholder/alt/title text, test-id value, or (layout) the base CSS. Options: exact/regex (text & attribute engines), name/name_exact/name_regex + ARIA state filters checked/pressed/expanded/selected/disabled/level/include_hidden (role), testid_attribute (testid, default data-testid), relation+anchor+max_distance (layout), has_text filter, nth (.first/.last via 0/-1, negative counts from end), strict (error on >1 unless nth), root_element_id (scope/chain within an element), frame {frame_id|frame_element_id|name|url|index} (scope/chain within a same-target frame or OOPIF child target listed by browser_frames). Returns match_count (Playwright count()), the resolved element_ids (capped at limit) that feed directly into browser_inspect / act_* / etc., frame readback when scoped, and url/title. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe. Raw CDP only; the popup-safe extension bridge fails closed."
+        description = "Resolve any Playwright-style selector to element ids in the calling session's owned background browser tab. Uses raw CDP when available or the debugger-free normal Chrome bridge for chrome-tab:* targets. engine ∈ css | xpath | text | role | label | placeholder | alttext | title | testid | layout (default css); `query` is the CSS/XPath text, visible text (getByText), ARIA role token (getByRole), label/placeholder/alt/title text, test-id value, or (layout) the base CSS. Options: exact/regex (text & attribute engines), name/name_exact/name_regex + ARIA state filters checked/pressed/expanded/selected/disabled/level/include_hidden (role), testid_attribute (testid, default data-testid), relation+anchor+max_distance (layout), has_text filter, nth (.first/.last via 0/-1, negative counts from end), strict (error on >1 unless nth), root_element_id (scope/chain within an element), frame {frame_id|frame_element_id|name|url|index} for raw-CDP frame scoping. Returns match_count (Playwright count()), the resolved element_ids (capped at limit) that feed directly into browser_inspect / target_act / etc., frame readback when scoped, and url/title. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe."
     )]
     pub async fn browser_locate(
         &self,
@@ -3015,13 +3046,22 @@ impl SynapseService {
         }
         // A root_element_id scopes the search and carries its own CDP target,
         // which must agree with any explicit cdp_target_id.
-        let root_element = params
+        let root_element_id = params
             .0
             .root_element_id
             .as_deref()
-            .filter(|id| !id.trim().is_empty())
-            .map(parse_browser_evaluate_element)
-            .transpose()?;
+            .filter(|id| !id.trim().is_empty());
+        let root_bridge_target = match root_element_id {
+            Some(id) => parse_chrome_bridge_element_target(id)?,
+            None => None,
+        };
+        let root_element = if root_bridge_target.is_none() {
+            root_element_id
+                .map(parse_browser_evaluate_element)
+                .transpose()?
+        } else {
+            None
+        };
         if let (Some((_, root_target)), Some(explicit)) =
             (root_element.as_ref(), params.0.cdp_target_id.as_deref())
             && !root_target.eq_ignore_ascii_case(explicit)
@@ -3033,17 +3073,49 @@ impl SynapseService {
                 ),
             ));
         }
-        let frame_element_target = params
+        if let (Some(root_target), Some(explicit)) = (
+            root_bridge_target.as_ref(),
+            params.0.cdp_target_id.as_deref(),
+        ) && !root_target.eq_ignore_ascii_case(explicit)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_locate root_element_id resolves to CDP target {root_target:?} but cdp_target_id {explicit:?} was also supplied; they must match"
+                ),
+            ));
+        }
+        let frame_element_id = params
             .0
             .frame
             .as_ref()
             .and_then(|frame| frame.frame_element_id.as_deref())
-            .filter(|id| !id.trim().is_empty())
-            .map(parse_browser_evaluate_element)
-            .transpose()?
-            .map(|(_, target)| target);
+            .filter(|id| !id.trim().is_empty());
+        let frame_bridge_target = match frame_element_id {
+            Some(id) => parse_chrome_bridge_element_target(id)?,
+            None => None,
+        };
+        let frame_element_target = if let Some(target) = frame_bridge_target {
+            Some(target)
+        } else {
+            frame_element_id
+                .map(parse_browser_evaluate_element)
+                .transpose()?
+                .map(|(_, target)| target)
+        };
         if let (Some((_, root_target)), Some(frame_target)) =
             (root_element.as_ref(), frame_element_target.as_ref())
+            && !root_target.eq_ignore_ascii_case(frame_target)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_locate root_element_id resolves to CDP target {root_target:?} but frame.frame_element_id resolves to CDP target {frame_target:?}; they must match"
+                ),
+            ));
+        }
+        if let (Some(root_target), Some(frame_target)) =
+            (root_bridge_target.as_ref(), frame_element_target.as_ref())
             && !root_target.eq_ignore_ascii_case(frame_target)
         {
             return Err(mcp_error(
@@ -3070,6 +3142,7 @@ impl SynapseService {
             .cdp_target_id
             .clone()
             .or_else(|| root_element.as_ref().map(|(_, target)| target.clone()))
+            .or(root_bridge_target)
             .or(frame_element_target);
         let root_backend_node_id = root_element.as_ref().map(|(backend, _)| *backend);
         let limit = params
@@ -6598,6 +6671,77 @@ impl SynapseService {
         })
     }
 
+    #[cfg(windows)]
+    async fn browser_inspect_bridge_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        element_id: &str,
+        max_html_bytes: usize,
+    ) -> Result<BrowserInspectResponse, ErrorData> {
+        let inspected = crate::chrome_debugger_bridge::inspect_element(
+            window_hwnd,
+            cdp_target_id,
+            element_id,
+            max_html_bytes,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "browser_inspect normal bridge inspectElement failed for target {cdp_target_id:?}: {}",
+                    error.detail()
+                ),
+            )
+        })?;
+        let element: ElementInspection =
+            serde_json::from_value(inspected.element).map_err(|error| {
+                mcp_error(
+                    error_codes::OBSERVE_INTERNAL,
+                    format!("browser_inspect normal bridge payload decode failed: {error}"),
+                )
+            })?;
+        tracing::info!(
+            code = "CHROME_BRIDGE_BACKGROUND_INSPECT",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id = %inspected.target_id,
+            element_id = element_id,
+            tag_name = %element.tag_name,
+            is_visible = element.is_visible,
+            action_ready = element
+                .actionability
+                .as_ref()
+                .and_then(|value| value.get("action_ready"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            receives_events = element
+                .actionability
+                .as_ref()
+                .and_then(|value| value.get("receives_events"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            target_url = %inspected.url,
+            "readback=chrome.scripting.executeScript+elementFromPoint outcome=element_inspected"
+        );
+        Ok(BrowserInspectResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "chrome_tabs_extension".to_owned(),
+            endpoint: "chrome_bridge".to_owned(),
+            cdp_target_id: inspected.target_id,
+            element_id: element_id.to_owned(),
+            url: inspected.url,
+            title: inspected.title,
+            ready_state: inspected.ready_state,
+            element,
+            readback_backend: inspected.readback_backend,
+            required_foreground: false,
+        })
+    }
+
     #[cfg(not(windows))]
     async fn browser_inspect_impl(
         &self,
@@ -6606,6 +6750,21 @@ impl SynapseService {
         _cdp_target_id: &str,
         _element_id: &str,
         _backend_node_id: i64,
+        _max_html_bytes: usize,
+    ) -> Result<BrowserInspectResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_inspect is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_inspect_bridge_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _element_id: &str,
         _max_html_bytes: usize,
     ) -> Result<BrowserInspectResponse, ErrorData> {
         Err(mcp_error(
@@ -6669,6 +6828,62 @@ impl SynapseService {
         })
     }
 
+    #[cfg(windows)]
+    async fn browser_scroll_into_view_bridge_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        element_id: &str,
+    ) -> Result<BrowserScrollIntoViewResponse, ErrorData> {
+        let scrolled =
+            crate::chrome_debugger_bridge::scroll_into_view(window_hwnd, cdp_target_id, element_id)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_scroll_into_view normal bridge scrollIntoView failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+        tracing::info!(
+            code = "CHROME_BRIDGE_BACKGROUND_SCROLL_INTO_VIEW",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id = %scrolled.target_id,
+            element_id = element_id,
+            window_scroll_changed = scrolled
+                .scroll
+                .get("window_scroll_changed")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            container_scroll_changed = scrolled
+                .scroll
+                .get("container_scroll_changed")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            node_fully_in_viewport_after = scrolled
+                .scroll
+                .get("node_fully_in_viewport_after")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            "readback=chrome.scripting.executeScript(Element.scrollIntoView)+geometry outcome=element_scrolled_into_view"
+        );
+        Ok(BrowserScrollIntoViewResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "chrome_tabs_extension".to_owned(),
+            endpoint: "chrome_bridge".to_owned(),
+            cdp_target_id: scrolled.target_id,
+            element_id: element_id.to_owned(),
+            scroll: scrolled.scroll,
+            readback_backend: scrolled.readback_backend,
+            required_foreground: false,
+        })
+    }
+
     #[cfg(not(windows))]
     async fn browser_scroll_into_view_impl(
         &self,
@@ -6677,6 +6892,20 @@ impl SynapseService {
         _cdp_target_id: &str,
         _element_id: &str,
         _backend_node_id: i64,
+    ) -> Result<BrowserScrollIntoViewResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_scroll_into_view is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_scroll_into_view_bridge_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _element_id: &str,
     ) -> Result<BrowserScrollIntoViewResponse, ErrorData> {
         Err(mcp_error(
             error_codes::A11Y_NOT_AVAILABLE,
@@ -6699,6 +6928,68 @@ impl SynapseService {
         limit: usize,
     ) -> Result<BrowserLocateResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                if params.frame.is_some() {
+                    return Err(mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_locate normal Chrome bridge path does not support frame locator parameters yet; omit frame for bridge all-frame search or use a raw-CDP target for explicit frame scoping",
+                    ));
+                }
+                let locator = serde_json::to_value(params).map_err(|error| {
+                    mcp_error(
+                        error_codes::OBSERVE_INTERNAL,
+                        format!(
+                            "browser_locate normal bridge locator serialization failed: {error}"
+                        ),
+                    )
+                })?;
+                let located = crate::chrome_debugger_bridge::locate_elements(
+                    window_hwnd,
+                    cdp_target_id,
+                    locator,
+                    limit,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_locate normal bridge locateElements failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_LOCATE",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %located.target_id,
+                    engine = %located.engine,
+                    match_count = located.match_count,
+                    returned_count = located.element_ids.len(),
+                    root_scoped = params.root_element_id.is_some(),
+                    target_url = %located.url,
+                    "readback=chrome.scripting.executeScript locator outcome=located"
+                );
+                return Ok(BrowserLocateResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome_bridge".to_owned(),
+                    cdp_target_id: located.target_id,
+                    engine: located.engine,
+                    query: located.query,
+                    match_count: located.match_count,
+                    returned_count: located.returned_count,
+                    truncated: located.truncated,
+                    element_ids: located.element_ids,
+                    frame: None,
+                    url: located.url,
+                    title: located.title,
+                    readback_backend: located.readback_backend,
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(
                 "browser_locate",
                 window_hwnd,
@@ -10033,6 +10324,44 @@ fn parse_browser_evaluate_element(element_id: &str) -> Result<(i64, String), Err
         )
     })?;
     Ok((backend, target))
+}
+
+fn parse_chrome_bridge_element_target(element_id: &str) -> Result<Option<String>, ErrorData> {
+    let trimmed = element_id.trim();
+    let Some(after_prefix) = trimmed.strip_prefix("chrome-tab:") else {
+        return Ok(None);
+    };
+    let Some((tab_id, after_frame_marker)) = after_prefix.split_once(":frame:") else {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "normal Chrome bridge element_id {element_id:?} must be shaped like chrome-tab:<tabId>:frame:<frameId>:path:<domPath>"
+            ),
+        ));
+    };
+    let Some((frame_id, path)) = after_frame_marker.split_once(":path:") else {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("normal Chrome bridge element_id {element_id:?} must include :path:<domPath>"),
+        ));
+    };
+    if tab_id.is_empty()
+        || !tab_id.bytes().all(|byte| byte.is_ascii_digit())
+        || frame_id.is_empty()
+        || !frame_id.bytes().all(|byte| byte.is_ascii_digit())
+        || path.is_empty()
+        || !path
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "normal Chrome bridge element_id {element_id:?} has invalid tab/frame/path components"
+            ),
+        ));
+    }
+    Ok(Some(format!("chrome-tab:{tab_id}")))
 }
 
 const DEFAULT_CDP_NAVIGATE_WAIT_TIMEOUT_MS: u64 = 10_000;
