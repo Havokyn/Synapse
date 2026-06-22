@@ -143,13 +143,18 @@ function Format-SynapseChromeBridgeProfileInstallState {
     if (-not $state) {
         return 'profile_install_state=missing'
     }
-    return ("profile_install_state=installed:{0},profile_count:{1},installed_profile_count:{2},active_profile:{3},active_profile_installed:{4},reason:{5}" -f `
+    $autoInstall = $Readback.synapse_chrome_auto_install
+    $autoInstallAttempted = if ($autoInstall) { [string]$autoInstall.attempted } else { 'missing' }
+    $autoInstallReason = if ($autoInstall) { [string]$autoInstall.reason } else { 'missing' }
+    return ("profile_install_state=installed:{0},profile_count:{1},installed_profile_count:{2},active_profile:{3},active_profile_installed:{4},reason:{5},auto_install_attempted:{6},auto_install_reason:{7}" -f `
         $state.installed, `
         $state.profile_count, `
         $state.installed_profile_count, `
         $state.active_profile, `
         $state.active_profile_installed, `
-        $state.reason)
+        $state.reason, `
+        $autoInstallAttempted, `
+        $autoInstallReason)
 }
 
 $processTokenAtStart = $env:SYNAPSE_BEARER_TOKEN
@@ -183,6 +188,13 @@ function Get-ProcessLineage {
         $current = [int]$p.ParentProcessId
     }
     return $lineage
+}
+
+function Get-SynapseCurrentCodexAncestor {
+    $lineage = Get-ProcessLineage
+    return ($lineage | Where-Object {
+        $_.Name -ieq 'codex.exe' -or $_.CommandLine -match '@openai[\\/]+codex|codex\.js|codex-win32'
+    } | Select-Object -First 1)
 }
 
 function Read-SynapseSetupMaintenanceLockOwner {
@@ -1705,7 +1717,7 @@ function Stop-SynapseExactCandidateProcess {
     $current = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
     if ($current) {
         $exeLeaf = if ($current.ExecutablePath) { Split-Path -Leaf $current.ExecutablePath } else { '' }
-        if ($current.Name -ine 'synapse-mcp.exe' -and $exeLeaf -ine 'synapse-mcp.exe') {
+        if ($current.Name -inotlike 'synapse-mcp*.exe' -and $exeLeaf -inotlike 'synapse-mcp*.exe') {
             Die "SYNAPSE_CANDIDATE_STOP_TARGET_MISMATCH pid=$ProcessId actual_name=$($current.Name) actual_path=$($current.ExecutablePath) remediation=PID was reused before candidate cleanup; refusing to stop it"
         }
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
@@ -1789,6 +1801,14 @@ function Test-SynapseCandidateDaemon {
             Sha256 = $candidateHash
             ToolCount = $surface.tool_count
             ToolSurfaceSha256 = $surface.tool_surface_sha256
+            ToolNames = $surface.tool_names
+            ToolSchemas = $surface.tool_schemas
+            ToolSurface = $surface
+            tool_count = $surface.tool_count
+            tool_surface_sha256 = $surface.tool_surface_sha256
+            tool_names = $surface.tool_names
+            tool_schemas = $surface.tool_schemas
+            daemon_pid = $healthPid
         }
     } finally {
         if ($candidate -and (Get-Process -Id $candidate.Id -ErrorAction SilentlyContinue)) {
@@ -2211,6 +2231,64 @@ function New-SynapseCodexRestartHandoff {
         JsonPath = $jsonPath
         MarkdownPath = $markdownPath
     }
+}
+
+function Assert-CodexCandidateHandoffPreservesCurrentProcess {
+    param(
+        [AllowNull()]$CodexAncestor,
+        [Parameter(Mandatory=$true)]$CandidateSurface,
+        [AllowNull()][string]$ProcessHashAtStart,
+        [AllowNull()][string]$ProcessSnapshotAtStart
+    )
+
+    if ($null -eq $CodexAncestor) {
+        return
+    }
+
+    $candidateHash = [string]$CandidateSurface.tool_surface_sha256
+    if ([string]::IsNullOrWhiteSpace($candidateHash)) {
+        Die "SYNAPSE_CODEX_CANDIDATE_TOOL_SURFACE_HASH_MISSING codex_pid=$($CodexAncestor.ProcessId) remediation=candidate tools/list preflight did not produce a usable tool_surface_sha256; refusing to touch the live daemon"
+    }
+
+    if ($ProcessHashAtStart -eq $candidateHash) {
+        Info "Codex current-process tool surface will survive candidate handoff codex_pid=$($CodexAncestor.ProcessId) tool_surface_sha256=$candidateHash tool_count=$($CandidateSurface.tool_count)"
+        return
+    }
+
+    $startSurface = Read-SynapseCodexToolSurfaceSnapshotOrNull -Path $ProcessSnapshotAtStart
+    $diff = Get-SynapseToolSurfaceDiff -StartSurface $startSurface -CurrentSurface $CandidateSurface
+    $diffSummary = $diff.Summary
+
+    if ([string]::IsNullOrWhiteSpace($ProcessHashAtStart)) {
+        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF codex_pid={0} tool_surface_at_process_start=missing candidate_tool_surface_sha256={1} candidate_tool_count={2} candidate_pid={3} start_snapshot={4} {5} remediation=setup refused before touching the live daemon because this already-running Codex process cannot prove it loaded the candidate MCP tools/list schema. Restart Codex through the patched launcher, then rerun setup." -f `
+            $CodexAncestor.ProcessId,
+            $candidateHash,
+            $CandidateSurface.tool_count,
+            $CandidateSurface.daemon_pid,
+            $ProcessSnapshotAtStart,
+            $diffSummary)
+    }
+
+    if (-not $diff.HasRestartRequired) {
+        Info ("Codex current-process tool surface hash will change after candidate handoff but callable schema is unchanged; continuing codex_pid={0} start_tool_surface_sha256={1} candidate_tool_surface_sha256={2} candidate_tool_count={3} candidate_pid={4} start_snapshot={5} {6}" -f `
+            $CodexAncestor.ProcessId,
+            $ProcessHashAtStart,
+            $candidateHash,
+            $CandidateSurface.tool_count,
+            $CandidateSurface.daemon_pid,
+            $ProcessSnapshotAtStart,
+            $diffSummary)
+        return
+    }
+
+    Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF codex_pid={0} start_tool_surface_sha256={1} candidate_tool_surface_sha256={2} candidate_tool_count={3} candidate_pid={4} start_snapshot={5} {6} remediation=setup refused before touching the live daemon because replacing Synapse now would leave this already-running Codex process with stale MCP tools or schemas. Restart Codex through the patched launcher, then rerun setup." -f `
+        $CodexAncestor.ProcessId,
+        $ProcessHashAtStart,
+        $candidateHash,
+        $CandidateSurface.tool_count,
+        $CandidateSurface.daemon_pid,
+        $ProcessSnapshotAtStart,
+        $diffSummary)
 }
 
 function Assert-CodexCurrentProcessToolSurfaceFresh {
@@ -2977,6 +3055,19 @@ if ($candidatePreflight.Sha256 -ne $installSourceHash) {
 }
 Info "Candidate daemon accepted for handoff sha256=$installSourceHash tool_count=$($candidatePreflight.ToolCount) tool_surface_sha256=$($candidatePreflight.ToolSurfaceSha256)"
 
+$codexAncestorBeforeHandoff = Get-SynapseCurrentCodexAncestor
+if ($codexAncestorBeforeHandoff -and $processTokenAtStart -ne $token) {
+    Die ("SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE_PRE_HANDOFF codex_pid={0} token_at_process_start={1} token_file={2} remediation=setup refused before touching the live daemon because this already-running Codex process cannot authenticate Synapse with the token that setup will install. Restart Codex through the patched launcher, then rerun setup." -f `
+        $codexAncestorBeforeHandoff.ProcessId,
+        ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })),
+        $TokenPath)
+}
+Assert-CodexCandidateHandoffPreservesCurrentProcess `
+    -CodexAncestor $codexAncestorBeforeHandoff `
+    -CandidateSurface $candidatePreflight.ToolSurface `
+    -ProcessHashAtStart $processToolSurfaceHashAtStart `
+    -ProcessSnapshotAtStart $processToolSurfaceSnapshotAtStart
+
 Step "Preflighting Chrome direct localhost bridge before daemon handoff"
 $chromeBridgeInstaller = Join-Path $PSScriptRoot 'install-synapse-chrome-debugger.ps1'
 $chromeBridgePreflight = Invoke-SynapseChromeBridgeVerifier `
@@ -3236,10 +3327,7 @@ if (-not $SkipClientWiring) {
 }
 
 if (-not $SkipClientWiring) {
-    $lineage = Get-ProcessLineage
-    $codexAncestor = $lineage | Where-Object {
-        $_.Name -ieq 'codex.exe' -or $_.CommandLine -match '@openai[\\/]+codex|codex\.js|codex-win32'
-    } | Select-Object -First 1
+    $codexAncestor = Get-SynapseCurrentCodexAncestor
     if ($codexAncestor -and $processTokenAtStart -ne $token) {
         Die ("SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE codex_pid={0} token_at_process_start={1} token_file={2} remediation=restart Codex through the patched codex launcher; Windows cannot update an already-running Codex process environment, so this current session cannot authenticate mcp__synapse yet." -f $codexAncestor.ProcessId, ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })), $TokenPath)
     }

@@ -8,7 +8,12 @@ param(
     # Emergency/operator opt-out. Default behavior shields the normal Chrome
     # profile from layout-shifting debugger/native-host popups by adding
     # Synapse-authored blocked_permissions entries for detected hazards.
-    [switch]$PreserveExternalDebuggerExtensions
+    [switch]$PreserveExternalDebuggerExtensions,
+    # Default behavior auto-loads the bundled unpacked extension into the
+    # already-open active Chrome profile when the profile row is absent.
+    [switch]$SkipAutoInstall,
+    [ValidateRange(5, 300)]
+    [int]$AutoInstallTimeoutSeconds = 90
 )
 
 $ErrorActionPreference = 'Stop'
@@ -532,6 +537,433 @@ if ($hostPermissions -notcontains 'http://127.0.0.1:7700/*') {
     throw "SYNAPSE_CHROME_EXTENSION_LOCALHOST_PERMISSION_MISSING path=$manifestPath remediation=normal bridge requires host_permissions http://127.0.0.1:7700/* for direct daemon registration and message posting"
 }
 
+function Initialize-SynapseChromeBridgeAutoInstallInterop {
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    } catch {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_UIA_UNAVAILABLE error=$($_.Exception.Message) remediation=run from an interactive Windows desktop where UIAutomationClient is available, or load extensions\synapse-chrome-debugger manually once and rerun setup"
+    }
+
+    if (-not ('SynapseChromeBridgeAutoInstall.Win32' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace SynapseChromeBridgeAutoInstall {
+    public static class Win32 {
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    }
+}
+'@ -ErrorAction Stop
+    }
+}
+
+function Get-SynapseActiveChromeProfileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChromeUserDataRoot
+    )
+
+    $localStatePath = Join-Path $ChromeUserDataRoot 'Local State'
+    if (-not (Test-Path -LiteralPath $localStatePath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $localState = Get-Content -Raw -LiteralPath $localStatePath | ConvertFrom-Json -ErrorAction Stop
+        if ($localState.profile -and $localState.profile.last_used) {
+            return [string]$localState.profile.last_used
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Test-SynapseChromeBridgeProfileRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChromeUserDataRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionDir
+    )
+
+    $profilePath = Join-Path $ChromeUserDataRoot $ProfileName
+    foreach ($prefFileName in @('Preferences', 'Secure Preferences')) {
+        $prefPath = Join-Path $profilePath $prefFileName
+        if (-not (Test-Path -LiteralPath $prefPath -PathType Leaf)) {
+            continue
+        }
+        try {
+            $pref = Get-Content -Raw -LiteralPath $prefPath | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            continue
+        }
+        if (-not $pref.extensions -or -not $pref.extensions.settings) {
+            continue
+        }
+        $property = $pref.extensions.settings.PSObject.Properties[$ExtensionId]
+        if (-not $property) {
+            continue
+        }
+        $setting = $property.Value
+        $manifestPath = if ($setting.PSObject.Properties.Name -contains 'path') { [string]$setting.path } else { $null }
+        $manifestMatches = $false
+        if (-not [string]::IsNullOrWhiteSpace($manifestPath)) {
+            try {
+                $manifestMatches = ((Resolve-Path -LiteralPath $manifestPath -ErrorAction Stop).Path -eq (Resolve-Path -LiteralPath $ExtensionDir -ErrorAction Stop).Path)
+            } catch {
+                $manifestMatches = ($manifestPath -ieq $ExtensionDir)
+            }
+        }
+        return [pscustomobject]@{
+            installed = $true
+            profile = $ProfileName
+            pref_file = $prefFileName
+            pref_path = $prefPath
+            manifest_path = $manifestPath
+            manifest_path_matches = $manifestMatches
+        }
+    }
+
+    [pscustomobject]@{
+        installed = $false
+        profile = $ProfileName
+        pref_file = $null
+        pref_path = $null
+        manifest_path = $null
+        manifest_path_matches = $false
+    }
+}
+
+function Get-SynapseChromeTopLevelWindows {
+    Initialize-SynapseChromeBridgeAutoInstallInterop
+    $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+        ForEach-Object { [int]$_.ProcessId })
+    if ($chromeProcesses.Count -eq 0) {
+        return @()
+    }
+    $foreground = [SynapseChromeBridgeAutoInstall.Win32]::GetForegroundWindow().ToInt64()
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $children = $root.FindAll(
+        [System.Windows.Automation.TreeScope]::Children,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    $windows = @()
+    foreach ($child in $children) {
+        $current = $child.Current
+        $pid = [int]$current.ProcessId
+        if ($chromeProcesses -notcontains $pid) {
+            continue
+        }
+        $hwnd = [int64]$current.NativeWindowHandle
+        $title = [string]$current.Name
+        if ($hwnd -eq 0 -or [string]::IsNullOrWhiteSpace($title)) {
+            continue
+        }
+        $windows += [pscustomobject]@{
+            hwnd = $hwnd
+            pid = $pid
+            title = $title
+            class_name = [string]$current.ClassName
+            is_foreground = ($hwnd -eq $foreground)
+            element = $child
+        }
+    }
+    return @($windows)
+}
+
+function Find-SynapseAutomationElementByName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Automation.AutomationElement]$Root,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [AllowNull()]
+        [System.Windows.Automation.ControlType]$ControlType
+    )
+
+    $nameCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $Name
+    )
+    $condition = $nameCondition
+    if ($null -ne $ControlType) {
+        $typeCondition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            $ControlType
+        )
+        $condition = [System.Windows.Automation.AndCondition]::new($nameCondition, $typeCondition)
+    }
+    $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+}
+
+function Invoke-SynapseAutomationElement {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    try {
+        $invoke = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $invoke.Invoke()
+        return
+    } catch {
+        try {
+            $toggle = $Element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+            $toggle.Toggle()
+            return
+        } catch {
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_INVOKE_FAILED control=$Description error=$($_.Exception.Message)"
+        }
+    }
+}
+
+function Set-SynapseAutomationEditValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)]
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    try {
+        $valuePattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        $valuePattern.SetValue($Value)
+    } catch {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_SET_FIELD_FAILED field=$Description error=$($_.Exception.Message)"
+    }
+}
+
+function Send-SynapseNativeKeyDown {
+    param([byte]$VirtualKey)
+    [SynapseChromeBridgeAutoInstall.Win32]::keybd_event($VirtualKey, 0, 0, [UIntPtr]::Zero)
+}
+
+function Send-SynapseNativeKeyUp {
+    param([byte]$VirtualKey)
+    [SynapseChromeBridgeAutoInstall.Win32]::keybd_event($VirtualKey, 0, 2, [UIntPtr]::Zero)
+}
+
+function Send-SynapseNativeKeyChord {
+    param([byte[]]$VirtualKeys)
+    foreach ($key in $VirtualKeys) {
+        Send-SynapseNativeKeyDown -VirtualKey $key
+        Start-Sleep -Milliseconds 25
+    }
+    [array]::Reverse($VirtualKeys)
+    foreach ($key in $VirtualKeys) {
+        Start-Sleep -Milliseconds 25
+        Send-SynapseNativeKeyUp -VirtualKey $key
+    }
+}
+
+function Send-SynapseNativeKeyTap {
+    param([byte]$VirtualKey)
+    Send-SynapseNativeKeyDown -VirtualKey $VirtualKey
+    Start-Sleep -Milliseconds 60
+    Send-SynapseNativeKeyUp -VirtualKey $VirtualKey
+}
+
+function Wait-SynapseUntil {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Probe,
+        [Parameter(Mandatory = $true)]
+        [datetime]$Deadline,
+        [int]$SleepMilliseconds = 250
+    )
+
+    do {
+        $value = & $Probe
+        if ($value) {
+            return $value
+        }
+        Start-Sleep -Milliseconds $SleepMilliseconds
+    } while ((Get-Date) -lt $Deadline)
+    return $null
+}
+
+function Invoke-SynapseChromeBridgeAutoInstall {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChromeUserDataRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionDir,
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $activeProfile = Get-SynapseActiveChromeProfileName -ChromeUserDataRoot $ChromeUserDataRoot
+    if ([string]::IsNullOrWhiteSpace($activeProfile)) {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_ACTIVE_PROFILE_UNKNOWN user_data_root=$ChromeUserDataRoot remediation=open the intended authenticated Chrome profile, then rerun setup"
+    }
+    $before = Test-SynapseChromeBridgeProfileRow `
+        -ChromeUserDataRoot $ChromeUserDataRoot `
+        -ProfileName $activeProfile `
+        -ExtensionId $ExtensionId `
+        -ExtensionDir $ExtensionDir
+    if ($before.installed -and $before.manifest_path_matches) {
+        return [pscustomobject]@{
+            attempted = $false
+            changed = $false
+            reason = 'active_profile_already_has_expected_unpacked_extension'
+            active_profile = $activeProfile
+            before = $before
+            after = $before
+        }
+    }
+    if ($SkipAutoInstall) {
+        return [pscustomobject]@{
+            attempted = $false
+            changed = $false
+            reason = 'skip_auto_install_requested'
+            active_profile = $activeProfile
+            before = $before
+            after = $before
+        }
+    }
+
+    Initialize-SynapseChromeBridgeAutoInstallInterop
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $windows = @(Get-SynapseChromeTopLevelWindows | Where-Object {
+        $_.title -notmatch '^Select the extension directory\.?$'
+    })
+    if ($windows.Count -eq 0) {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_NO_OPEN_CHROME_WINDOW active_profile=$activeProfile remediation=open the already-authenticated Chrome profile first; setup refuses to launch a second Chrome profile as the repair path"
+    }
+    $chromeWindow = @($windows | Sort-Object @{ Expression = 'is_foreground'; Descending = $true }, @{ Expression = 'title'; Descending = $false } | Select-Object -First 1)[0]
+    [SynapseChromeBridgeAutoInstall.Win32]::ShowWindowAsync([IntPtr]$chromeWindow.hwnd, 5) | Out-Null
+    [SynapseChromeBridgeAutoInstall.Win32]::SetForegroundWindow([IntPtr]$chromeWindow.hwnd) | Out-Null
+    Start-Sleep -Milliseconds 300
+
+    $previousClipboardText = $null
+    $restoreClipboard = $false
+    try {
+        try {
+            $previousClipboardText = Get-Clipboard -Raw -ErrorAction Stop
+            $restoreClipboard = $true
+        } catch {
+            $restoreClipboard = $false
+        }
+        Set-Clipboard -Value 'chrome://extensions'
+        Send-SynapseNativeKeyTap -VirtualKey 0x1B
+        Start-Sleep -Milliseconds 200
+        Send-SynapseNativeKeyChord -VirtualKeys ([byte[]](0x11, 0x4C))
+        Start-Sleep -Milliseconds 250
+        Send-SynapseNativeKeyChord -VirtualKeys ([byte[]](0x11, 0x56))
+        Start-Sleep -Milliseconds 250
+        Send-SynapseNativeKeyTap -VirtualKey 0x0D
+
+        $loadUnpacked = Wait-SynapseUntil -Deadline $deadline -Probe {
+            $currentWindow = @(Get-SynapseChromeTopLevelWindows | Where-Object {
+                $_.hwnd -eq $chromeWindow.hwnd -or $_.title -match '^Extensions( - Google Chrome)?$'
+            } | Select-Object -First 1)
+            if ($currentWindow.Count -eq 0) {
+                return $null
+            }
+            $button = Find-SynapseAutomationElementByName `
+                -Root $currentWindow[0].element `
+                -Name 'Load unpacked' `
+                -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($button) {
+                return [pscustomobject]@{ window = $currentWindow[0]; button = $button }
+            }
+            $developerMode = Find-SynapseAutomationElementByName `
+                -Root $currentWindow[0].element `
+                -Name 'Developer mode' `
+                -ControlType $null
+            if ($developerMode) {
+                try {
+                    Invoke-SynapseAutomationElement -Element $developerMode -Description 'Developer mode'
+                } catch { }
+            }
+            return $null
+        }
+        if (-not $loadUnpacked) {
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_LOAD_UNPACKED_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds remediation=Chrome did not expose the Load unpacked button on chrome://extensions in the already-open profile"
+        }
+        Invoke-SynapseAutomationElement -Element $loadUnpacked.button -Description 'Load unpacked'
+
+        $dialog = Wait-SynapseUntil -Deadline $deadline -Probe {
+            @(Get-SynapseChromeTopLevelWindows | Where-Object {
+                $_.title -match '^Select the extension directory\.?$'
+            } | Select-Object -First 1)
+        }
+        if (-not $dialog) {
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_FOLDER_DIALOG_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds remediation=Chrome did not open the folder picker after Load unpacked"
+        }
+        [SynapseChromeBridgeAutoInstall.Win32]::SetForegroundWindow([IntPtr]$dialog.hwnd) | Out-Null
+        Start-Sleep -Milliseconds 200
+        $folderEdit = Find-SynapseAutomationElementByName `
+            -Root $dialog.element `
+            -Name 'Folder:' `
+            -ControlType ([System.Windows.Automation.ControlType]::Edit)
+        if (-not $folderEdit) {
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_FOLDER_FIELD_NOT_FOUND active_profile=$activeProfile dialog_hwnd=$($dialog.hwnd) remediation=folder picker did not expose the Folder field through UI Automation"
+        }
+        Set-SynapseAutomationEditValue -Element $folderEdit -Value $ExtensionDir -Description 'Folder:'
+        Start-Sleep -Milliseconds 200
+        $selectFolder = Find-SynapseAutomationElementByName `
+            -Root $dialog.element `
+            -Name 'Select Folder' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if (-not $selectFolder) {
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_SELECT_FOLDER_NOT_FOUND active_profile=$activeProfile dialog_hwnd=$($dialog.hwnd) remediation=folder picker did not expose Select Folder through UI Automation"
+        }
+        Invoke-SynapseAutomationElement -Element $selectFolder -Description 'Select Folder'
+
+        $after = Wait-SynapseUntil -Deadline $deadline -Probe {
+            $row = Test-SynapseChromeBridgeProfileRow `
+                -ChromeUserDataRoot $ChromeUserDataRoot `
+                -ProfileName $activeProfile `
+                -ExtensionId $ExtensionId `
+                -ExtensionDir $ExtensionDir
+            if ($row.installed -and $row.manifest_path_matches) {
+                return $row
+            }
+            return $null
+        }
+        if (-not $after) {
+            $latest = Test-SynapseChromeBridgeProfileRow `
+                -ChromeUserDataRoot $ChromeUserDataRoot `
+                -ProfileName $activeProfile `
+                -ExtensionId $ExtensionId `
+                -ExtensionDir $ExtensionDir
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_PROFILE_ROW_MISSING active_profile=$activeProfile timeout_s=$TimeoutSeconds installed=$($latest.installed) manifest_path=$($latest.manifest_path) expected_path=$ExtensionDir remediation=Chrome did not persist the Synapse unpacked extension row after Select Folder"
+        }
+        return [pscustomobject]@{
+            attempted = $true
+            changed = $true
+            reason = 'installed_unpacked_extension_in_active_profile'
+            active_profile = $activeProfile
+            chrome_window_hwnd = $chromeWindow.hwnd
+            folder_dialog_hwnd = $dialog.hwnd
+            before = $before
+            after = $after
+        }
+    } finally {
+        if ($restoreClipboard) {
+            try {
+                Set-Clipboard -Value $previousClipboardText
+            } catch { }
+        }
+    }
+}
+
 $nativeRoot = Join-Path $env:APPDATA 'synapse\chrome-debugger'
 New-Item -ItemType Directory -Force -Path $nativeRoot | Out-Null
 
@@ -579,6 +1011,11 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
 })
 
 $chromeUserDataRoot = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
+$chromeBridgeAutoInstall = Invoke-SynapseChromeBridgeAutoInstall `
+    -ChromeUserDataRoot $chromeUserDataRoot `
+    -ExtensionId $ExtensionId `
+    -ExtensionDir $extensionDir `
+    -TimeoutSeconds $AutoInstallTimeoutSeconds
 $profileDirs = @()
 $synapseChromeProfileReadback = @()
 $staleSynapseActivePermissions = @()
@@ -820,6 +1257,7 @@ $synapseChromeProfileInstallReason = if ($profileDirs.Count -eq 0) {
 $synapseChromeProfileInstallState = [pscustomobject]@{
     scanned = $true
     installed = ($synapseChromeInstalledProfiles.Count -gt 0)
+    auto_install = $chromeBridgeAutoInstall
     chrome_user_data_root = $chromeUserDataRoot
     profile_count = $profileDirs.Count
     installed_profile_count = $synapseChromeInstalledProfiles.Count
@@ -828,7 +1266,7 @@ $synapseChromeProfileInstallState = [pscustomobject]@{
     active_profile_installed = $synapseChromeActiveProfileInstalled
     reason = $synapseChromeProfileInstallReason
     cdp_bridge_reload_can_install_absent_extension = $false
-    remediation = 'run scripts\install-synapse-chrome-debugger.ps1 to validate files and policies, then load extensions\synapse-chrome-debugger as an unpacked extension in the already-open Chrome profile; cdp_bridge_reload can only reload an already-registered bridge host and cannot install an absent Chrome extension'
+    remediation = 'run scripts\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop with the target Chrome profile already open; the installer auto-loads extensions\synapse-chrome-debugger as an unpacked extension in that active profile. cdp_bridge_reload can only reload an already-registered bridge host and cannot install an absent Chrome extension'
 }
 $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
@@ -974,6 +1412,7 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     external_popup_risk_block_reason = if ($allExternalDebuggerOrNativeExtensions.Count -gt 0) { 'external_debugger_or_native_hazards_require_chrome_management_suppression_or_policy_shield' } else { 'none' }
     external_popup_risk_bridge_management_required = ($allExternalDebuggerOrNativeExtensions.Count -gt 0)
     external_popup_risk_bridge_management_permission_present = ($requiredPermissions -contains 'management')
+    synapse_chrome_auto_install = $chromeBridgeAutoInstall
     synapse_chrome_profile_install_state = $synapseChromeProfileInstallState
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     synapse_stale_granted_permission_warning = [pscustomobject]@{

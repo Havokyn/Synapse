@@ -38,8 +38,9 @@ new code; the correct behavior is a visible stale-worker error, not foreground
 automation.
 If daemon health reports `synapse_chrome_bridge_profile_installation
 installed=false`, Chrome has no loaded extension host to receive `reloadSelf`;
-load this directory as an unpacked extension in the already-open profile before
-retrying bridge health.
+run the installer from the interactive Windows desktop with the target Chrome
+profile already open. The installer auto-loads this directory as an unpacked
+extension in that active profile before retrying bridge health.
 
 Install/verify the local bridge registration with:
 
@@ -62,8 +63,12 @@ shield failure is not ignored: the loaded bridge uses `chrome.management` to
 disable enabled external `debugger`/`nativeMessaging` extensions, and normal
 commands fail closed if that suppression does not complete.
 
-Then load this directory as an unpacked extension from `chrome://extensions`.
-The extension registers with the loopback daemon at `http://127.0.0.1:7700`,
+The verifier also opens the already-running Chrome profile's extensions page
+and loads this directory as an unpacked extension when the active profile does
+not already contain the expected stable extension row. It refuses to launch a
+second Chrome profile as the repair path; open the intended authenticated
+profile first, then run the installer. The extension registers with the
+loopback daemon at `http://127.0.0.1:7700`,
 then keeps an authenticated WebSocket open at `ws://127.0.0.1:7700` with a 20s
 keepalive. Commands execute only after the daemon asks through the fixed
 extension origin and daemon-issued bridge token. If registration, message post,
