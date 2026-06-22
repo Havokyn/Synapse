@@ -659,8 +659,8 @@ function Get-SynapseChromeTopLevelWindows {
     $windows = @()
     foreach ($child in $children) {
         $current = $child.Current
-        $pid = [int]$current.ProcessId
-        if ($chromeProcesses -notcontains $pid) {
+        $processId = [int]$current.ProcessId
+        if ($chromeProcesses -notcontains $processId) {
             continue
         }
         $hwnd = [int64]$current.NativeWindowHandle
@@ -670,7 +670,7 @@ function Get-SynapseChromeTopLevelWindows {
         }
         $windows += [pscustomobject]@{
             hwnd = $hwnd
-            pid = $pid
+            pid = $processId
             title = $title
             class_name = [string]$current.ClassName
             is_foreground = ($hwnd -eq $foreground)
@@ -795,6 +795,39 @@ function Wait-SynapseUntil {
     return $null
 }
 
+function Find-SynapseChromeFolderDialog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int64]$ChromeWindowHwnd
+    )
+
+    $chromeWindows = @(Get-SynapseChromeTopLevelWindows)
+    foreach ($window in $chromeWindows) {
+        if ($window.title -match '^Select the extension directory\.?$') {
+            return $window
+        }
+        if ($window.hwnd -ne $ChromeWindowHwnd) {
+            continue
+        }
+        $dialog = Find-SynapseAutomationElementByName `
+            -Root $window.element `
+            -Name 'Select the extension directory.' `
+            -ControlType ([System.Windows.Automation.ControlType]::Window)
+        if ($dialog) {
+            $current = $dialog.Current
+            return [pscustomobject]@{
+                hwnd = [int64]$current.NativeWindowHandle
+                pid = $window.pid
+                title = [string]$current.Name
+                class_name = [string]$current.ClassName
+                is_foreground = $false
+                element = $dialog
+            }
+        }
+    }
+    return $null
+}
+
 function Invoke-SynapseChromeBridgeAutoInstall {
     param(
         [Parameter(Mandatory = $true)]
@@ -899,9 +932,7 @@ function Invoke-SynapseChromeBridgeAutoInstall {
         Invoke-SynapseAutomationElement -Element $loadUnpacked.button -Description 'Load unpacked'
 
         $dialog = Wait-SynapseUntil -Deadline $deadline -Probe {
-            @(Get-SynapseChromeTopLevelWindows | Where-Object {
-                $_.title -match '^Select the extension directory\.?$'
-            } | Select-Object -First 1)
+            Find-SynapseChromeFolderDialog -ChromeWindowHwnd $chromeWindow.hwnd
         }
         if (-not $dialog) {
             throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_FOLDER_DIALOG_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds remediation=Chrome did not open the folder picker after Load unpacked"
