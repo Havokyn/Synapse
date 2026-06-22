@@ -127,6 +127,9 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "set_perception_mode",
     "set_target",
     "storage_inspect",
+    "suggestion_accept",
+    "suggestion_list",
+    "suggestion_tick",
     "target_act",
     "target_claim",
     "target_claim_adopt",
@@ -1540,6 +1543,9 @@ mod tests {
         assert!(tools.contains(&"health".to_owned()));
         assert!(tools.contains(&"agent_spawn_task_started".to_owned()));
         assert!(tools.contains(&"cdp_open_tab".to_owned()));
+        assert!(tools.contains(&"suggestion_tick".to_owned()));
+        assert!(tools.contains(&"suggestion_list".to_owned()));
+        assert!(tools.contains(&"suggestion_accept".to_owned()));
         assert!(tools.contains(&"tool_profile_status".to_owned()));
         assert!(!tools.contains(&"act_click".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));

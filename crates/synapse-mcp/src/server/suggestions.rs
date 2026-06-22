@@ -32,10 +32,10 @@ use crate::m3::plan_execution::{
 };
 use crate::m3::suggestions::{
     SuggestionAcceptParams, SuggestionAcceptResponse, SuggestionListParams, SuggestionListResponse,
-    SuggestionTickParams, SuggestionTickResponse, accept_suggestion_for_execution,
-    list_suggestions, load_suggestion_by_id, record_suggestion_execution_feedback,
-    required_permissions_accept, required_permissions_list, required_permissions_tick,
-    suggestion_tick,
+    SuggestionRecord, SuggestionSource, SuggestionTickParams, SuggestionTickResponse,
+    accept_suggestion_for_execution, assist_plan_for_suggestion, list_suggestions,
+    load_suggestion_by_id, record_suggestion_execution_feedback, required_permissions_accept,
+    required_permissions_list, required_permissions_tick, suggestion_tick,
 };
 use crate::m4::{ActLaunchParams, LaunchWindowState};
 
@@ -280,6 +280,11 @@ impl SynapseService {
                 ),
             ));
         };
+        if existing.source == SuggestionSource::AssistOpportunity {
+            return self
+                .assist_suggestion_accept_impl(db, existing, params, session_id)
+                .await;
+        }
         let plan = load_or_compile_plan(&db, &existing.routine_id, !params.dry_run)?;
         let accepted_ts_ns = now_ts_ns();
         let started_ts_ns = accepted_ts_ns;
@@ -334,6 +339,72 @@ impl SynapseService {
                 completed_ts_ns,
                 &feedback_note,
             )?;
+        }
+        Ok(SuggestionAcceptResponse {
+            suggestion: accepted,
+            plan,
+            execution,
+        })
+    }
+
+    async fn assist_suggestion_accept_impl(
+        &self,
+        db: std::sync::Arc<synapse_storage::Db>,
+        existing: SuggestionRecord,
+        params: SuggestionAcceptParams,
+        session_id: Option<String>,
+    ) -> Result<SuggestionAcceptResponse, ErrorData> {
+        let accepted_ts_ns = now_ts_ns();
+        let started_ts_ns = accepted_ts_ns;
+        let plan = assist_plan_for_suggestion(&existing, accepted_ts_ns)?;
+        let execution_id = plan_execution_id(&existing.suggestion_id, started_ts_ns);
+        let plan_ref = format!(
+            "assist-opportunity/v1/{}",
+            existing
+                .source_event_id
+                .as_deref()
+                .unwrap_or(&existing.routine_id)
+        );
+        let accepted = accept_suggestion_for_execution(
+            &db,
+            &existing.suggestion_id,
+            accepted_ts_ns,
+            &plan_ref,
+            &execution_id,
+            params.dry_run,
+        )?;
+        let options = PlanExecutionOptions::suggestion_accept(&params);
+        let steps = if params.dry_run {
+            plan.steps
+                .iter()
+                .map(|step| dry_run_step_report(step, &options))
+                .collect()
+        } else {
+            self.execute_assist_plan_steps(&accepted, &plan, &options)
+                .await
+        };
+        let completed_ts_ns = now_ts_ns();
+        let execution = build_plan_execution_record(
+            execution_id,
+            accepted.suggestion_id.clone(),
+            session_id,
+            accepted_ts_ns,
+            started_ts_ns,
+            completed_ts_ns,
+            params.dry_run,
+            plan.clone(),
+            steps,
+        );
+        if !params.dry_run {
+            write_plan_execution(&db, &execution)?;
+            tracing::info!(
+                code = "ASSIST_SUGGESTION_ACCEPTED",
+                suggestion_id = %accepted.suggestion_id,
+                source_event_id = accepted.source_event_id.as_deref().unwrap_or(""),
+                execution_id = %execution.execution_id,
+                execution_status = execution.status.as_str(),
+                "assist suggestion accepted and execution report persisted"
+            );
         }
         Ok(SuggestionAcceptResponse {
             suggestion: accepted,
@@ -516,6 +587,135 @@ impl SynapseService {
             reports.push(report);
         }
         reports
+    }
+
+    async fn execute_assist_plan_steps(
+        &self,
+        suggestion: &SuggestionRecord,
+        plan: &PlanDocument,
+        options: &PlanExecutionOptions,
+    ) -> Vec<PlanStepExecutionReport> {
+        plan.steps
+            .iter()
+            .map(|step| self.execute_assist_mitigation_step(suggestion, step, options))
+            .collect()
+    }
+
+    fn execute_assist_mitigation_step(
+        &self,
+        suggestion: &SuggestionRecord,
+        step: &PlanStep,
+        options: &PlanExecutionOptions,
+    ) -> PlanStepExecutionReport {
+        let started = now_ts_ns();
+        let Some(mitigation) = &suggestion.mitigation else {
+            return step_report(
+                started,
+                step,
+                PlanStepExecutionStatus::Failed,
+                json!({
+                    "suggestion_id": &suggestion.suggestion_id,
+                    "caller": options.caller,
+                }),
+                Some("ASSIST_MITIGATION_MISSING"),
+                Some("assist suggestion has no mitigation payload".to_owned()),
+            );
+        };
+        let Some(hwnd) = mitigation.target_window_hwnd else {
+            return step_report(
+                started,
+                step,
+                PlanStepExecutionStatus::Refused,
+                json!({
+                    "suggestion_id": &suggestion.suggestion_id,
+                    "source_event_id": &mitigation.source_event_id,
+                    "detector": &mitigation.detector,
+                    "caller": options.caller,
+                    "reason": "assist event did not identify a target HWND",
+                }),
+                Some("ASSIST_TARGET_UNIDENTIFIED"),
+                Some(
+                    "assist correction requires a target HWND so the in-session report can read back the physical app state"
+                        .to_owned(),
+                ),
+            );
+        };
+        match synapse_a11y::foreground_context(hwnd) {
+            Ok(context) => {
+                let process_matches = mitigation
+                    .process_name
+                    .as_ref()
+                    .is_none_or(|expected| expected.eq_ignore_ascii_case(&context.process_name));
+                let pid_matches = mitigation.target_pid.is_none_or(|pid| pid == context.pid);
+                let evidence = json!({
+                    "suggestion_id": &suggestion.suggestion_id,
+                    "source_event_id": &mitigation.source_event_id,
+                    "detector": &mitigation.detector,
+                    "strategy": mitigation.strategy,
+                    "caller": options.caller,
+                    "target_readback": {
+                        "hwnd": context.hwnd,
+                        "pid": context.pid,
+                        "process_name": &context.process_name,
+                        "window_title_present": !context.window_title.is_empty(),
+                        "is_fullscreen": context.is_fullscreen,
+                        "is_dwm_composed": context.is_dwm_composed,
+                    },
+                    "expected_target": {
+                        "hwnd": hwnd,
+                        "pid": mitigation.target_pid,
+                        "process_name": &mitigation.process_name,
+                    },
+                    "process_matches": process_matches,
+                    "pid_matches": pid_matches,
+                    "correction_attempt": {
+                        "mode": "in_session_report",
+                        "mutation": "not_attempted_without_verifiable_desired_state",
+                        "honesty": "privacy-safe detector evidence does not include raw user content; success means the scoped assist report and fresh target readback were produced"
+                    },
+                    "postcondition": mitigation.postcondition,
+                });
+                if process_matches && pid_matches {
+                    step_report(
+                        started,
+                        step,
+                        PlanStepExecutionStatus::Succeeded,
+                        evidence,
+                        None,
+                        None,
+                    )
+                } else {
+                    step_report(
+                        started,
+                        step,
+                        PlanStepExecutionStatus::Failed,
+                        evidence,
+                        Some("ASSIST_TARGET_READBACK_MISMATCH"),
+                        Some(
+                            "assist target HWND resolved, but process/pid no longer match the detector evidence"
+                                .to_owned(),
+                        ),
+                    )
+                }
+            }
+            Err(error) => step_report(
+                started,
+                step,
+                PlanStepExecutionStatus::Failed,
+                json!({
+                    "suggestion_id": &suggestion.suggestion_id,
+                    "source_event_id": &mitigation.source_event_id,
+                    "detector": &mitigation.detector,
+                    "target_hwnd": hwnd,
+                    "caller": options.caller,
+                    "a11y_error": error.to_string(),
+                }),
+                Some("ASSIST_TARGET_READBACK_FAILED"),
+                Some(format!(
+                    "assist correction target hwnd 0x{hwnd:x} could not be read back: {error}"
+                )),
+            ),
+        }
     }
 
     async fn execute_plan_step(

@@ -28,17 +28,20 @@ use std::sync::Arc;
 use chrono::{Local, TimeZone, Timelike};
 use rmcp::{ErrorData, schemars::JsonSchema};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use synapse_core::error_codes;
 use synapse_core::intent::IntentCandidate;
-use synapse_core::types::{RoutineFeedbackOutcome, RoutineLifecycle};
+use synapse_core::types::{RoutineFeedbackOutcome, RoutineGranularity, RoutineLifecycle};
+use synapse_core::{SCHEMA_VERSION, StoredEvent};
 use synapse_storage::{Db, cf, decode_json, encode_json};
 
 use crate::m1::mcp_error;
 
-use super::episodes::now_ts_ns;
+use super::episodes::{key_after, now_ts_ns};
 use super::intent::{IntentCurrentParams, current_intents};
 use super::permissions::{Permission, RequiredPermissions, required};
-use super::plan::PlanDocument;
+use super::plan::{PlanBackend, PlanDocument, PlanStep, Postcondition};
 use super::plan_execution::PlanExecutionRecord;
 use super::routines::{
     RoutineFeedbackParams, feedback_suppressed, load_state_row, record_routine_feedback,
@@ -50,6 +53,12 @@ const SUGGESTION_PREFIX: &str = "suggestion/v1/";
 const SUGGESTION_RECORD_VERSION: u32 = 1;
 /// The engine actor recorded on feedback it generates.
 const SUGGESTION_ACTOR: &str = "suggestion-engine";
+const ASSIST_EVENT_KIND: &str = "assist.opportunity";
+const ASSIST_ROUTINE_PREFIX: &str = "assist1-";
+const DEFAULT_ASSIST_LOOKBACK_SECS: u64 = 900;
+const MAX_ASSIST_LOOKBACK_SECS: u64 = 86_400;
+const ASSIST_EVENT_SCAN_ROWS: usize = 4_096;
+const ASSIST_PLAN_RECORD_VERSION: u32 = 1;
 
 const ENGINE_VERSION_DEFAULTS: &str = "see SuggestionConfig::from_env";
 
@@ -134,6 +143,43 @@ pub enum SuggestionStatus {
     Abandoned,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionSource {
+    RoutineIntent,
+    AssistOpportunity,
+}
+
+const fn default_suggestion_source() -> SuggestionSource {
+    SuggestionSource::RoutineIntent
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistMitigationStrategy {
+    InSessionCorrection,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistMitigation {
+    pub strategy: AssistMitigationStrategy,
+    pub source_event_id: String,
+    pub detector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_window_hwnd: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_origin: Option<String>,
+    pub instruction: String,
+    pub postcondition: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub evidence: Value,
+}
+
 /// One surfaced suggestion, persisted in `CF_KV`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -141,8 +187,16 @@ pub struct SuggestionRecord {
     pub record_version: u32,
     pub suggestion_id: String,
     pub routine_id: String,
+    #[serde(default = "default_suggestion_source")]
+    pub source: SuggestionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitigation: Option<AssistMitigation>,
     pub created_ts_ns: u64,
     pub expiry_ts_ns: u64,
     pub status: SuggestionStatus,
@@ -273,6 +327,16 @@ pub struct SuggestionTickParams {
     /// Compute the decision for every candidate but persist nothing.
     #[serde(default)]
     pub dry_run: bool,
+    /// Include stored ASSIST_OPPORTUNITY detector events in the same gated pass.
+    #[serde(default = "default_true")]
+    pub include_assist_opportunities: bool,
+    /// Recent assist-event lookback. Defaults to 15 minutes, capped at 24h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assist_lookback_secs: Option<u64>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// One per-candidate gate decision, echoed for auditability.
@@ -280,10 +344,13 @@ pub struct SuggestionTickParams {
 #[serde(deny_unknown_fields)]
 pub struct GateDecisionRow {
     pub routine_id: String,
+    pub source: SuggestionSource,
     pub confidence: f64,
     pub outcome: GateOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
@@ -295,6 +362,8 @@ pub struct SuggestionTickResponse {
     pub created: Vec<String>,
     pub expired: Vec<String>,
     pub abandoned: Vec<String>,
+    pub assist_events_scanned: u32,
+    pub assist_events_evaluated: u32,
     /// Every candidate's gate decision (created or suppressed-with-reason).
     pub decisions: Vec<GateDecisionRow>,
     pub config: SuggestionConfigEcho,
@@ -339,6 +408,267 @@ fn storage_error(error: impl std::fmt::Display) -> ErrorData {
 
 fn suggestion_key(routine_id: &str, created_ts_ns: u64) -> Vec<u8> {
     format!("{SUGGESTION_PREFIX}{routine_id}/{created_ts_ns:020}").into_bytes()
+}
+
+fn event_scan_start_key(ts_ns: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(12);
+    key.extend_from_slice(&ts_ns.to_be_bytes());
+    key.extend_from_slice(&0_u32.to_be_bytes());
+    key
+}
+
+fn event_key_ts_ns(key: &[u8]) -> Option<u64> {
+    let bytes: [u8; 8] = key.get(..8)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn sha256_short_hex(material: &str) -> String {
+    let digest = Sha256::digest(material.as_bytes());
+    hex_encode(&digest[..8])
+}
+
+#[derive(Clone, Debug)]
+struct AssistOpportunityCandidate {
+    routine_id: String,
+    source_event_id: String,
+    label: String,
+    offer: String,
+    confidence: f64,
+    matched_prefix_len: u32,
+    total_steps: u32,
+    remaining_step_count: u32,
+    mitigation: AssistMitigation,
+}
+
+fn assist_lookback_secs(params: &SuggestionTickParams) -> u64 {
+    params
+        .assist_lookback_secs
+        .unwrap_or(DEFAULT_ASSIST_LOOKBACK_SECS)
+        .clamp(1, MAX_ASSIST_LOOKBACK_SECS)
+}
+
+fn detector_label(detector: &str) -> &'static str {
+    match detector {
+        "undo_burst" => "undo loop",
+        "retype_loop" => "retyping loop",
+        "repeated_click_without_state_change" => "repeated click loop",
+        "dialog_reopen_loop" => "reopening dialog",
+        _ => "interaction struggle",
+    }
+}
+
+fn detector_offer(detector: &str, process_name: Option<&str>) -> String {
+    let label = detector_label(detector);
+    let article = if label
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
+    {
+        "an"
+    } else {
+        "a"
+    };
+    match process_name {
+        Some(process) if !process.trim().is_empty() => {
+            format!(
+                "Stuck in {article} {label} in {process}? I can inspect the target and try a scoped correction."
+            )
+        }
+        _ => {
+            format!(
+                "Stuck in {article} {label}? I can inspect the target and try a scoped correction."
+            )
+        }
+    }
+}
+
+fn assist_candidate_key_material(event: &StoredEvent, detector: &str) -> String {
+    let window = event.data.get("window").unwrap_or(&Value::Null);
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        detector,
+        window
+            .get("hwnd")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        window
+            .get("pid")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        window
+            .get("process_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        window
+            .get("focused_element_sha256")
+            .and_then(Value::as_str)
+            .unwrap_or("window"),
+        window
+            .get("focused_role")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+}
+
+fn assist_candidate_from_event(
+    event: &StoredEvent,
+) -> Result<Option<AssistOpportunityCandidate>, ErrorData> {
+    if event.kind != ASSIST_EVENT_KIND {
+        return Ok(None);
+    }
+    let detector = event
+        .data
+        .get("detector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::STORAGE_CORRUPTED,
+                format!(
+                    "ASSIST_OPPORTUNITY_EVENT_MISSING_DETECTOR: CF_EVENTS row {} lacks data.detector",
+                    event.event_id
+                ),
+            )
+        })?;
+    let source_event_id = event
+        .data
+        .get("opportunity_id")
+        .and_then(Value::as_str)
+        .unwrap_or(&event.event_id)
+        .to_owned();
+    let confidence = event
+        .data
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let window = event.data.get("window").unwrap_or(&Value::Null);
+    let target_window_hwnd = window.get("hwnd").and_then(Value::as_i64);
+    let target_pid = window
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let process_name = window
+        .get("process_name")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let input_origin = event
+        .data
+        .pointer("/trigger/input_origin")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let key_material = assist_candidate_key_material(event, detector);
+    let routine_id = format!("{ASSIST_ROUTINE_PREFIX}{}", sha256_short_hex(&key_material));
+    let label = format!("Assist: {}", detector_label(detector));
+    let offer = detector_offer(detector, process_name.as_deref());
+    let instruction = format!(
+        "Inspect the current target for assist opportunity {source_event_id} ({detector}); use the privacy-safe event evidence and fresh observation only, then apply a scoped correction when the postcondition is verifiable. If no safe correction can be inferred, report the precise blocker instead of mutating the app."
+    );
+    let mitigation = AssistMitigation {
+        strategy: AssistMitigationStrategy::InSessionCorrection,
+        source_event_id: source_event_id.clone(),
+        detector: detector.to_owned(),
+        target_window_hwnd,
+        target_pid,
+        process_name,
+        input_origin,
+        instruction,
+        postcondition: "fresh target readback exists and the in-session assist attempt reports success evidence or a precise failure".to_owned(),
+        evidence: json!({
+            "event_id": &event.event_id,
+            "opportunity_id": &source_event_id,
+            "detector": detector,
+            "confidence": confidence,
+            "trigger": event.data.get("trigger").cloned().unwrap_or(Value::Null),
+            "window": window,
+            "counts": event.data.get("counts").cloned().unwrap_or(Value::Null),
+            "privacy": event.data.get("privacy").cloned().unwrap_or(Value::Null),
+        }),
+    };
+
+    Ok(Some(AssistOpportunityCandidate {
+        routine_id,
+        source_event_id,
+        label,
+        offer,
+        confidence,
+        matched_prefix_len: 1,
+        total_steps: 1,
+        remaining_step_count: 1,
+        mitigation,
+    }))
+}
+
+fn load_recent_assist_opportunities(
+    db: &Arc<Db>,
+    now: u64,
+    lookback_secs: u64,
+) -> Result<(Vec<AssistOpportunityCandidate>, u32), ErrorData> {
+    let start_ts_ns = now.saturating_sub(lookback_secs.saturating_mul(1_000_000_000));
+    let mut start_key = event_scan_start_key(start_ts_ns);
+    let mut scanned: u32 = 0;
+    let mut candidates = Vec::new();
+    'scan: loop {
+        let (rows, more) = db
+            .scan_cf_from(cf::CF_EVENTS, &start_key, ASSIST_EVENT_SCAN_ROWS)
+            .map_err(storage_error)?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut last_key: Option<Vec<u8>> = None;
+        for (key, value) in rows {
+            if let Some(key_ts_ns) = event_key_ts_ns(&key) {
+                if key_ts_ns > now {
+                    break 'scan;
+                }
+            }
+            scanned = scanned.saturating_add(1);
+            let event: StoredEvent = decode_json(&value).map_err(|error| {
+                mcp_error(
+                    error_codes::STORAGE_CORRUPTED,
+                    format!(
+                        "ASSIST_EVENT_ROW_DECODE_FAILED in CF_EVENTS at {}: {error}",
+                        hex_encode(&key)
+                    ),
+                )
+            })?;
+            if event.schema_version != SCHEMA_VERSION {
+                return Err(mcp_error(
+                    error_codes::STORAGE_CORRUPTED,
+                    format!(
+                        "ASSIST_EVENT_SCHEMA_VERSION_UNSUPPORTED in CF_EVENTS at {}: expected {}, got {}",
+                        hex_encode(&key),
+                        SCHEMA_VERSION,
+                        event.schema_version
+                    ),
+                ));
+            }
+            if event.ts_ns >= start_ts_ns
+                && event.ts_ns <= now
+                && let Some(candidate) = assist_candidate_from_event(&event)?
+            {
+                candidates.push(candidate);
+            }
+            last_key = Some(key);
+        }
+        if !more {
+            break;
+        }
+        let Some(last_key) = last_key else {
+            break;
+        };
+        start_key = key_after(&last_key);
+    }
+    Ok((candidates, scanned))
 }
 
 /// Loads every suggestion row, newest decode first is irrelevant (callers
@@ -570,6 +900,11 @@ pub fn suggestion_tick(
         .iter()
         .map(|c| c.routine_id.clone())
         .collect();
+    let (assist_candidates, assist_events_scanned) = if params.include_assist_opportunities {
+        load_recent_assist_opportunities(db, now, assist_lookback_secs(params))?
+    } else {
+        (Vec::new(), 0)
+    };
 
     let mut suggestions = load_all_suggestions(db)?;
     let mut expired = Vec::new();
@@ -586,16 +921,20 @@ pub fn suggestion_tick(
             record.resolution_note = Some("timed out unanswered".to_owned());
             if !params.dry_run {
                 write_suggestion(db, record)?;
-                record_terminal_feedback(
-                    db,
-                    &record.routine_id,
-                    RoutineFeedbackOutcome::IgnoredTimeout,
-                    now,
-                    "suggestion expired (timeout)",
-                )?;
+                if record.source == SuggestionSource::RoutineIntent {
+                    record_terminal_feedback(
+                        db,
+                        &record.routine_id,
+                        RoutineFeedbackOutcome::IgnoredTimeout,
+                        now,
+                        "suggestion expired (timeout)",
+                    )?;
+                }
             }
             expired.push(record.suggestion_id.clone());
-        } else if !candidate_routines.contains(&record.routine_id) {
+        } else if record.source == SuggestionSource::RoutineIntent
+            && !candidate_routines.contains(&record.routine_id)
+        {
             record.status = SuggestionStatus::Abandoned;
             record.resolved_ts_ns = Some(now);
             record.resolution_note = Some("routine left the live intent set".to_owned());
@@ -650,9 +989,45 @@ pub fn suggestion_tick(
         }
         decisions.push(GateDecisionRow {
             routine_id: candidate.routine_id.clone(),
+            source: SuggestionSource::RoutineIntent,
             confidence: candidate.confidence,
             outcome,
             suggestion_id: created_id,
+            source_event_id: None,
+        });
+    }
+
+    for candidate in &assist_candidates {
+        let outcome = gate_decision(
+            &candidate.routine_id,
+            candidate.confidence,
+            RoutineLifecycle::Confirmed,
+            false,
+            now,
+            now_minute,
+            &live,
+            &config,
+        );
+        let mut created_id = None;
+        if outcome == GateOutcome::Surface && !params.dry_run {
+            let record = build_assist_suggestion(candidate, now, &config);
+            write_suggestion(db, &record)?;
+            live.live_routines.insert(record.routine_id.clone());
+            live.last_created_by_routine
+                .insert(record.routine_id.clone(), record.created_ts_ns);
+            live.created_ts.push(record.created_ts_ns);
+            created.push(record.suggestion_id.clone());
+            created_id = Some(record.suggestion_id.clone());
+        } else if outcome == GateOutcome::Surface && params.dry_run {
+            created_id = Some(format!("(dry-run){}", candidate.routine_id));
+        }
+        decisions.push(GateDecisionRow {
+            routine_id: candidate.routine_id.clone(),
+            source: SuggestionSource::AssistOpportunity,
+            confidence: candidate.confidence,
+            outcome,
+            suggestion_id: created_id,
+            source_event_id: Some(candidate.source_event_id.clone()),
         });
     }
 
@@ -663,6 +1038,8 @@ pub fn suggestion_tick(
         created,
         expired,
         abandoned,
+        assist_events_scanned,
+        assist_events_evaluated: u32::try_from(assist_candidates.len()).unwrap_or(u32::MAX),
         decisions,
         config: config.into(),
     })
@@ -693,7 +1070,14 @@ fn build_suggestion(
         record_version: SUGGESTION_RECORD_VERSION,
         suggestion_id: format!("sg1-{}-{now:020}", candidate.routine_id),
         routine_id: candidate.routine_id.clone(),
+        source: SuggestionSource::RoutineIntent,
+        source_event_id: None,
         label: candidate.label.clone(),
+        offer: candidate
+            .label
+            .as_ref()
+            .map(|label| format!("Continue {label}? I can run the remaining setup steps.")),
+        mitigation: None,
         created_ts_ns: now,
         expiry_ts_ns: now.saturating_add(config.expiry_secs.saturating_mul(1_000_000_000)),
         status: SuggestionStatus::Live,
@@ -705,6 +1089,86 @@ fn build_suggestion(
         resolved_ts_ns: None,
         resolution_note: None,
     }
+}
+
+fn build_assist_suggestion(
+    candidate: &AssistOpportunityCandidate,
+    now: u64,
+    config: &SuggestionConfig,
+) -> SuggestionRecord {
+    SuggestionRecord {
+        record_version: SUGGESTION_RECORD_VERSION,
+        suggestion_id: format!("sg1-{}-{now:020}", candidate.routine_id),
+        routine_id: candidate.routine_id.clone(),
+        source: SuggestionSource::AssistOpportunity,
+        source_event_id: Some(candidate.source_event_id.clone()),
+        label: Some(candidate.label.clone()),
+        offer: Some(candidate.offer.clone()),
+        mitigation: Some(candidate.mitigation.clone()),
+        created_ts_ns: now,
+        expiry_ts_ns: now.saturating_add(config.expiry_secs.saturating_mul(1_000_000_000)),
+        status: SuggestionStatus::Live,
+        confidence: candidate.confidence,
+        matched_prefix_len: candidate.matched_prefix_len,
+        total_steps: candidate.total_steps,
+        remaining_step_count: candidate.remaining_step_count,
+        proposed_plan_ref: None,
+        resolved_ts_ns: None,
+        resolution_note: None,
+    }
+}
+
+pub fn assist_plan_for_suggestion(
+    record: &SuggestionRecord,
+    compiled_ts_ns: u64,
+) -> Result<PlanDocument, ErrorData> {
+    if record.source != SuggestionSource::AssistOpportunity {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "ASSIST_PLAN_SOURCE_MISMATCH: suggestion {} has source {:?}",
+                record.suggestion_id, record.source
+            ),
+        ));
+    }
+    let Some(mitigation) = &record.mitigation else {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            format!(
+                "ASSIST_SUGGESTION_MISSING_MITIGATION: suggestion {} has no mitigation payload",
+                record.suggestion_id
+            ),
+        ));
+    };
+    let source_app = mitigation
+        .process_name
+        .clone()
+        .unwrap_or_else(|| "assist-opportunity".to_owned());
+    let action = format!(
+        "in-session assist correction for {} from {}",
+        mitigation.detector, mitigation.source_event_id
+    );
+    Ok(PlanDocument {
+        record_version: ASSIST_PLAN_RECORD_VERSION,
+        routine_id: record.routine_id.clone(),
+        compiled_ts_ns,
+        granularity: RoutineGranularity::App,
+        schedule_label: "assist opportunity".to_owned(),
+        total_steps: 1,
+        deterministic_steps: 0,
+        agent_task_steps: 1,
+        fully_deterministic: false,
+        steps: vec![PlanStep {
+            index: 0,
+            source_app,
+            source_document: Some(mitigation.detector.clone()),
+            backend: PlanBackend::AgentTask,
+            deterministic: false,
+            action,
+            postcondition: Postcondition::AgentReported,
+            agent_task_reason: Some(mitigation.instruction.clone()),
+        }],
+    })
 }
 
 fn is_routine_suppressed(db: &Arc<Db>, routine_id: &str, now: u64) -> Result<bool, ErrorData> {
@@ -828,7 +1292,11 @@ mod tests {
             record_version: SUGGESTION_RECORD_VERSION,
             suggestion_id: "sg1-rt1-accept-000000000000000001".to_owned(),
             routine_id: "rt1-accept".to_owned(),
+            source: SuggestionSource::RoutineIntent,
+            source_event_id: None,
             label: Some("Daily setup".to_owned()),
+            offer: Some("Continue Daily setup? I can run the remaining setup steps.".to_owned()),
+            mitigation: None,
             created_ts_ns: T,
             expiry_ts_ns: T + 600_000_000_000,
             status: SuggestionStatus::Live,
@@ -867,6 +1335,125 @@ mod tests {
             .expect("load readback")
             .expect("accepted suggestion exists");
         assert_eq!(readback, accepted);
+    }
+
+    fn assist_event(ts_ns: u64) -> StoredEvent {
+        StoredEvent {
+            schema_version: SCHEMA_VERSION,
+            event_id: "assist-opportunity-test".to_owned(),
+            ts_ns,
+            session_id: None,
+            audit_context: None,
+            source: synapse_core::EventSource::System,
+            kind: ASSIST_EVENT_KIND.to_owned(),
+            data: json!({
+                "opportunity_id": "assist-test-1",
+                "detector": "retype_loop",
+                "confidence": 0.78,
+                "trigger": {
+                    "actor": {"kind": "human"},
+                    "input_origin": "unit_test"
+                },
+                "window": {
+                    "hwnd": 1234,
+                    "pid": 4321,
+                    "process_name": "notepad.exe",
+                    "window_title_sha256": "title-hash",
+                    "focused_element_sha256": "element-hash",
+                    "focused_role": "edit"
+                },
+                "counts": {
+                    "text_like_key_count": 4,
+                    "delete_command_count": 2
+                },
+                "privacy": {
+                    "raw_typed_text": false,
+                    "raw_key_names": false,
+                    "mouse_coordinates": false,
+                    "raw_window_title": false,
+                    "raw_element_value": false
+                }
+            }),
+            window_id: Some(1234),
+            element_id: None,
+            redacted: false,
+            redactions: Vec::new(),
+        }
+    }
+
+    fn write_assist_event(db: &Arc<Db>, event: StoredEvent) {
+        let value = encode_json(&event).expect("encode event");
+        db.put_batch_pressure_bypass(cf::CF_EVENTS, [(event_scan_start_key(event.ts_ns), value)])
+            .expect("write assist event");
+        db.flush().expect("flush assist event");
+    }
+
+    #[test]
+    fn suggestion_tick_surfaces_assist_opportunity_and_dedups_live_offer() {
+        let (_dir, db) = temp_db();
+        write_assist_event(&db, assist_event(T));
+
+        let created = suggestion_tick(
+            &db,
+            &SuggestionTickParams {
+                now_ts_ns: Some(T + 1),
+                lookback_hours: None,
+                dry_run: false,
+                include_assist_opportunities: true,
+                assist_lookback_secs: Some(60),
+            },
+        )
+        .expect("tick creates assist suggestion");
+
+        assert_eq!(created.created.len(), 1);
+        assert_eq!(created.assist_events_scanned, 1);
+        assert_eq!(created.assist_events_evaluated, 1);
+        let decision = created
+            .decisions
+            .iter()
+            .find(|row| row.source == SuggestionSource::AssistOpportunity)
+            .expect("assist decision");
+        assert_eq!(decision.outcome, GateOutcome::Surface);
+        assert_eq!(decision.source_event_id.as_deref(), Some("assist-test-1"));
+
+        let suggestion = load_suggestion_by_id(&db, &created.created[0])
+            .expect("load assist suggestion")
+            .expect("assist suggestion exists");
+        assert_eq!(suggestion.source, SuggestionSource::AssistOpportunity);
+        assert_eq!(suggestion.source_event_id.as_deref(), Some("assist-test-1"));
+        assert!(
+            suggestion
+                .offer
+                .as_deref()
+                .unwrap_or_default()
+                .contains("retyping loop")
+        );
+        assert_eq!(
+            suggestion
+                .mitigation
+                .as_ref()
+                .and_then(|m| m.target_window_hwnd),
+            Some(1234)
+        );
+
+        let dedup = suggestion_tick(
+            &db,
+            &SuggestionTickParams {
+                now_ts_ns: Some(T + 2),
+                lookback_hours: None,
+                dry_run: false,
+                include_assist_opportunities: true,
+                assist_lookback_secs: Some(60),
+            },
+        )
+        .expect("second tick succeeds");
+        let assist_decision = dedup
+            .decisions
+            .iter()
+            .find(|row| row.source == SuggestionSource::AssistOpportunity)
+            .expect("assist decision on second tick");
+        assert_eq!(assist_decision.outcome, GateOutcome::DuplicateLive);
+        assert!(dedup.created.is_empty());
     }
 
     #[test]
