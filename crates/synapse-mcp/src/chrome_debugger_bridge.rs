@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-wait-function-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-load-state-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "ddc78a20ea4310e18fbb1d220f506006b22f56869fe58c08cfc83ea07f7cdde8";
+    "529c1fa8b6bd96cd6494cd28d912d08580592a8fb272d7ef613e8bb0380a1a04";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -64,6 +64,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "scrollIntoView",
     "waitForText",
     "waitForFunction",
+    "waitForLoadState",
     "waitForSelector",
     "clock",
     "pageEvents",
@@ -1951,6 +1952,56 @@ pub(crate) struct ChromeDebuggerWaitForFunctionResult {
     pub value_description: Option<String>,
     #[serde(default)]
     pub unserializable_value: Option<String>,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerWaitForLoadStateResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub condition_met: bool,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub polling_interval_ms: u64,
+    #[serde(default)]
+    pub poll_count: u64,
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub network_event_count: u64,
+    #[serde(default)]
+    pub max_in_flight_requests: usize,
+    #[serde(default)]
+    pub in_flight_requests: usize,
+    #[serde(default)]
+    pub network_idle_quiet_ms: u64,
+    #[serde(default)]
+    pub lifecycle_network_idle_seen: bool,
     #[serde(default)]
     pub readback_backend: String,
     #[serde(default)]
@@ -4575,6 +4626,32 @@ pub(crate) async fn wait_for_function(
     serde_json::from_value::<ChromeDebuggerWaitForFunctionResult>(result).map_err(|error| {
         ChromeDebuggerBridgeError::protocol(format!(
             "decode Chrome debugger waitForFunction response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn wait_for_load_state(
+    hwnd: i64,
+    target_id: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<ChromeDebuggerWaitForLoadStateResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "waitForLoadState")?;
+    let result = bridge()
+        .send_command(
+            "waitForLoadState",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "state": state,
+                "timeoutMs": timeout_ms,
+                "pollingIntervalMs": 100,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerWaitForLoadStateResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger waitForLoadState response: {error}"
         ))
     })
 }

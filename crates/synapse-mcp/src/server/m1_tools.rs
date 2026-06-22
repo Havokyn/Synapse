@@ -2181,7 +2181,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Wait for a page lifecycle state in the calling session's owned browser tab: domcontentloaded, load, or networkidle. networkidle requires load plus no in-flight Network requests for 500 ms, using target-scoped Page lifecycle and Network event readback. Timed-out waits return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Wait for a page lifecycle state in the calling session's owned browser tab: domcontentloaded, load, or networkidle. Uses raw CDP Page lifecycle + Network buffers when available, or the normal Chrome bridge for chrome-tab:* targets using page readyState, webNavigation events, and in-page fetch/XHR/resource-timing quiet polling. Timed-out waits return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_wait_for_load_state(
         &self,
@@ -5685,6 +5685,77 @@ impl SynapseService {
     ) -> Result<BrowserWaitForLoadStateResponse, ErrorData> {
         const TOOL: &str = "browser_wait_for_load_state";
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let state = browser_wait_for_load_state_bridge_name(wait.state);
+                let waited = crate::chrome_debugger_bridge::wait_for_load_state(
+                    window_hwnd,
+                    cdp_target_id,
+                    state,
+                    wait.timeout_ms,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_wait_for_load_state normal bridge wait failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                if waited.timed_out {
+                    return Err(mcp_error(
+                        error_codes::BROWSER_WAIT_TIMEOUT,
+                        format!(
+                            "browser_wait_for_load_state timed out after {} ms waiting for {:?}; poll_count={} event_count={} network_event_count={} in_flight_requests={} network_idle_quiet_ms={}",
+                            wait.timeout_ms,
+                            wait.state,
+                            waited.poll_count,
+                            waited.event_count,
+                            waited.network_event_count,
+                            waited.in_flight_requests,
+                            waited.network_idle_quiet_ms
+                        ),
+                    ));
+                }
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_WAIT_FOR_LOAD_STATE",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %waited.target_id,
+                    state = ?wait.state,
+                    elapsed_ms = waited.elapsed_ms,
+                    event_count = waited.event_count,
+                    network_event_count = waited.network_event_count,
+                    max_in_flight_requests = waited.max_in_flight_requests,
+                    in_flight_requests = waited.in_flight_requests,
+                    target_url = %waited.url,
+                    "readback=chrome.webNavigation+chrome.scripting.executeScript(load-state polling) outcome=wait_satisfied"
+                );
+                return Ok(BrowserWaitForLoadStateResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome_bridge".to_owned(),
+                    cdp_target_id: waited.target_id,
+                    state: wait.state,
+                    condition_met: waited.condition_met,
+                    elapsed_ms: waited.elapsed_ms,
+                    timeout_ms: wait.timeout_ms,
+                    event_count: waited.event_count,
+                    network_event_count: waited.network_event_count,
+                    max_in_flight_requests: waited.max_in_flight_requests,
+                    in_flight_requests: waited.in_flight_requests,
+                    network_idle_quiet_ms: waited.network_idle_quiet_ms,
+                    lifecycle_network_idle_seen: waited.lifecycle_network_idle_seen,
+                    url: waited.url,
+                    title: waited.title,
+                    ready_state: waited.ready_state,
+                    readback_backend: waited.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
         };
         let requested_state = browser_wait_for_load_state_to_a11y(wait.state);
@@ -10038,6 +10109,14 @@ fn browser_wait_for_state_bridge_name(state: BrowserWaitForState) -> &'static st
     }
 }
 
+fn browser_wait_for_load_state_bridge_name(state: BrowserWaitForLoadStateState) -> &'static str {
+    match state {
+        BrowserWaitForLoadStateState::DomContentLoaded => "domcontentloaded",
+        BrowserWaitForLoadStateState::Load => "load",
+        BrowserWaitForLoadStateState::NetworkIdle => "networkidle",
+    }
+}
+
 fn browser_wait_for_selector_state_bridge_name(state: BrowserWaitForSelectorState) -> &'static str {
     match state {
         BrowserWaitForSelectorState::Attached => "attached",
@@ -13319,24 +13398,32 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn browser_wait_for_load_state_mapping_is_total() {
-        use super::browser_wait_for_load_state_to_a11y;
+        use super::{browser_wait_for_load_state_bridge_name, browser_wait_for_load_state_to_a11y};
         use synapse_a11y::CdpLoadState;
 
         let states = [
             (
                 BrowserWaitForLoadStateState::DomContentLoaded,
                 CdpLoadState::DomContentLoaded,
+                "domcontentloaded",
             ),
-            (BrowserWaitForLoadStateState::Load, CdpLoadState::Load),
+            (
+                BrowserWaitForLoadStateState::Load,
+                CdpLoadState::Load,
+                "load",
+            ),
             (
                 BrowserWaitForLoadStateState::NetworkIdle,
                 CdpLoadState::NetworkIdle,
+                "networkidle",
             ),
         ];
-        for (wire, expected) in states {
+        for (wire, expected, bridge_name) in states {
             let got = browser_wait_for_load_state_to_a11y(wire);
-            println!("readback=load_state_map wire={wire:?} a11y={got:?}");
+            let bridge = browser_wait_for_load_state_bridge_name(wire);
+            println!("readback=load_state_map wire={wire:?} a11y={got:?} bridge={bridge}");
             assert_eq!(got.as_str(), expected.as_str(), "load state {wire:?}");
+            assert_eq!(bridge, bridge_name, "bridge load state {wire:?}");
         }
     }
 

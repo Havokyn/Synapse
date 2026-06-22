@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-wait-function-v1";
-const BRIDGE_BUILD_SHA256 = "ddc78a20ea4310e18fbb1d220f506006b22f56869fe58c08cfc83ea07f7cdde8";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-load-state-v1";
+const BRIDGE_BUILD_SHA256 = "529c1fa8b6bd96cd6494cd28d912d08580592a8fb272d7ef613e8bb0380a1a04";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -21,6 +21,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "scrollIntoView",
   "waitForText",
   "waitForFunction",
+  "waitForLoadState",
   "waitForSelector",
   "clock",
   "pageEvents",
@@ -779,6 +780,8 @@ async function handleCommand(command) {
       result = await handleWaitForText(params);
     } else if (kind === "waitForFunction") {
       result = await handleWaitForFunction(params);
+    } else if (kind === "waitForLoadState") {
+      result = await handleWaitForLoadState(params);
     } else if (kind === "waitForSelector") {
       result = await handleWaitForSelector(params);
     } else if (kind === "clock") {
@@ -1670,6 +1673,55 @@ async function handleWaitForFunction(params) {
         pollCount,
         expression,
         args
+      );
+    }
+    await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
+  }
+}
+
+async function handleWaitForLoadState(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = normalizeWaitForLoadStateState(params.state);
+  const timeoutMs = normalizeWaitTimeout(params.timeoutMs);
+  const pollingIntervalMs = normalizePollingInterval(params.pollingIntervalMs);
+  const startedAt = Date.now();
+  const initialState = await tabPageState(selected.tabId, selected.target);
+  const { buffer } = ensurePageEventBuffer(selected.tabId, initialState);
+  let pollCount = 0;
+  let last = null;
+  while (true) {
+    pollCount += 1;
+    const pageState = await tabPageState(selected.tabId, selected.target);
+    updatePageSnapshot(buffer, pageState);
+    const events = loadStateEventSummary(buffer, startedAt);
+    const probe = await loadStateProbe(selected);
+    last = loadStatePollSummary(pageState, probe, events);
+    const conditionMet = loadStateConditionMet(state, last);
+    const elapsed = elapsedSince(startedAt);
+    if (conditionMet) {
+      return waitForLoadStateResult(
+        selected,
+        state,
+        last,
+        true,
+        false,
+        elapsed,
+        timeoutMs,
+        pollingIntervalMs,
+        pollCount
+      );
+    }
+    if (elapsed >= timeoutMs) {
+      return waitForLoadStateResult(
+        selected,
+        state,
+        last,
+        false,
+        true,
+        elapsed,
+        timeoutMs,
+        pollingIntervalMs,
+        pollCount
       );
     }
     await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
@@ -3244,6 +3296,129 @@ function waitForFunctionResult(
   };
 }
 
+async function loadStateProbe(selected) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      world: "MAIN",
+      func: runLoadStateProbeInPage,
+      args: [{ quietMs: 500 }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript waitForLoadState(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(injected);
+  const first = frames.find((frame) => frame.result && typeof frame.result === "object");
+  if (!first) {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript waitForLoadState returned no structured result");
+  }
+  if (first.result.ok === false) {
+    throw bridgeError(
+      String(first.result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `waitForLoadState failed: ${String(first.result.error_detail || "")}`
+    );
+  }
+  return first.result;
+}
+
+function loadStateEventSummary(buffer, startedAt) {
+  const entries = Array.isArray(buffer?.entries)
+    ? buffer.entries.filter((entry) => Number(entry.observed_at_unix_ms || 0) >= startedAt)
+    : [];
+  const mainFrameEntries = entries.filter((entry) => entry.frame_id === "0" || entry.frame_id === null || entry.frame_id === undefined);
+  const hasKind = (kind) => mainFrameEntries.some((entry) => String(entry.event_kind || "").toLowerCase() === kind);
+  return {
+    event_count: entries.length,
+    domcontentloaded_seen: hasKind("domcontentloaded"),
+    load_seen: hasKind("load"),
+    lifecycle_network_idle_seen: hasKind("networkidle")
+  };
+}
+
+function loadStatePollSummary(pageState, probe, events) {
+  const current = probe && typeof probe === "object" ? probe : {};
+  const eventSummary = events && typeof events === "object" ? events : {};
+  return {
+    target_id: pageState.target_id || "",
+    chrome_window_id: pageState.chrome_window_id,
+    url: current.url || pageState.url || "",
+    title: current.title || pageState.title || "",
+    ready_state: current.ready_state || pageState.ready_state || "",
+    event_count: Number.isSafeInteger(eventSummary.event_count) ? eventSummary.event_count : 0,
+    network_event_count: Number.isSafeInteger(current.network_event_count) ? current.network_event_count : 0,
+    max_in_flight_requests: Number.isSafeInteger(current.max_in_flight_requests) ? current.max_in_flight_requests : 0,
+    in_flight_requests: Number.isSafeInteger(current.in_flight_requests) ? current.in_flight_requests : 0,
+    network_idle_quiet_ms: Number.isSafeInteger(current.network_idle_quiet_ms) ? current.network_idle_quiet_ms : 0,
+    domcontentloaded_seen: Boolean(eventSummary.domcontentloaded_seen || current.domcontentloaded_seen),
+    load_seen: Boolean(eventSummary.load_seen || current.load_seen),
+    lifecycle_network_idle_seen: Boolean(eventSummary.lifecycle_network_idle_seen || current.lifecycle_network_idle_seen)
+  };
+}
+
+function loadStateConditionMet(state, poll) {
+  const readyState = String(poll?.ready_state || "").toLowerCase();
+  if (state === "domcontentloaded") {
+    return poll?.domcontentloaded_seen === true || readyState === "interactive" || readyState === "complete";
+  }
+  if (state === "load") {
+    return poll?.load_seen === true || readyState === "complete";
+  }
+  return readyState === "complete" &&
+    Number(poll?.in_flight_requests || 0) === 0 &&
+    Number(poll?.network_idle_quiet_ms || 0) >= 500;
+}
+
+function waitForLoadStateResult(
+  selected,
+  state,
+  poll,
+  conditionMet,
+  timedOut,
+  elapsedMs,
+  timeoutMs,
+  pollingIntervalMs,
+  pollCount
+) {
+  const current = poll && typeof poll === "object" ? poll : {};
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: current.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: current.chrome_window_id,
+    url: current.url || "",
+    title: current.title || "",
+    ready_state: current.ready_state || "",
+    state,
+    condition_met: Boolean(conditionMet),
+    timed_out: Boolean(timedOut),
+    elapsed_ms: elapsedMs,
+    timeout_ms: timeoutMs,
+    polling_interval_ms: pollingIntervalMs,
+    poll_count: pollCount,
+    event_count: current.event_count || 0,
+    network_event_count: current.network_event_count || 0,
+    max_in_flight_requests: current.max_in_flight_requests || 0,
+    in_flight_requests: current.in_flight_requests || 0,
+    network_idle_quiet_ms: current.network_idle_quiet_ms || 0,
+    lifecycle_network_idle_seen: Boolean(current.lifecycle_network_idle_seen),
+    readback_backend: "chrome.webNavigation + chrome.scripting.executeScript(MAIN load-state/fetch/XHR/resource-timing polling)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 async function waitForSelectorPoll(selected, locator, limit, root, state) {
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
     throw bridgeError(
@@ -3446,6 +3621,217 @@ function delay(timeoutMs) {
 
 function elapsedSince(startedAt) {
   return Math.max(0, Date.now() - startedAt);
+}
+
+function runLoadStateProbeInPage(request) {
+  const quietMs = Number.isSafeInteger(request?.quietMs) && request.quietMs >= 0 ? request.quietMs : 500;
+  const stateKey = "__synapseLoadStateProbe";
+  const nowMs = () => {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  };
+  const safeNumber = (value) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const performanceEntries = (kind) => {
+    try {
+      if (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function") {
+        return performance.getEntriesByType(kind) || [];
+      }
+    } catch (_error) {}
+    return [];
+  };
+  const navigationTiming = () => {
+    const entries = performanceEntries("navigation");
+    return entries.length > 0 && entries[0] ? entries[0] : null;
+  };
+  const latestResourceActivityMs = () => {
+    let latest = 0;
+    for (const entry of performanceEntries("resource")) {
+      latest = Math.max(
+        latest,
+        safeNumber(entry.responseEnd),
+        safeNumber(entry.duration) > 0 ? safeNumber(entry.startTime) + safeNumber(entry.duration) : 0,
+        safeNumber(entry.fetchStart),
+        safeNumber(entry.startTime)
+      );
+    }
+    return latest;
+  };
+  const ensureState = () => {
+    const existing = globalThis[stateKey];
+    if (existing && existing.version === 1) {
+      return existing;
+    }
+    const installedAtMs = nowMs();
+    const state = {
+      version: 1,
+      installedAtMs,
+      lastActivityAtMs: installedAtMs,
+      domcontentloadedAtMs: 0,
+      loadAtMs: 0,
+      inFlightRequests: 0,
+      maxInFlightRequests: 0,
+      networkEventCount: 0,
+      totalStarted: 0,
+      totalFinished: 0,
+      fetchWrapped: false,
+      xhrWrapped: false,
+      lifecycleListenersInstalled: false,
+      lifecycleNetworkIdleSeen: false
+    };
+    globalThis[stateKey] = state;
+    return state;
+  };
+  const state = ensureState();
+  const markActivity = () => {
+    state.lastActivityAtMs = Math.max(state.lastActivityAtMs || 0, nowMs());
+  };
+  const markRequestStarted = () => {
+    state.totalStarted += 1;
+    state.networkEventCount += 1;
+    state.inFlightRequests += 1;
+    state.maxInFlightRequests = Math.max(state.maxInFlightRequests, state.inFlightRequests);
+    markActivity();
+  };
+  const markRequestFinished = () => {
+    state.totalFinished += 1;
+    state.networkEventCount += 1;
+    if (state.inFlightRequests > 0) {
+      state.inFlightRequests -= 1;
+    }
+    markActivity();
+  };
+  const installFetchProbe = () => {
+    if (state.fetchWrapped || typeof globalThis.fetch !== "function") {
+      return;
+    }
+    const originalFetch = globalThis.fetch;
+    const wrappedFetch = function synapseLoadStateFetchWrapper(...args) {
+      markRequestStarted();
+      let result;
+      try {
+        result = originalFetch.apply(this, args);
+      } catch (error) {
+        markRequestFinished();
+        throw error;
+      }
+      return Promise.resolve(result).finally(() => {
+        markRequestFinished();
+      });
+    };
+    try {
+      Object.defineProperty(wrappedFetch, "__synapseLoadStateWrapped", { value: true });
+    } catch (_error) {}
+    try {
+      globalThis.fetch = wrappedFetch;
+      state.fetchWrapped = true;
+    } catch (_error) {}
+  };
+  const installXhrProbe = () => {
+    if (state.xhrWrapped || typeof XMLHttpRequest === "undefined" || !XMLHttpRequest.prototype) {
+      return;
+    }
+    const proto = XMLHttpRequest.prototype;
+    if (proto.__synapseLoadStateWrapped) {
+      state.xhrWrapped = true;
+      return;
+    }
+    const originalSend = proto.send;
+    if (typeof originalSend !== "function") {
+      return;
+    }
+    proto.send = function synapseLoadStateXhrSendWrapper(...args) {
+      markRequestStarted();
+      let finished = false;
+      const finishOnce = () => {
+        if (!finished) {
+          finished = true;
+          markRequestFinished();
+        }
+      };
+      try {
+        this.addEventListener("loadend", finishOnce, { once: true });
+      } catch (_error) {}
+      try {
+        return originalSend.apply(this, args);
+      } catch (error) {
+        finishOnce();
+        throw error;
+      }
+    };
+    try {
+      Object.defineProperty(proto, "__synapseLoadStateWrapped", { value: true });
+    } catch (_error) {}
+    state.xhrWrapped = true;
+  };
+  try {
+    installFetchProbe();
+  } catch (_error) {}
+  try {
+    installXhrProbe();
+  } catch (_error) {}
+  if (!state.lifecycleListenersInstalled) {
+    try {
+      document.addEventListener("DOMContentLoaded", () => {
+        state.domcontentloadedAtMs = state.domcontentloadedAtMs || nowMs();
+      }, { once: true });
+    } catch (_error) {}
+    try {
+      window.addEventListener("load", () => {
+        state.loadAtMs = state.loadAtMs || nowMs();
+        markActivity();
+      }, { once: true });
+    } catch (_error) {}
+    state.lifecycleListenersInstalled = true;
+  }
+
+  const nav = navigationTiming();
+  if (nav && safeNumber(nav.domContentLoadedEventEnd) > 0) {
+    state.domcontentloadedAtMs = Math.max(state.domcontentloadedAtMs || 0, safeNumber(nav.domContentLoadedEventEnd));
+  }
+  if (nav && safeNumber(nav.loadEventEnd) > 0) {
+    state.loadAtMs = Math.max(state.loadAtMs || 0, safeNumber(nav.loadEventEnd));
+  }
+  const readyState = String(document?.readyState || "");
+  if ((readyState === "interactive" || readyState === "complete") && !state.domcontentloadedAtMs) {
+    state.domcontentloadedAtMs = nowMs();
+  }
+  if (readyState === "complete" && !state.loadAtMs) {
+    state.loadAtMs = nowMs();
+  }
+  const resourceEntries = performanceEntries("resource");
+  const latestResourceMs = latestResourceActivityMs();
+  const quietSinceMs = Math.max(
+    state.installedAtMs || 0,
+    state.lastActivityAtMs || 0,
+    state.loadAtMs || 0,
+    latestResourceMs
+  );
+  const quietElapsedMs = Math.max(0, Math.floor(nowMs() - quietSinceMs));
+  const networkIdle = readyState === "complete" && state.inFlightRequests === 0 && quietElapsedMs >= quietMs;
+  if (networkIdle) {
+    state.lifecycleNetworkIdleSeen = true;
+  }
+  return {
+    ok: true,
+    version: state.version,
+    url: String(location.href || ""),
+    title: String(document?.title || ""),
+    ready_state: readyState,
+    domcontentloaded_seen: Boolean(state.domcontentloadedAtMs),
+    load_seen: Boolean(state.loadAtMs),
+    lifecycle_network_idle_seen: Boolean(state.lifecycleNetworkIdleSeen),
+    in_flight_requests: state.inFlightRequests,
+    max_in_flight_requests: state.maxInFlightRequests,
+    network_event_count: state.networkEventCount + resourceEntries.length,
+    resource_entry_count: resourceEntries.length,
+    total_started: state.totalStarted,
+    total_finished: state.totalFinished,
+    network_idle_quiet_ms: quietElapsedMs,
+    quiet_window_ms: quietMs,
+    latest_resource_activity_ms: Math.floor(latestResourceMs)
+  };
 }
 
 async function runWaitForFunctionProbeInPage(request) {
@@ -9603,6 +9989,14 @@ function normalizeWaitForTextState(value) {
     return state;
   }
   throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForText state ${JSON.stringify(state)}`);
+}
+
+function normalizeWaitForLoadStateState(value) {
+  const state = String(value || "load").toLowerCase();
+  if (state === "domcontentloaded" || state === "load" || state === "networkidle") {
+    return state;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForLoadState state ${JSON.stringify(state)}`);
 }
 
 function normalizeWaitForSelectorState(value) {
