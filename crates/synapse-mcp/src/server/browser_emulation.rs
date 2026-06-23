@@ -3,8 +3,8 @@
 use super::{
     ErrorData, Json, Parameters, SynapseService,
     m1_tools::{
-        browser_raw_cdp_required_error, cdp_target_id_audit_ref, require_target_session_id,
-        validate_cdp_target_id,
+        browser_raw_cdp_required_error, cdp_target_id_audit_ref, chrome_debugger_default_endpoint,
+        require_target_session_id, validate_cdp_target_id,
     },
     tool, tool_router,
 };
@@ -19,6 +19,8 @@ const DEVICE_TOOL: &str = "browser_device";
 const GEOLOCATION_TOOL: &str = "browser_geolocation";
 const LOCALE_TOOL: &str = "browser_locale";
 const MEDIA_TOOL: &str = "browser_media";
+const CHROME_TAB_PREFIX: &str = "chrome-tab:";
+const DEFAULT_BRIDGE_VIEWPORT_WAIT_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -88,8 +90,10 @@ impl Default for BrowserResizeOperation {
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserResizeParams {
-    /// CDP TargetID to resize. Defaults to the active session CDP target. Must
-    /// be owned by this session; the human foreground tab is never a fallback.
+    /// CDP TargetID to resize. Raw-CDP target IDs and normal Chrome bridge
+    /// `chrome-tab:<id>` targets are supported. Defaults to the active session
+    /// CDP target. Must be owned by this session; the human foreground tab is
+    /// never a fallback.
     #[serde(default)]
     pub cdp_target_id: Option<String>,
     /// Browser HWND that owns the target. Required only with an explicit
@@ -105,6 +109,9 @@ pub struct BrowserResizeParams {
     /// Device pixel ratio override for operation=set. Defaults to 1.0.
     #[serde(default)]
     pub device_scale_factor: Option<f64>,
+    /// Whether Chromium should apply mobile viewport semantics. Defaults false.
+    #[serde(default)]
+    pub is_mobile: Option<bool>,
     /// `set` applies a viewport/DPR override; `reset` clears it.
     #[serde(default)]
     pub operation: BrowserResizeOperation,
@@ -499,6 +506,7 @@ struct NormalizedBrowserResizeParams {
     width: Option<u32>,
     height: Option<u32>,
     device_scale_factor: Option<f64>,
+    is_mobile: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -529,7 +537,7 @@ struct NormalizedBrowserMediaParams {
 #[tool_router(router = browser_emulation_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Set or reset the rendered viewport size and device pixel ratio for the calling session's owned raw-CDP browser tab. operation=set uses Emulation.setDeviceMetricsOverride with mobile=false and page-visible readback via Runtime.evaluate; pass width, height, and optional device_scale_factor. operation=reset uses Emulation.clearDeviceMetricsOverride, then reads back the real metrics. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent FSV readback for window.innerWidth/window.innerHeight/devicePixelRatio."
+        description = "Set or reset the rendered viewport size and device pixel ratio for the calling session's owned browser tab. Raw-CDP targets use Emulation.setDeviceMetricsOverride / Emulation.clearDeviceMetricsOverride plus Runtime.evaluate readback. Normal Chrome bridge chrome-tab:* targets in the already-open authenticated profile use the bundled viewportEmulation bridge lane and page-visible chrome.scripting readback. operation=set requires width, height, and optional device_scale_factor and is_mobile; operation=reset clears the override and reads back restored metrics. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_resize(
         &self,
@@ -551,6 +559,7 @@ impl SynapseService {
             "width": resize.width,
             "height": resize.height,
             "device_scale_factor": resize.device_scale_factor,
+            "is_mobile": resize.is_mobile,
             "required_foreground": false,
             "phase": "target_resolution",
         });
@@ -574,6 +583,7 @@ impl SynapseService {
             "width": resize.width,
             "height": resize.height,
             "device_scale_factor": resize.device_scale_factor,
+            "is_mobile": resize.is_mobile,
             "required_foreground": false,
         });
         self.audit_action_started_with_details_for_session(
@@ -823,6 +833,11 @@ impl SynapseService {
         params: &NormalizedBrowserResizeParams,
     ) -> Result<BrowserResizeResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with(CHROME_TAB_PREFIX) {
+                return self
+                    .browser_resize_bridge_impl(session_id, window_hwnd, cdp_target_id, params)
+                    .await;
+            }
             return Err(browser_raw_cdp_required_error(RESIZE_TOOL, window_hwnd));
         };
         let result = match params.operation {
@@ -832,12 +847,14 @@ impl SynapseService {
                 let device_scale_factor = params
                     .device_scale_factor
                     .expect("validated set device_scale_factor");
-                synapse_a11y::cdp_set_viewport_size(
+                let is_mobile = params.is_mobile.expect("validated set is_mobile");
+                synapse_a11y::cdp_set_viewport_size_with_mobile(
                     &endpoint,
                     cdp_target_id,
                     width,
                     height,
                     device_scale_factor,
+                    is_mobile,
                 )
                 .await
             }
@@ -864,6 +881,58 @@ impl SynapseService {
             "readback=Emulation.setDeviceMetricsOverride+Runtime.evaluate outcome=viewport_metrics"
         );
         Ok(browser_resize_response(session_id, window_hwnd, result))
+    }
+
+    #[cfg(windows)]
+    async fn browser_resize_bridge_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &NormalizedBrowserResizeParams,
+    ) -> Result<BrowserResizeResponse, ErrorData> {
+        let operation = match params.operation {
+            BrowserResizeOperation::Set => "set",
+            BrowserResizeOperation::Reset => "reset",
+        };
+        let result = crate::chrome_debugger_bridge::viewport_emulation(
+            crate::chrome_debugger_bridge::ChromeDebuggerViewportEmulationRequest {
+                hwnd: window_hwnd,
+                target_id: cdp_target_id,
+                operation,
+                width: params.width,
+                height: params.height,
+                device_scale_factor: params.device_scale_factor,
+                is_mobile: params.is_mobile,
+                wait_timeout_ms: DEFAULT_BRIDGE_VIEWPORT_WAIT_TIMEOUT_MS,
+            },
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "{RESIZE_TOOL} normal Chrome bridge viewport emulation failed for target {cdp_target_id:?}: {}",
+                    error.detail()
+                ),
+            )
+        })?;
+        tracing::info!(
+            code = "CHROME_BRIDGE_VIEWPORT_RESIZE",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id,
+            operation = ?params.operation,
+            inner_width = result.viewport.inner_width,
+            inner_height = result.viewport.inner_height,
+            device_pixel_ratio = result.viewport.device_pixel_ratio,
+            "readback=chrome.debugger.Emulation+chrome.scripting.executeScript outcome=viewport_metrics"
+        );
+        Ok(browser_resize_bridge_response(
+            session_id,
+            window_hwnd,
+            result,
+        ))
     }
 
     #[cfg(windows)]
@@ -1174,11 +1243,13 @@ fn validate_browser_resize_params(
         reject_resize_field(params.width, "width", "reset")?;
         reject_resize_field(params.height, "height", "reset")?;
         reject_resize_field(params.device_scale_factor, "device_scale_factor", "reset")?;
+        reject_resize_field(params.is_mobile, "is_mobile", "reset")?;
         return Ok(NormalizedBrowserResizeParams {
             operation: BrowserResizeOperation::Reset,
             width: None,
             height: None,
             device_scale_factor: None,
+            is_mobile: None,
         });
     }
 
@@ -1214,6 +1285,7 @@ fn validate_browser_resize_params(
         width: Some(width),
         height: Some(height),
         device_scale_factor: Some(device_scale_factor),
+        is_mobile: Some(params.is_mobile.unwrap_or(false)),
     })
 }
 
@@ -1743,6 +1815,61 @@ fn browser_resize_response(
     }
 }
 
+fn browser_resize_bridge_response(
+    session_id: &str,
+    window_hwnd: i64,
+    result: crate::chrome_debugger_bridge::ChromeDebuggerViewportEmulationResult,
+) -> BrowserResizeResponse {
+    BrowserResizeResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "chrome_tabs_extension".to_owned(),
+        endpoint: chrome_debugger_default_endpoint(),
+        cdp_target_id: result.target_id,
+        operation: match result.operation.as_str() {
+            "reset" => BrowserResizeOperation::Reset,
+            _ => BrowserResizeOperation::Set,
+        },
+        requested: result.requested.map(|requested| BrowserViewportOverride {
+            width: requested.width,
+            height: requested.height,
+            device_scale_factor: requested.device_scale_factor,
+            mobile: requested.mobile,
+        }),
+        page_url: result.page_url,
+        page_title: result.page_title,
+        ready_state: result.ready_state,
+        viewport: BrowserViewportReadback {
+            inner_width: result.viewport.inner_width,
+            inner_height: result.viewport.inner_height,
+            device_pixel_ratio: result.viewport.device_pixel_ratio,
+            screen_width: result.viewport.screen_width,
+            screen_height: result.viewport.screen_height,
+            outer_width: result.viewport.outer_width,
+            outer_height: result.viewport.outer_height,
+            visual_viewport_width: result.viewport.visual_viewport_width,
+            visual_viewport_height: result.viewport.visual_viewport_height,
+        },
+        readback_backend: if result.readback_backend.is_empty() {
+            "chrome.debugger.Emulation + chrome.scripting.executeScript".to_owned()
+        } else {
+            result.readback_backend
+        },
+        backend_tier_used: if result.backend_tier_used.is_empty() {
+            "chrome_tabs_extension_debugger".to_owned()
+        } else {
+            result.backend_tier_used
+        },
+        required_foreground: result.required_foreground,
+        source_of_truth: if result.source_of_truth.is_empty() {
+            "normal Chrome bridge page script window.innerWidth/window.innerHeight/devicePixelRatio"
+                .to_owned()
+        } else {
+            result.source_of_truth
+        },
+    }
+}
+
 fn browser_device_response(
     session_id: &str,
     window_hwnd: i64,
@@ -1955,10 +2082,29 @@ mod tests {
         .expect("valid set params");
         assert_eq!(set.operation, BrowserResizeOperation::Set);
         assert_eq!(set.device_scale_factor, Some(1.0));
+        assert_eq!(set.is_mobile, Some(false));
+
+        let mobile = validate_browser_resize_params(&BrowserResizeParams {
+            width: Some(390),
+            height: Some(844),
+            device_scale_factor: Some(3.0),
+            is_mobile: Some(true),
+            ..BrowserResizeParams::default()
+        })
+        .expect("valid mobile resize params");
+        assert_eq!(mobile.is_mobile, Some(true));
 
         assert!(
             validate_browser_resize_params(&BrowserResizeParams {
                 width: Some(1280),
+                operation: BrowserResizeOperation::Reset,
+                ..BrowserResizeParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_resize_params(&BrowserResizeParams {
+                is_mobile: Some(true),
                 operation: BrowserResizeOperation::Reset,
                 ..BrowserResizeParams::default()
             })
@@ -1988,6 +2134,7 @@ mod tests {
         })
         .expect("valid reset params");
         assert_eq!(reset.operation, BrowserResizeOperation::Reset);
+        assert_eq!(reset.is_mobile, None);
     }
 
     #[test]
@@ -2028,6 +2175,67 @@ mod tests {
         assert_eq!(
             response.requested.as_ref().map(|requested| requested.width),
             Some(390)
+        );
+        assert!(!response.required_foreground);
+    }
+
+    #[test]
+    fn browser_resize_bridge_response_maps_viewport_readback() {
+        let response = browser_resize_bridge_response(
+            "session-1",
+            0x2200,
+            crate::chrome_debugger_bridge::ChromeDebuggerViewportEmulationResult {
+                extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+                target_id: "chrome-tab:44".to_owned(),
+                tab_id: 44,
+                chrome_window_id: Some(7),
+                operation: "set".to_owned(),
+                requested: Some(crate::chrome_debugger_bridge::ChromeDebuggerViewportOverride {
+                    width: 390,
+                    height: 844,
+                    device_scale_factor: 3.0,
+                    mobile: false,
+                }),
+                page_url: "https://example.test/".to_owned(),
+                page_title: "Example".to_owned(),
+                ready_state: "complete".to_owned(),
+                viewport: crate::chrome_debugger_bridge::ChromeDebuggerViewportReadback {
+                    inner_width: 390,
+                    inner_height: 844,
+                    device_pixel_ratio: 3.0,
+                    screen_width: 390,
+                    screen_height: 844,
+                    outer_width: 1024,
+                    outer_height: 768,
+                    visual_viewport_width: Some(390.0),
+                    visual_viewport_height: Some(844.0),
+                },
+                readback_backend: "chrome.debugger.Emulation + chrome.scripting.executeScript"
+                    .to_owned(),
+                backend_tier_used: "chrome_tabs_extension_debugger".to_owned(),
+                required_foreground: false,
+                source_of_truth:
+                    "normal Chrome bridge page script window.innerWidth/window.innerHeight/devicePixelRatio"
+                        .to_owned(),
+                method: "Emulation.setDeviceMetricsOverride".to_owned(),
+                debugger_protocol_version: Some("1.3".to_owned()),
+                target_candidate_count: 1,
+                target_selection_reason: "target_id_hint".to_owned(),
+            },
+        );
+
+        assert_eq!(response.transport, "chrome_tabs_extension");
+        assert_eq!(response.endpoint, chrome_debugger_default_endpoint());
+        assert_eq!(response.cdp_target_id, "chrome-tab:44");
+        assert_eq!(response.operation, BrowserResizeOperation::Set);
+        assert_eq!(response.viewport.inner_width, 390);
+        assert_eq!(response.viewport.device_pixel_ratio, 3.0);
+        assert_eq!(
+            response
+                .requested
+                .as_ref()
+                .map(|requested| requested.height),
+            Some(844)
         );
         assert!(!response.required_foreground);
     }

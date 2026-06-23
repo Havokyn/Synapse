@@ -68,9 +68,9 @@
   build cannot retain nativeMessaging capability. Background automation is
   still achieved on Synapse's own side: the bundled bridge uses direct
   localhost WebSocket, never nativeMessaging/helper Chrome windows, and exposes
-  a narrow chrome.debugger CDP input lane for target-scoped hover/tap/active-tab
-  drag plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag
-  dispatch in the already-open authenticated Chrome profile.
+  narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag and
+  viewport emulation plus inactive-tab synthetic mouse drag and HTML5
+  DataTransfer drag dispatch in the already-open authenticated Chrome profile.
 
 .PARAMETER MaintenanceLockPath
   File-lock Source of Truth that serializes setup/remove across multiple

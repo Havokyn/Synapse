@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-dnd-v3";
-const BRIDGE_BUILD_SHA256 = "5955f80310cee69c05fe938070220406b7ad33354070db198beb2f79514a827c";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-viewport-v6";
+const BRIDGE_BUILD_SHA256 = "43ecc5e0b8b695845799e3f9aaf868652ef38ca6f47223cb055cea0b8104eef5";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
@@ -34,6 +34,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "clock",
   "pageEvents",
   "cdpInput",
+  "viewportEmulation",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -76,6 +77,7 @@ const MAX_NETWORK_EVENT_BUFFER = 2000;
 const OPEN_WINDOW_BOUNDS_TOLERANCE_PX = 96;
 const EXTERNAL_POPUP_RISK_PERMISSIONS = Object.freeze(["debugger", "nativeMessaging"]);
 const POPUP_RISK_SUPPRESSION_RECHECK_MS = 60000;
+const VIEWPORT_BASELINE_BY_TAB = new Map();
 
 let hostId = null;
 let bridgeToken = null;
@@ -332,6 +334,7 @@ function commandRequiresExternalPopupSuppression(kind) {
     "clock",
     "pageEvents",
     "cdpInput",
+    "viewportEmulation",
     "navigateTab",
     "activateTab",
     "domAction",
@@ -828,6 +831,8 @@ async function handleCommand(command) {
       result = await handlePageEvents(params);
     } else if (kind === "cdpInput") {
       result = await handleCdpInput(params);
+    } else if (kind === "viewportEmulation") {
+      result = await handleViewportEmulation(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -2943,6 +2948,87 @@ async function handleCdpInput(params) {
   };
 }
 
+async function handleViewportEmulation(params) {
+  requireDebuggerApiAvailable("viewportEmulation", params);
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeViewportEmulationOperation(params.operation);
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const before = await tabPageState(selected.tabId, selected.target);
+  const beforeViewport = await tabViewportMetricsState(selected.tabId);
+  let requested = null;
+  let dispatch;
+  if (operation === "set") {
+    requested = {
+      width: normalizeViewportDimension(params.width, "width"),
+      height: normalizeViewportDimension(params.height, "height"),
+      device_scale_factor: normalizeViewportScaleFactor(params.deviceScaleFactor),
+      mobile: normalizeViewportMobile(params.isMobile)
+    };
+    if (!VIEWPORT_BASELINE_BY_TAB.has(selected.tabId)) {
+      VIEWPORT_BASELINE_BY_TAB.set(selected.tabId, beforeViewport);
+    }
+    dispatch = await dispatchViewportEmulationSet(selected.tabId, requested);
+    await applyViewportDprShim(selected.tabId, requested.device_scale_factor);
+  } else {
+    rejectViewportResetField(params.width, "width");
+    rejectViewportResetField(params.height, "height");
+    rejectViewportResetField(params.deviceScaleFactor, "deviceScaleFactor");
+    rejectViewportResetField(params.isMobile, "isMobile");
+    dispatch = await dispatchViewportEmulationReset(selected.tabId);
+    await clearViewportDprShim(selected.tabId);
+  }
+  let after = requested
+    ? await waitForViewportReadback(selected.tabId, selected.target, waitTimeoutMs, requested)
+    : await waitForViewportResetReadback(selected.tabId, selected.target, waitTimeoutMs, beforeViewport);
+  let resetFallback = null;
+  let resetBaselineRestore = null;
+  if (!requested) {
+    const baseline = VIEWPORT_BASELINE_BY_TAB.get(selected.tabId);
+    const baselineRequest = viewportRequestFromBaseline(baseline);
+    if (baselineRequest && !viewportMatchesRequest(after.viewport, baselineRequest)) {
+      resetFallback = await reloadViewportTabAfterReset(
+        selected.tabId,
+        selected.target,
+        waitTimeoutMs
+      );
+      try {
+        after = await waitForViewportReadback(
+          selected.tabId,
+          selected.target,
+          Math.min(waitTimeoutMs, 2000),
+          baselineRequest
+        );
+      } catch (_error) {
+        resetBaselineRestore = await dispatchViewportBaselineRestore(selected.tabId, baselineRequest);
+        after = await waitForViewportReadback(selected.tabId, selected.target, waitTimeoutMs, baselineRequest);
+      }
+    }
+    VIEWPORT_BASELINE_BY_TAB.delete(selected.tabId);
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.page.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.page.chrome_window_id,
+    operation,
+    requested,
+    page_url: after.page.url || "",
+    page_title: after.page.title || "",
+    ready_state: after.page.ready_state || "",
+    viewport: after.viewport,
+    before_page: before,
+    before_viewport: beforeViewport,
+    readback_backend: "chrome.debugger.Emulation + chrome.scripting.executeScript(MAIN viewport readback/devicePixelRatio shim)",
+    backend_tier_used: "chrome_tabs_extension_debugger",
+    required_foreground: false,
+    source_of_truth: "normal Chrome bridge page script window.innerWidth/window.innerHeight/devicePixelRatio",
+    method: viewportEmulationMethod(dispatch, resetFallback, resetBaselineRestore),
+    debugger_protocol_version: dispatch.protocol_version,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 function normalizeCdpInputAction(value) {
   const action = String(value || "").trim().toLowerCase();
   if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
@@ -2952,6 +3038,413 @@ function normalizeCdpInputAction(value) {
     ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
     `cdpInput action must be hover, tap, drag, or html5_drag; got ${JSON.stringify(value)}`
   );
+}
+
+function normalizeViewportEmulationOperation(value) {
+  const operation = String(value || "set").trim().toLowerCase();
+  if (operation === "set" || operation === "reset") {
+    return operation;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `viewportEmulation operation must be set or reset; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeViewportDimension(value, fieldName) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 10000000) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `viewportEmulation ${fieldName} must be an integer in 1..=10000000; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+function normalizeViewportScaleFactor(value) {
+  const resolved = value === null || value === undefined ? 1 : Number(value);
+  if (!Number.isFinite(resolved) || resolved <= 0 || resolved > 1000) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `viewportEmulation deviceScaleFactor must be finite and in 0..=1000; got ${JSON.stringify(value)}`
+    );
+  }
+  return resolved;
+}
+
+function normalizeViewportMobile(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value !== "boolean") {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `viewportEmulation isMobile must be a boolean; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+function rejectViewportResetField(value, fieldName) {
+  if (value !== null && value !== undefined) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `viewportEmulation ${fieldName} is not valid for operation=reset`
+    );
+  }
+}
+
+async function dispatchViewportEmulationSet(tabId, requested) {
+  return await dispatchViewportEmulation(tabId, "set", {
+    width: requested.width,
+    height: requested.height,
+    deviceScaleFactor: requested.device_scale_factor,
+    mobile: requested.mobile,
+    screenWidth: requested.width,
+    screenHeight: requested.height
+  });
+}
+
+async function dispatchViewportEmulationReset(tabId) {
+  return await dispatchViewportEmulation(tabId, "reset", {
+    width: 0,
+    height: 0,
+    deviceScaleFactor: 0,
+    mobile: false,
+    screenWidth: 0,
+    screenHeight: 0
+  });
+}
+
+async function dispatchViewportBaselineRestore(tabId, requested) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    await sendDebuggerCommand(debuggee, "Emulation.setDeviceMetricsOverride", {
+      width: requested.width,
+      height: requested.height,
+      deviceScaleFactor: requested.device_scale_factor,
+      mobile: false,
+      screenWidth: requested.screen_width || requested.width,
+      screenHeight: requested.screen_height || requested.height
+    });
+    return {
+      method: `Emulation.setDeviceMetricsOverride(baseline width=${requested.width},height=${requested.height},deviceScaleFactor=${requested.device_scale_factor},mobile=false)`,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger viewportEmulation baseline restore failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for viewportEmulation baseline restore tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function dispatchViewportEmulation(tabId, operation, params) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    if (operation === "set") {
+      await sendDebuggerCommand(debuggee, "Emulation.setDeviceMetricsOverride", params);
+      return {
+        method: `Emulation.setDeviceMetricsOverride(width,height,deviceScaleFactor,mobile=${String(Boolean(params.mobile))})`,
+        protocol_version: protocolVersion
+      };
+    }
+    await sendDebuggerCommand(debuggee, "Emulation.clearDeviceMetricsOverride", {});
+    await sendDebuggerCommand(debuggee, "Emulation.setDeviceMetricsOverride", params);
+    return {
+      method: "Emulation.clearDeviceMetricsOverride+Emulation.setDeviceMetricsOverride(width=0,height=0,deviceScaleFactor=0,mobile=false)",
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger viewportEmulation ${operation} failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for viewportEmulation tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function waitForViewportReadback(tabId, fallbackTarget, waitTimeoutMs, requested) {
+  const started = Date.now();
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= waitTimeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const viewport = await tabViewportMetricsState(tabId);
+      last = { page, viewport };
+      lastError = null;
+      if (!requested || viewportMatchesRequest(viewport, requested)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  const detail = last
+    ? `last viewport=${JSON.stringify(last.viewport)} requested=${JSON.stringify(requested)}`
+    : lastError
+      ? `last readback error=${JSON.stringify(lastError)}`
+      : "no viewport readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `viewportEmulation readback did not settle within ${waitTimeoutMs} ms; ${detail}`);
+}
+
+async function waitForViewportResetReadback(tabId, fallbackTarget, waitTimeoutMs, beforeViewport) {
+  const started = Date.now();
+  const timeoutMs = Math.min(waitTimeoutMs, 1000);
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= timeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const viewport = await tabViewportMetricsState(tabId);
+      last = { page, viewport };
+      lastError = null;
+      if (!sameViewportMetrics(viewport, beforeViewport)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  if (last) {
+    return last;
+  }
+  const detail = lastError
+    ? `last readback error=${JSON.stringify(lastError)}`
+    : "no viewport readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `viewportEmulation reset readback unavailable within ${timeoutMs} ms; ${detail}`);
+}
+
+async function applyViewportDprShim(tabId, deviceScaleFactor) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: installViewportDprShimInPage,
+      args: [deviceScaleFactor]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript viewportEmulation(${tabId}) devicePixelRatio shim failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function clearViewportDprShim(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: clearViewportDprShimInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript viewportEmulation(${tabId}) devicePixelRatio shim reset failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function reloadViewportTabAfterReset(tabId, fallbackTarget, waitTimeoutMs) {
+  try {
+    await chrome.tabs.reload(tabId, { bypassCache: true });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `chrome.tabs.reload(${tabId}) after viewportEmulation reset failed: ${errorMessage(error)}`
+    );
+  }
+  await waitForTabPageState(tabId, fallbackTarget, waitTimeoutMs);
+  return {
+    method: "chrome.tabs.reload(bypassCache=true)"
+  };
+}
+
+function viewportEmulationMethod(dispatch, resetFallback, resetBaselineRestore) {
+  const parts = [dispatch.method];
+  if (resetFallback) {
+    parts.push(`baselineReload:${resetFallback.method}`);
+  }
+  if (resetBaselineRestore) {
+    parts.push(`baselineMetricsRestore:${resetBaselineRestore.method}`);
+  }
+  return parts.join("+");
+}
+
+function viewportMatchesRequest(viewport, requested) {
+  return (
+    viewport &&
+    viewport.inner_width === requested.width &&
+    viewport.inner_height === requested.height &&
+    Math.abs(Number(viewport.device_pixel_ratio) - requested.device_scale_factor) <= 0.01
+  );
+}
+
+function viewportRequestFromBaseline(baseline) {
+  if (
+    !baseline ||
+    !Number.isSafeInteger(baseline.inner_width) ||
+    !Number.isSafeInteger(baseline.inner_height) ||
+    baseline.inner_width <= 0 ||
+    baseline.inner_height <= 0
+  ) {
+    return null;
+  }
+  const deviceScaleFactor = Number(baseline.device_pixel_ratio);
+  return {
+    width: baseline.inner_width,
+    height: baseline.inner_height,
+    device_scale_factor: Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0
+      ? deviceScaleFactor
+      : 1,
+    screen_width: Number.isSafeInteger(baseline.screen_width) && baseline.screen_width > 0
+      ? baseline.screen_width
+      : baseline.inner_width,
+    screen_height: Number.isSafeInteger(baseline.screen_height) && baseline.screen_height > 0
+      ? baseline.screen_height
+      : baseline.inner_height,
+    mobile: false
+  };
+}
+
+function sameViewportMetrics(left, right) {
+  return (
+    left &&
+    right &&
+    left.inner_width === right.inner_width &&
+    left.inner_height === right.inner_height &&
+    Math.abs(Number(left.device_pixel_ratio) - Number(right.device_pixel_ratio)) <= 0.01
+  );
+}
+
+async function tabViewportMetricsState(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: readViewportMetricsInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript viewportEmulation(${tabId}) readback failed: ${errorMessage(error)}`
+    );
+  }
+  const metrics = results?.[0]?.result;
+  if (!metrics || typeof metrics !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript viewportEmulation(${tabId}) returned no viewport metrics`
+    );
+  }
+  return metrics;
+}
+
+function installViewportDprShimInPage(deviceScaleFactor) {
+  const requested = Number(deviceScaleFactor);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    throw new Error(`invalid deviceScaleFactor for Synapse viewport DPR shim: ${String(deviceScaleFactor)}`);
+  }
+  const stateKey = "__synapseViewportDprOverride";
+  let state = globalThis[stateKey];
+  if (!state || typeof state !== "object") {
+    state = {
+      original_had_own_descriptor: Object.prototype.hasOwnProperty.call(globalThis, "devicePixelRatio"),
+      original_own_descriptor: Object.getOwnPropertyDescriptor(globalThis, "devicePixelRatio") || null,
+      original_device_pixel_ratio: Number(globalThis.devicePixelRatio) || 1,
+      value: requested
+    };
+    Object.defineProperty(globalThis, stateKey, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: state
+    });
+  }
+  state.value = requested;
+  Object.defineProperty(globalThis, "devicePixelRatio", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const current = globalThis[stateKey];
+      const value = Number(current && current.value);
+      if (Number.isFinite(value) && value > 0) {
+        return value;
+      }
+      const original = Number(current && current.original_device_pixel_ratio);
+      return Number.isFinite(original) && original > 0 ? original : 1;
+    }
+  });
+  globalThis.dispatchEvent(new Event("resize"));
+  return {
+    applied: true,
+    requested_device_pixel_ratio: requested,
+    original_device_pixel_ratio: state.original_device_pixel_ratio
+  };
+}
+
+function clearViewportDprShimInPage() {
+  const stateKey = "__synapseViewportDprOverride";
+  const state = globalThis[stateKey];
+  if (state && typeof state === "object") {
+    if (state.original_had_own_descriptor && state.original_own_descriptor) {
+      Object.defineProperty(globalThis, "devicePixelRatio", state.original_own_descriptor);
+    } else {
+      delete globalThis.devicePixelRatio;
+    }
+    delete globalThis[stateKey];
+  }
+  globalThis.dispatchEvent(new Event("resize"));
+  return {
+    cleared: Boolean(state),
+    device_pixel_ratio: Number(globalThis.devicePixelRatio) || 1
+  };
 }
 
 async function handleCdpInputDrag(selected, action, params, before, beforePageText, waitTimeoutMs, autoWait, autoWaitTimeoutMs) {
@@ -8379,6 +8872,21 @@ function runPageEventsWorkerProbe() {
     ready_state: String(document.readyState || ""),
     events: drained.events,
     workers: drained.workers
+  };
+}
+
+function readViewportMetricsInPage() {
+  const viewport = globalThis.visualViewport || null;
+  return {
+    inner_width: Math.round(globalThis.innerWidth || 0),
+    inner_height: Math.round(globalThis.innerHeight || 0),
+    device_pixel_ratio: Number(globalThis.devicePixelRatio || 0),
+    screen_width: Math.round(globalThis.screen ? globalThis.screen.width || 0 : 0),
+    screen_height: Math.round(globalThis.screen ? globalThis.screen.height || 0 : 0),
+    outer_width: Math.round(globalThis.outerWidth || 0),
+    outer_height: Math.round(globalThis.outerHeight || 0),
+    visual_viewport_width: viewport ? Number(viewport.width) : null,
+    visual_viewport_height: viewport ? Number(viewport.height) : null
   };
 }
 

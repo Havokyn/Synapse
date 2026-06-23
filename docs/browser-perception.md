@@ -221,12 +221,12 @@ Chrome session, the supported attach path is:
    `health` also reports
    `synapse_chrome_self_policy_shield_present=<true|false>` from the same
    `ExtensionSettings` value so agents can distinguish a real Synapse
-   self-shield from a debugger-free current bridge that is relying on
+   self-shield from a current bridge that is relying on
    identity/capability gates plus fail-closed stale-active permission detection.
    Runtime `observe` diagnostics and health include a live
    `external_chrome_popup_risk` profile/process summary when Synapse refuses a
    normal-profile command, so remaining popups are attributed to the exact
-   external browser surface instead of to Synapse's tabs-only bridge.
+   external browser surface instead of to Synapse's normal bridge.
    Health/setup also report `external_chrome_layout_infobar_risk` for visible
    automation Chrome processes whose flags are known to show layout-shifting
    browser banners, including headed Playwright MCP Chrome with

@@ -300,12 +300,34 @@ pub async fn cdp_set_viewport_size(
     height: u32,
     device_scale_factor: f64,
 ) -> A11yResult<CdpViewportResult> {
+    cdp_set_viewport_size_with_mobile(
+        endpoint,
+        target_id,
+        width,
+        height,
+        device_scale_factor,
+        false,
+    )
+    .await
+}
+
+/// Applies `Emulation.setDeviceMetricsOverride` to one CDP page target with an
+/// explicit mobile-emulation flag, then reads back page-visible viewport
+/// metrics from the same target.
+pub async fn cdp_set_viewport_size_with_mobile(
+    endpoint: &str,
+    target_id: &str,
+    width: u32,
+    height: u32,
+    device_scale_factor: f64,
+    mobile: bool,
+) -> A11yResult<CdpViewportResult> {
     validate_viewport_override(width, height, device_scale_factor)?;
     let requested = CdpViewportOverride {
         width,
         height,
         device_scale_factor,
-        mobile: false,
+        mobile,
     };
     run_device_metrics_command(
         endpoint,
@@ -997,6 +1019,22 @@ async fn run_device_metrics_command(
                     .await
                     .map_err(|err| A11yError::CdpAxtreeFailed {
                         detail: format!("Emulation.clearDeviceMetricsOverride: {err}"),
+                    })?;
+                let params = SetDeviceMetricsOverrideParams::builder()
+                    .width(0)
+                    .height(0)
+                    .device_scale_factor(0.0)
+                    .mobile(false)
+                    .screen_width(0)
+                    .screen_height(0)
+                    .build()
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("Emulation.setDeviceMetricsOverride reset params: {err}"),
+                    })?;
+                page.execute(params)
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("Emulation.setDeviceMetricsOverride reset: {err}"),
                     })?;
             }
         }
