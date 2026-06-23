@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-network-waits-v2";
-const BRIDGE_BUILD_SHA256 = "4116781a862e3bc74b07ec99d418a611fbc0505ec8d3b84a68ab1a4867fd9104";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-storage-state-v2";
+const BRIDGE_BUILD_SHA256 = "54c77d578de467dc7a23e4166620e6b1f714d6358c97461720f4474047dd2980";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -9,6 +9,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "closeTab",
   "targetInfo",
   "targetInfoPageText",
+  "cookies",
+  "storageState",
   "navigateTab",
   "activateTab",
   "pageVitals",
@@ -793,6 +795,10 @@ async function handleCommand(command) {
       result = await handleTargetInfo(params);
     } else if (kind === "pageContent") {
       result = await handlePageContent(params);
+    } else if (kind === "cookies") {
+      result = await handleCookies(params);
+    } else if (kind === "storageState") {
+      result = await handleStorageState(params);
     } else if (kind === "setContent") {
       result = await handleSetContent(params);
     } else if (kind === "ariaSnapshot") {
@@ -1093,6 +1099,225 @@ async function handlePageContent(params) {
     readback_backend: "chrome.scripting.executeScript(document.documentElement.outerHTML)",
     frame_id: content.frame_id,
     frame_document_id: content.frame_document_id,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleCookies(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.cookies API unavailable; extension is missing cookies permission"
+    );
+  }
+
+  const operation = normalizeCookieOperation(params.operation);
+  const url = normalizeCookieUrl(params.url, state.url, operation);
+  let cookies = [];
+  let affected = [];
+  let verificationCookie = null;
+  let failed = [];
+
+  if (operation === "get") {
+    cookies = await chrome.cookies.getAll(cookieGetAllDetails(params, url));
+  } else if (operation === "set") {
+    const setDetails = cookieSetDetails(params, url);
+    try {
+      const cookie = await chrome.cookies.set(setDetails);
+      if (!cookie) {
+        throw new Error("chrome.cookies.set returned null");
+      }
+      affected.push(serializeCookie(cookie));
+      verificationCookie = await chrome.cookies.get({
+        url: setDetails.url,
+        name: setDetails.name,
+        storeId: cookie.storeId
+      });
+      cookies = verificationCookie ? [verificationCookie] : [];
+    } catch (error) {
+      throw bridgeError(ERROR_AXTREE_FAILED, `chrome.cookies.set failed: ${errorMessage(error)}`);
+    }
+  } else if (operation === "clear") {
+    const details = cookieGetAllDetails(params, url);
+    const candidates = await chrome.cookies.getAll(details);
+    for (const cookie of candidates) {
+      try {
+        const removed = await chrome.cookies.remove({
+          url: cookieRemovalUrl(cookie, url),
+          name: cookie.name,
+          storeId: cookie.storeId
+        });
+        if (removed) {
+          affected.push(serializeCookie(cookie));
+        }
+      } catch (error) {
+        failed.push({
+          name: String(cookie?.name || ""),
+          domain: String(cookie?.domain || ""),
+          path: String(cookie?.path || ""),
+          error_detail: errorMessage(error)
+        });
+      }
+    }
+    cookies = await chrome.cookies.getAll(details);
+  }
+
+  const serializedCookies = cookies.map(serializeCookie);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: url || state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    operation,
+    ok: failed.length === 0,
+    cookie_count: serializedCookies.length,
+    affected_count: affected.length,
+    cookies: serializedCookies,
+    affected_cookies: affected,
+    verification_cookie: verificationCookie ? serializeCookie(verificationCookie) : null,
+    failures: failed,
+    readback_backend: "chrome.cookies+chrome.tabs.get",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleStorageState(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+
+  const operation = normalizeStorageOperation(params.operation);
+  const store = normalizeStorageStore(params.store);
+  const includeSessionStorage = Boolean(params.includeSessionStorage);
+  let result = null;
+  let frameResults = [];
+  let cookieResult = null;
+
+  if (operation === "save_state") {
+    const cookieUrl = normalizeCookieUrl(params.url, state.url, "get");
+    const cookies = chrome.cookies && typeof chrome.cookies.getAll === "function"
+      ? await chrome.cookies.getAll(cookieGetAllDetails(params, cookieUrl))
+      : [];
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, allFrames: true },
+      func: readStorageStateInPage,
+      args: [includeSessionStorage]
+    });
+    frameResults = frameExecutionResults(injected);
+    result = buildStorageStateFromFrameResults(frameResults, cookies);
+  } else if (operation === "load_state") {
+    const stateValue = plainObjectOrEmpty(params.state);
+    const cookies = Array.isArray(stateValue.cookies) ? stateValue.cookies : [];
+    const cookieFailures = [];
+    const cookieAffected = [];
+    if (cookies.length > 0) {
+      if (!chrome.cookies || typeof chrome.cookies.set !== "function") {
+        throw bridgeError(
+          ERROR_AXTREE_FAILED,
+          "chrome.cookies API unavailable; extension is missing cookies permission"
+        );
+      }
+      for (const cookie of cookies) {
+        try {
+          const setDetails = cookieSetDetailsFromState(cookie);
+          const setCookie = await chrome.cookies.set(setDetails);
+          if (!setCookie) {
+            throw new Error("chrome.cookies.set returned null");
+          }
+          cookieAffected.push(serializeCookie(setCookie));
+        } catch (error) {
+          cookieFailures.push({
+            name: String(cookie?.name || ""),
+            domain: String(cookie?.domain || ""),
+            path: String(cookie?.path || ""),
+            error_detail: errorMessage(error)
+          });
+        }
+      }
+    }
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: applyStorageStateInPage,
+      args: [stateValue, includeSessionStorage, Boolean(params.clearBeforeLoad)]
+    });
+    frameResults = frameExecutionResults(injected);
+    const first = frameResults.find((frame) => frame.result) || null;
+    result = first?.result || null;
+    cookieResult = {
+      affected_count: cookieAffected.length,
+      affected_cookies: cookieAffected,
+      failure_count: cookieFailures.length,
+      failures: cookieFailures
+    };
+    if (!result || typeof result !== "object") {
+      throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "storageState load returned no structured result");
+    }
+    if (!result.ok) {
+      throw bridgeError(
+        String(result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+        `storageState load failed: ${String(result.error_detail || "")}`
+      );
+    }
+    result.cookie_result = cookieResult;
+    result.ok = result.ok && cookieFailures.length === 0;
+  } else {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: runStorageCommandInPage,
+      args: [{
+        operation,
+        store,
+        key: params.key == null ? null : String(params.key),
+        value: params.value === undefined ? null : params.value
+      }]
+    });
+    frameResults = frameExecutionResults(injected);
+    const first = frameResults.find((frame) => frame.result) || null;
+    result = first?.result || null;
+    if (!result || typeof result !== "object") {
+      throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "storageState command returned no structured result");
+    }
+    if (!result.ok) {
+      throw bridgeError(
+        String(result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+        `storageState command failed: ${String(result.error_detail || "")}`
+      );
+    }
+  }
+
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    operation,
+    store,
+    include_session_storage: includeSessionStorage,
+    ok: Boolean(result?.ok ?? true),
+    result,
+    storage_state: operation === "save_state" ? result.storage_state : null,
+    readback_backend: "chrome.scripting.executeScript(storageState)+chrome.cookies",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_result_count: frameResults.length,
+    frame_results: frameResults.map(summarizeFrameExecutionResult),
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
@@ -4346,6 +4571,237 @@ function readPageContentInPage(maxBytes) {
     history_current_index: -1,
     history_entry_count: Number.isSafeInteger(history.length) ? history.length : 0
   };
+}
+
+function runStorageCommandInPage(request) {
+  function storageItemsLocal(store) {
+    const items = [];
+    for (let index = 0; index < store.length; index += 1) {
+      const name = store.key(index);
+      if (name === null) {
+        continue;
+      }
+      items.push({ name: String(name), value: String(store.getItem(name) ?? "") });
+    }
+    items.sort((left, right) => left.name.localeCompare(right.name));
+    return items;
+  }
+
+  function storageValueToStringLocal(value) {
+    if (value === undefined || value === null) {
+      return "";
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    return JSON.stringify(value);
+  }
+
+  function failLocal(code, detail) {
+    return {
+      ok: false,
+      error_code: code,
+      error_detail: detail,
+      origin: String(location?.origin || ""),
+      url: String(location?.href || ""),
+      title: String(document?.title || ""),
+      ready_state: String(document?.readyState || "")
+    };
+  }
+
+  function errorMessageLocal(error) {
+    return error && typeof error.message === "string" ? error.message : String(error);
+  }
+
+  try {
+    const operation = String(request?.operation || "get");
+    const storeName = String(request?.store || "local");
+    const store = storeName === "session" ? window.sessionStorage : window.localStorage;
+    const key = request?.key === null || request?.key === undefined ? null : String(request.key);
+    const beforeItems = storageItemsLocal(store);
+    let afterItems = beforeItems;
+    let value = null;
+    let changed = false;
+
+    if (operation === "get") {
+      afterItems = key === null
+        ? beforeItems
+        : (store.getItem(key) === null ? [] : [{ name: key, value: String(store.getItem(key)) }]);
+    } else if (operation === "set") {
+      if (key === null || key === "") {
+        return failLocal("CHROME_STORAGE_KEY_INVALID", "storage set requires non-empty key");
+      }
+      value = storageValueToStringLocal(request?.value);
+      store.setItem(key, value);
+      changed = true;
+      afterItems = storageItemsLocal(store);
+    } else if (operation === "clear") {
+      if (key === null || key === "") {
+        store.clear();
+      } else {
+        store.removeItem(key);
+      }
+      changed = true;
+      afterItems = storageItemsLocal(store);
+    } else {
+      return failLocal("CHROME_STORAGE_OPERATION_UNSUPPORTED", `unsupported operation ${operation}`);
+    }
+
+    return {
+      ok: true,
+      operation,
+      store: storeName,
+      origin: String(location.origin || ""),
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || ""),
+      key,
+      value,
+      before_count: beforeItems.length,
+      after_count: afterItems.length,
+      changed,
+      items: afterItems
+    };
+  } catch (error) {
+    return failLocal("CHROME_STORAGE_ACTION_FAILED", errorMessageLocal(error));
+  }
+}
+
+function readStorageStateInPage(includeSessionStorage) {
+  function storageItemsLocal(store) {
+    const items = [];
+    for (let index = 0; index < store.length; index += 1) {
+      const name = store.key(index);
+      if (name === null) {
+        continue;
+      }
+      items.push({ name: String(name), value: String(store.getItem(name) ?? "") });
+    }
+    items.sort((left, right) => left.name.localeCompare(right.name));
+    return items;
+  }
+
+  function failLocal(code, detail) {
+    return {
+      ok: false,
+      error_code: code,
+      error_detail: detail,
+      origin: String(location?.origin || ""),
+      url: String(location?.href || ""),
+      title: String(document?.title || ""),
+      ready_state: String(document?.readyState || "")
+    };
+  }
+
+  function errorMessageLocal(error) {
+    return error && typeof error.message === "string" ? error.message : String(error);
+  }
+
+  try {
+    return {
+      ok: true,
+      origin: String(location.origin || ""),
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || ""),
+      localStorage: storageItemsLocal(window.localStorage),
+      sessionStorage: includeSessionStorage ? storageItemsLocal(window.sessionStorage) : []
+    };
+  } catch (error) {
+    return failLocal("CHROME_STORAGE_STATE_READ_FAILED", errorMessageLocal(error));
+  }
+}
+
+function applyStorageStateInPage(state, includeSessionStorage, clearBeforeLoad) {
+  function storageItemsLocal(store) {
+    const items = [];
+    for (let index = 0; index < store.length; index += 1) {
+      const name = store.key(index);
+      if (name === null) {
+        continue;
+      }
+      items.push({ name: String(name), value: String(store.getItem(name) ?? "") });
+    }
+    items.sort((left, right) => left.name.localeCompare(right.name));
+    return items;
+  }
+
+  function failLocal(code, detail) {
+    return {
+      ok: false,
+      error_code: code,
+      error_detail: detail,
+      origin: String(location?.origin || ""),
+      url: String(location?.href || ""),
+      title: String(document?.title || ""),
+      ready_state: String(document?.readyState || "")
+    };
+  }
+
+  function errorMessageLocal(error) {
+    return error && typeof error.message === "string" ? error.message : String(error);
+  }
+
+  try {
+    const origin = String(location.origin || "");
+    const origins = Array.isArray(state?.origins) ? state.origins : [];
+    const entry = origins.find((item) => String(item?.origin || "") === origin) || null;
+    if (!entry) {
+      return {
+        ok: true,
+        origin,
+        url: String(location.href || ""),
+        title: String(document.title || ""),
+        ready_state: String(document.readyState || ""),
+        matched_origin: false,
+        local_applied_count: 0,
+        session_applied_count: 0,
+        local_after_count: storageItemsLocal(window.localStorage).length,
+        session_after_count: storageItemsLocal(window.sessionStorage).length
+      };
+    }
+    if (clearBeforeLoad) {
+      window.localStorage.clear();
+      if (includeSessionStorage) {
+        window.sessionStorage.clear();
+      }
+    }
+    let localApplied = 0;
+    for (const item of Array.isArray(entry.localStorage) ? entry.localStorage : []) {
+      const name = String(item?.name || "");
+      if (!name) {
+        continue;
+      }
+      window.localStorage.setItem(name, String(item.value ?? ""));
+      localApplied += 1;
+    }
+    let sessionApplied = 0;
+    if (includeSessionStorage) {
+      for (const item of Array.isArray(entry.sessionStorage) ? entry.sessionStorage : []) {
+        const name = String(item?.name || "");
+        if (!name) {
+          continue;
+        }
+        window.sessionStorage.setItem(name, String(item.value ?? ""));
+        sessionApplied += 1;
+      }
+    }
+    return {
+      ok: true,
+      origin,
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || ""),
+      matched_origin: true,
+      clear_before_load: Boolean(clearBeforeLoad),
+      local_applied_count: localApplied,
+      session_applied_count: sessionApplied,
+      local_after_count: storageItemsLocal(window.localStorage).length,
+      session_after_count: storageItemsLocal(window.sessionStorage).length
+    };
+  } catch (error) {
+    return failLocal("CHROME_STORAGE_STATE_LOAD_FAILED", errorMessageLocal(error));
+  }
 }
 
 function runAssertPollInPage(request) {
@@ -10972,6 +11428,245 @@ function normalizeMaxContentBytes(value) {
     throw bridgeError(ERROR_ATTACH_FAILED, "maxBytes must be an integer from 0 through 2097152");
   }
   return number;
+}
+
+function normalizeCookieOperation(value) {
+  const operation = String(value || "get").trim().toLowerCase();
+  if (operation === "get" || operation === "set" || operation === "clear") {
+    return operation;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported cookies operation ${JSON.stringify(value)}`);
+}
+
+function normalizeStorageOperation(value) {
+  const operation = String(value || "get").trim().toLowerCase();
+  if (["get", "set", "clear", "save_state", "load_state"].includes(operation)) {
+    return operation;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported storage operation ${JSON.stringify(value)}`);
+}
+
+function normalizeStorageStore(value) {
+  const store = String(value || "local").trim().toLowerCase();
+  if (store === "local" || store === "session") {
+    return store;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported storage store ${JSON.stringify(value)}`);
+}
+
+function normalizeCookieUrl(rawUrl, fallbackUrl, operation) {
+  const raw = rawUrl === undefined || rawUrl === null || String(rawUrl).trim() === ""
+    ? String(fallbackUrl || "")
+    : String(rawUrl);
+  if (!raw) {
+    if (operation === "get") {
+      return "";
+    }
+    throw bridgeError(ERROR_ATTACH_FAILED, `cookies ${operation} requires url when the current tab has no HTTP(S) URL`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_) {
+    if (operation === "get") {
+      return "";
+    }
+    throw bridgeError(ERROR_ATTACH_FAILED, `cookies ${operation} requires a valid HTTP(S) URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    if (operation === "get") {
+      return "";
+    }
+    throw bridgeError(ERROR_ATTACH_FAILED, `cookies ${operation} requires an http: or https: URL; got ${parsed.protocol}`);
+  }
+  return parsed.href;
+}
+
+function cookieGetAllDetails(params, url) {
+  const details = {};
+  if (url) {
+    details.url = url;
+  }
+  if (params.name !== undefined && params.name !== null && String(params.name) !== "") {
+    details.name = String(params.name);
+  }
+  if (params.domain !== undefined && params.domain !== null && String(params.domain) !== "") {
+    details.domain = String(params.domain);
+  }
+  if (params.path !== undefined && params.path !== null && String(params.path) !== "") {
+    details.path = String(params.path);
+  }
+  if (params.secure !== undefined && params.secure !== null) {
+    details.secure = Boolean(params.secure);
+  }
+  if (params.session !== undefined && params.session !== null) {
+    details.session = Boolean(params.session);
+  }
+  return details;
+}
+
+function cookieSetDetails(params, url) {
+  if (!url) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "cookies set requires url");
+  }
+  const name = String(params.name || "").trim();
+  if (!name) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "cookies set requires non-empty name");
+  }
+  const details = {
+    url,
+    name,
+    value: String(params.value ?? "")
+  };
+  if (params.domain !== undefined && params.domain !== null && String(params.domain) !== "") {
+    details.domain = String(params.domain);
+  }
+  if (params.path !== undefined && params.path !== null && String(params.path) !== "") {
+    details.path = String(params.path);
+  }
+  if (params.secure !== undefined && params.secure !== null) {
+    details.secure = Boolean(params.secure);
+  }
+  if (params.httpOnly !== undefined && params.httpOnly !== null) {
+    details.httpOnly = Boolean(params.httpOnly);
+  }
+  const sameSite = normalizeCookieSameSite(params.sameSite);
+  if (sameSite) {
+    details.sameSite = sameSite;
+  }
+  const expirationDate = Number(params.expiresUnixSeconds ?? params.expirationDate ?? NaN);
+  if (Number.isFinite(expirationDate)) {
+    details.expirationDate = expirationDate;
+  }
+  return details;
+}
+
+function cookieSetDetailsFromState(cookie) {
+  if (!cookie || typeof cookie !== "object") {
+    throw new Error("storageState cookie must be an object");
+  }
+  const url = String(cookie.url || cookieUrlFromCookie(cookie));
+  return cookieSetDetails({
+    url,
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    secure: cookie.secure,
+    httpOnly: cookie.httpOnly,
+    sameSite: cookie.sameSite,
+    expiresUnixSeconds: cookie.expires === undefined || cookie.expires === null || Number(cookie.expires) < 0
+      ? undefined
+      : cookie.expires
+  }, url);
+}
+
+function normalizeCookieSameSite(value) {
+  const sameSite = String(value || "").trim().toLowerCase();
+  if (!sameSite) {
+    return null;
+  }
+  if (sameSite === "lax" || sameSite === "strict" || sameSite === "unspecified") {
+    return sameSite;
+  }
+  if (sameSite === "none" || sameSite === "no_restriction" || sameSite === "no-restriction") {
+    return "no_restriction";
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported cookie sameSite ${JSON.stringify(value)}`);
+}
+
+function cookieUrlFromCookie(cookie) {
+  const domain = String(cookie?.domain || "").replace(/^\./, "");
+  if (!domain) {
+    throw new Error("cookie has no domain and no url");
+  }
+  const path = String(cookie?.path || "/");
+  const safePath = path.startsWith("/") ? path : `/${path}`;
+  return `${cookie?.secure ? "https" : "http"}://${domain}${safePath}`;
+}
+
+function cookieRemovalUrl(cookie, fallbackUrl) {
+  try {
+    return cookieUrlFromCookie(cookie);
+  } catch (_) {
+    if (fallbackUrl) {
+      return fallbackUrl;
+    }
+    throw _;
+  }
+}
+
+function serializeCookie(cookie) {
+  return {
+    name: String(cookie?.name || ""),
+    value: String(cookie?.value || ""),
+    domain: String(cookie?.domain || ""),
+    path: String(cookie?.path || ""),
+    expires: Number.isFinite(Number(cookie?.expirationDate)) ? Number(cookie.expirationDate) : -1,
+    httpOnly: Boolean(cookie?.httpOnly),
+    secure: Boolean(cookie?.secure),
+    sameSite: String(cookie?.sameSite || ""),
+    session: Boolean(cookie?.session),
+    hostOnly: Boolean(cookie?.hostOnly),
+    storeId: cookie?.storeId == null ? null : String(cookie.storeId)
+  };
+}
+
+function buildStorageStateFromFrameResults(frames, cookies) {
+  const originsByName = new Map();
+  let frameErrorCount = 0;
+  for (const frame of frames) {
+    const result = frame.result;
+    if (!result || typeof result !== "object") {
+      continue;
+    }
+    if (!result.ok) {
+      frameErrorCount += 1;
+      continue;
+    }
+    const origin = String(result.origin || "");
+    if (!origin || origin === "null") {
+      continue;
+    }
+    if (!originsByName.has(origin)) {
+      originsByName.set(origin, {
+        origin,
+        localStorage: [],
+        sessionStorage: []
+      });
+    }
+    const entry = originsByName.get(origin);
+    const localNames = new Set(entry.localStorage.map((item) => item.name));
+    for (const item of Array.isArray(result.localStorage) ? result.localStorage : []) {
+      const name = String(item?.name || "");
+      if (name && !localNames.has(name)) {
+        entry.localStorage.push({ name, value: String(item.value || "") });
+        localNames.add(name);
+      }
+    }
+    const sessionNames = new Set(entry.sessionStorage.map((item) => item.name));
+    for (const item of Array.isArray(result.sessionStorage) ? result.sessionStorage : []) {
+      const name = String(item?.name || "");
+      if (name && !sessionNames.has(name)) {
+        entry.sessionStorage.push({ name, value: String(item.value || "") });
+        sessionNames.add(name);
+      }
+    }
+  }
+  const origins = Array.from(originsByName.values()).map((origin) => {
+    origin.localStorage.sort((left, right) => left.name.localeCompare(right.name));
+    origin.sessionStorage.sort((left, right) => left.name.localeCompare(right.name));
+    return origin;
+  }).sort((left, right) => left.origin.localeCompare(right.origin));
+  return {
+    ok: frameErrorCount === 0,
+    origin_count: origins.length,
+    frame_error_count: frameErrorCount,
+    storage_state: {
+      cookies: cookies.map(serializeCookie),
+      origins
+    }
+  };
 }
 
 function normalizeReloadDelay(value) {

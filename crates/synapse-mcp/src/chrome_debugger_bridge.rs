@@ -40,15 +40,16 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-network-waits-v2";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-storage-state-v2";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "4116781a862e3bc74b07ec99d418a611fbc0505ec8d3b84a68ab1a4867fd9104";
+    "54c77d578de467dc7a23e4166620e6b1f714d6358c97461720f4474047dd2980";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
     "activateTab",
     "closeTab",
     "coordinateClick",
+    "cookies",
     "domAction",
     "externalPopupRiskSuppression",
     "listTabs",
@@ -57,6 +58,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "pageVitals",
     "pageContent",
     "setContent",
+    "storageState",
     "ariaSnapshot",
     "assertPoll",
     "locateElements",
@@ -4555,6 +4557,34 @@ pub(crate) async fn page_content(
             "decode Chrome debugger pageContent response: {error}"
         ))
     })
+}
+
+pub(crate) async fn cookies(
+    hwnd: i64,
+    target_id: &str,
+    mut params: Value,
+) -> Result<Value, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "cookies")?;
+    if !params.is_object() {
+        params = json!({});
+    }
+    params["hwnd"] = json!(hwnd);
+    params["targetIdHint"] = json!(target_id);
+    bridge().send_command("cookies", params).await
+}
+
+pub(crate) async fn storage_state(
+    hwnd: i64,
+    target_id: &str,
+    mut params: Value,
+) -> Result<Value, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "storageState")?;
+    if !params.is_object() {
+        params = json!({});
+    }
+    params["hwnd"] = json!(hwnd);
+    params["targetIdHint"] = json!(target_id);
+    bridge().send_command("storageState", params).await
 }
 
 pub(crate) async fn set_content(

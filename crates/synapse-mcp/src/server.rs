@@ -222,6 +222,7 @@ mod browser_emulation;
 mod browser_field;
 mod browser_frames;
 mod browser_network;
+mod browser_storage;
 mod data_cleaning;
 pub(crate) mod drain;
 pub(crate) mod escalation;
@@ -636,6 +637,7 @@ impl SynapseService {
             + Self::browser_field_tool_router()
             + Self::browser_frames_tool_router()
             + Self::browser_network_tool_router()
+            + Self::browser_storage_tool_router()
             + Self::tool_profile_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface
         // unless the operator opts in (SYNAPSE_ENABLE_EVERQUEST). No capability

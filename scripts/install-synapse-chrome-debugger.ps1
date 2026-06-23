@@ -1418,10 +1418,10 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-22-network-waits-v2'
-    bridge_build_sha256_expected = '4116781a862e3bc74b07ec99d418a611fbc0505ec8d3b84a68ab1a4867fd9104'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'closeTab', 'clock', 'coordinateClick', 'domAction', 'externalPopupRiskSuppression', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
-    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_and_waits_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-23-storage-state-v2'
+    bridge_build_sha256_expected = '54c77d578de467dc7a23e4166620e6b1f714d6358c97461720f4474047dd2980'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'closeTab', 'clock', 'coordinateClick', 'cookies', 'domAction', 'externalPopupRiskSuppression', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'storageState', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.cookies_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_storage_cookies_and_waits_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
     attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'
     normal_bridge_attach_commands_available = $false
@@ -1429,6 +1429,7 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     expected_extension_id_guard_present = $true
     required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
     recurring_wakeup_permission_present = ($requiredPermissions -contains 'alarms')
+    required_cookies_permission_present = ($requiredPermissions -contains 'cookies')
     required_debugger_permission_present = $false
     optional_debugger_permission_present = $false
     required_management_permission_present = ($requiredPermissions -contains 'management')
