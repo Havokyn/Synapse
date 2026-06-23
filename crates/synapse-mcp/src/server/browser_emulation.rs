@@ -599,7 +599,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Apply or reset a Playwright-style device descriptor for the calling session's owned raw-CDP browser tab. operation=set applies user_agent, width, height, device_scale_factor, is_mobile, has_touch, and max_touch_points in one target-scoped command sequence using Emulation.setUserAgentOverride, Emulation.setDeviceMetricsOverride, Emulation.setTouchEmulationEnabled, and Emulation.setEmitTouchEventsForMouse, then reads back navigator/user-agent/viewport/touch media state via Runtime.evaluate. operation=reset clears metrics and touch emulation and restores the user agent observed before the first set in this Synapse process. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent FSV readback for navigator.userAgent, innerWidth/innerHeight, devicePixelRatio, maxTouchPoints, and matchMedia('(pointer: coarse)')."
+        description = "Apply or reset a Playwright-style device descriptor for the calling session's owned browser tab. Raw-CDP targets use Emulation.setUserAgentOverride, Emulation.setDeviceMetricsOverride, Emulation.setTouchEmulationEnabled, and Emulation.setEmitTouchEventsForMouse plus Runtime.evaluate readback. Normal Chrome bridge chrome-tab:* targets in the already-open authenticated profile use the bundled deviceEmulation bridge lane and page-visible chrome.scripting readback. operation=set applies user_agent, width, height, device_scale_factor, is_mobile, has_touch, and max_touch_points; operation=reset clears metrics/touch and restores the user agent observed before the first set on that tab. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_device(
         &self,
@@ -944,6 +944,11 @@ impl SynapseService {
         params: &NormalizedBrowserDeviceParams,
     ) -> Result<BrowserDeviceResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with(CHROME_TAB_PREFIX) {
+                return self
+                    .browser_device_bridge_impl(session_id, window_hwnd, cdp_target_id, params)
+                    .await;
+            }
             return Err(browser_raw_cdp_required_error(DEVICE_TOOL, window_hwnd));
         };
         let result = match params.operation {
@@ -992,6 +997,64 @@ impl SynapseService {
             "readback=Emulation.device_descriptor+Runtime.evaluate outcome=device_metrics"
         );
         Ok(browser_device_response(session_id, window_hwnd, result))
+    }
+
+    #[cfg(windows)]
+    async fn browser_device_bridge_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &NormalizedBrowserDeviceParams,
+    ) -> Result<BrowserDeviceResponse, ErrorData> {
+        let operation = match params.operation {
+            BrowserDeviceOperation::Set => "set",
+            BrowserDeviceOperation::Reset => "reset",
+        };
+        let descriptor = params.descriptor.as_ref();
+        let result = crate::chrome_debugger_bridge::device_emulation(
+            crate::chrome_debugger_bridge::ChromeDebuggerDeviceEmulationRequest {
+                hwnd: window_hwnd,
+                target_id: cdp_target_id,
+                operation,
+                user_agent: descriptor.map(|value| value.user_agent.as_str()),
+                width: descriptor.map(|value| value.width),
+                height: descriptor.map(|value| value.height),
+                device_scale_factor: descriptor.map(|value| value.device_scale_factor),
+                is_mobile: descriptor.map(|value| value.is_mobile),
+                has_touch: descriptor.map(|value| value.has_touch),
+                max_touch_points: descriptor.map(|value| value.max_touch_points),
+                wait_timeout_ms: DEFAULT_BRIDGE_VIEWPORT_WAIT_TIMEOUT_MS,
+            },
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "{DEVICE_TOOL} normal Chrome bridge device emulation failed for target {cdp_target_id:?}: {}",
+                    error.detail()
+                ),
+            )
+        })?;
+        tracing::info!(
+            code = "CHROME_BRIDGE_DEVICE_EMULATION",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id,
+            operation = ?params.operation,
+            inner_width = result.device.viewport.inner_width,
+            inner_height = result.device.viewport.inner_height,
+            device_pixel_ratio = result.device.viewport.device_pixel_ratio,
+            max_touch_points = result.device.max_touch_points,
+            pointer_coarse = result.device.pointer_coarse,
+            "readback=chrome.debugger.Emulation+chrome.scripting.executeScript outcome=device_metrics"
+        );
+        Ok(browser_device_bridge_response(
+            session_id,
+            window_hwnd,
+            result,
+        ))
     }
 
     #[cfg(windows)]
@@ -1926,6 +1989,74 @@ fn browser_device_response(
     }
 }
 
+fn browser_device_bridge_response(
+    session_id: &str,
+    window_hwnd: i64,
+    result: crate::chrome_debugger_bridge::ChromeDebuggerDeviceEmulationResult,
+) -> BrowserDeviceResponse {
+    BrowserDeviceResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "chrome_tabs_extension".to_owned(),
+        endpoint: chrome_debugger_default_endpoint(),
+        cdp_target_id: result.target_id,
+        operation: match result.operation.as_str() {
+            "reset" => BrowserDeviceOperation::Reset,
+            _ => BrowserDeviceOperation::Set,
+        },
+        descriptor: result.descriptor.map(|descriptor| BrowserDeviceDescriptor {
+            user_agent: descriptor.user_agent,
+            width: descriptor.width,
+            height: descriptor.height,
+            device_scale_factor: descriptor.device_scale_factor,
+            is_mobile: descriptor.is_mobile,
+            has_touch: descriptor.has_touch,
+            max_touch_points: descriptor.max_touch_points,
+        }),
+        restored_user_agent: result.restored_user_agent,
+        page_url: result.page_url,
+        page_title: result.page_title,
+        ready_state: result.ready_state,
+        device: BrowserDeviceReadback {
+            viewport: BrowserViewportReadback {
+                inner_width: result.device.viewport.inner_width,
+                inner_height: result.device.viewport.inner_height,
+                device_pixel_ratio: result.device.viewport.device_pixel_ratio,
+                screen_width: result.device.viewport.screen_width,
+                screen_height: result.device.viewport.screen_height,
+                outer_width: result.device.viewport.outer_width,
+                outer_height: result.device.viewport.outer_height,
+                visual_viewport_width: result.device.viewport.visual_viewport_width,
+                visual_viewport_height: result.device.viewport.visual_viewport_height,
+            },
+            user_agent: result.device.user_agent,
+            max_touch_points: result.device.max_touch_points,
+            ontouchstart_available: result.device.ontouchstart_available,
+            pointer_coarse: result.device.pointer_coarse,
+            any_pointer_coarse: result.device.any_pointer_coarse,
+            hover_none: result.device.hover_none,
+            any_hover_none: result.device.any_hover_none,
+        },
+        readback_backend: if result.readback_backend.is_empty() {
+            "chrome.debugger.Emulation + chrome.scripting.executeScript".to_owned()
+        } else {
+            result.readback_backend
+        },
+        backend_tier_used: if result.backend_tier_used.is_empty() {
+            "chrome_tabs_extension_debugger".to_owned()
+        } else {
+            result.backend_tier_used
+        },
+        required_foreground: result.required_foreground,
+        source_of_truth: if result.source_of_truth.is_empty() {
+            "normal Chrome bridge page script navigator/userAgent/viewport/touch media queries"
+                .to_owned()
+        } else {
+            result.source_of_truth
+        },
+    }
+}
+
 fn browser_geolocation_response(
     session_id: &str,
     window_hwnd: i64,
@@ -2343,6 +2474,80 @@ mod tests {
             },
         );
 
+        assert_eq!(response.operation, BrowserDeviceOperation::Set);
+        assert_eq!(response.device.viewport.inner_width, 390);
+        assert_eq!(response.device.user_agent, "Mobile UA");
+        assert!(response.device.pointer_coarse);
+        assert_eq!(
+            response
+                .descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.max_touch_points),
+            Some(5)
+        );
+        assert!(!response.required_foreground);
+    }
+
+    #[test]
+    fn browser_device_bridge_response_maps_readback() {
+        let response = browser_device_bridge_response(
+            "session-1",
+            0x2200,
+            crate::chrome_debugger_bridge::ChromeDebuggerDeviceEmulationResult {
+                extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+                target_id: "chrome-tab:44".to_owned(),
+                tab_id: 44,
+                chrome_window_id: Some(7),
+                operation: "set".to_owned(),
+                descriptor: Some(
+                    crate::chrome_debugger_bridge::ChromeDebuggerDeviceDescriptor {
+                        user_agent: "Mobile UA".to_owned(),
+                        width: 390,
+                        height: 844,
+                        device_scale_factor: 3.0,
+                        is_mobile: true,
+                        has_touch: true,
+                        max_touch_points: 5,
+                    },
+                ),
+                restored_user_agent: None,
+                page_url: "https://example.test/".to_owned(),
+                page_title: "Example".to_owned(),
+                ready_state: "complete".to_owned(),
+                device: crate::chrome_debugger_bridge::ChromeDebuggerDeviceReadback {
+                    viewport: crate::chrome_debugger_bridge::ChromeDebuggerViewportReadback {
+                        inner_width: 390,
+                        inner_height: 844,
+                        device_pixel_ratio: 3.0,
+                        screen_width: 390,
+                        screen_height: 844,
+                        outer_width: 390,
+                        outer_height: 844,
+                        visual_viewport_width: Some(390.0),
+                        visual_viewport_height: Some(844.0),
+                    },
+                    user_agent: "Mobile UA".to_owned(),
+                    max_touch_points: 5,
+                    ontouchstart_available: true,
+                    pointer_coarse: true,
+                    any_pointer_coarse: true,
+                    hover_none: true,
+                    any_hover_none: true,
+                },
+                readback_backend: "chrome.debugger.Emulation + chrome.scripting.executeScript"
+                    .to_owned(),
+                backend_tier_used: "chrome_tabs_extension_debugger".to_owned(),
+                required_foreground: false,
+                source_of_truth: "normal Chrome bridge page script".to_owned(),
+                method: "Emulation.setUserAgentOverride".to_owned(),
+                debugger_protocol_version: Some("1.3".to_owned()),
+                target_candidate_count: 1,
+                target_selection_reason: "chrome_tab_id_hint".to_owned(),
+            },
+        );
+
+        assert_eq!(response.transport, "chrome_tabs_extension");
+        assert_eq!(response.cdp_target_id, "chrome-tab:44");
         assert_eq!(response.operation, BrowserDeviceOperation::Set);
         assert_eq!(response.device.viewport.inner_width, 390);
         assert_eq!(response.device.user_agent, "Mobile UA");

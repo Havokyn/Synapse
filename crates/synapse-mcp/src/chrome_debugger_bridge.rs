@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-viewport-v6";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-device-v2";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "43ecc5e0b8b695845799e3f9aaf868652ef38ca6f47223cb055cea0b8104eef5";
+    "9f72976d2c14365aa665a5848852c6516a79a3a62ad9f029890e323ba0beff0d";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -77,6 +77,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "pageEvents",
     "cdpInput",
     "viewportEmulation",
+    "deviceEmulation",
     "reloadSelf",
     "targetInfo",
     "targetInfoPageText",
@@ -93,7 +94,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag and viewport emulation plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, viewport emulation, and device emulation plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -258,7 +259,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only narrow chrome.debugger lanes for cdpInput target-scoped hover/tap/active-tab drag and viewportEmulation plus inactive-tab synthetic mouse drag, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
+                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only narrow chrome.debugger lanes for cdpInput target-scoped hover/tap/active-tab drag, viewportEmulation, and deviceEmulation plus inactive-tab synthetic mouse drag, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
             ),
         }
     }
@@ -2694,6 +2695,61 @@ pub(crate) struct ChromeDebuggerViewportEmulationResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerDeviceDescriptor {
+    pub user_agent: String,
+    pub width: u32,
+    pub height: u32,
+    pub device_scale_factor: f64,
+    pub is_mobile: bool,
+    pub has_touch: bool,
+    pub max_touch_points: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerDeviceReadback {
+    pub viewport: ChromeDebuggerViewportReadback,
+    pub user_agent: String,
+    pub max_touch_points: i64,
+    pub ontouchstart_available: bool,
+    pub pointer_coarse: bool,
+    pub any_pointer_coarse: bool,
+    pub hover_none: bool,
+    pub any_hover_none: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerDeviceEmulationResult {
+    pub extension_id: Option<String>,
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    pub operation: String,
+    #[serde(default)]
+    pub descriptor: Option<ChromeDebuggerDeviceDescriptor>,
+    #[serde(default)]
+    pub restored_user_agent: Option<String>,
+    pub page_url: String,
+    pub page_title: String,
+    pub ready_state: String,
+    pub device: ChromeDebuggerDeviceReadback,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    #[serde(default)]
+    pub source_of_truth: String,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub debugger_protocol_version: Option<String>,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ChromeDebuggerFrameEntry {
     #[serde(default)]
     pub frame_id: String,
@@ -4685,6 +4741,49 @@ pub(crate) async fn viewport_emulation(
     })
 }
 
+pub(crate) struct ChromeDebuggerDeviceEmulationRequest<'a> {
+    pub hwnd: i64,
+    pub target_id: &'a str,
+    pub operation: &'a str,
+    pub user_agent: Option<&'a str>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub device_scale_factor: Option<f64>,
+    pub is_mobile: Option<bool>,
+    pub has_touch: Option<bool>,
+    pub max_touch_points: Option<u32>,
+    pub wait_timeout_ms: u64,
+}
+
+pub(crate) async fn device_emulation(
+    request: ChromeDebuggerDeviceEmulationRequest<'_>,
+) -> Result<ChromeDebuggerDeviceEmulationResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "deviceEmulation")?;
+    let result = bridge()
+        .send_command(
+            "deviceEmulation",
+            json!({
+                "hwnd": request.hwnd,
+                "targetIdHint": request.target_id,
+                "operation": request.operation,
+                "userAgent": request.user_agent,
+                "width": request.width,
+                "height": request.height,
+                "deviceScaleFactor": request.device_scale_factor,
+                "isMobile": request.is_mobile,
+                "hasTouch": request.has_touch,
+                "maxTouchPoints": request.max_touch_points,
+                "waitTimeoutMs": request.wait_timeout_ms,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerDeviceEmulationResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger deviceEmulation response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn frames(
     hwnd: i64,
     target_id: &str,
@@ -6275,6 +6374,35 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "device_pixel_ratio": result
                 .get("viewport")
                 .and_then(|value| value.get("device_pixel_ratio")),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "deviceEmulation" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "operation": result.get("operation"),
+            "descriptor": result.get("descriptor"),
+            "restored_user_agent": result.get("restored_user_agent"),
+            "inner_width": result
+                .get("device")
+                .and_then(|value| value.get("viewport"))
+                .and_then(|value| value.get("inner_width")),
+            "inner_height": result
+                .get("device")
+                .and_then(|value| value.get("viewport"))
+                .and_then(|value| value.get("inner_height")),
+            "device_pixel_ratio": result
+                .get("device")
+                .and_then(|value| value.get("viewport"))
+                .and_then(|value| value.get("device_pixel_ratio")),
+            "max_touch_points": result
+                .get("device")
+                .and_then(|value| value.get("max_touch_points")),
+            "pointer_coarse": result
+                .get("device")
+                .and_then(|value| value.get("pointer_coarse")),
             "readback_backend": result.get("readback_backend"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),

@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-viewport-v6";
-const BRIDGE_BUILD_SHA256 = "43ecc5e0b8b695845799e3f9aaf868652ef38ca6f47223cb055cea0b8104eef5";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-device-v2";
+const BRIDGE_BUILD_SHA256 = "9f72976d2c14365aa665a5848852c6516a79a3a62ad9f029890e323ba0beff0d";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
@@ -35,6 +35,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "pageEvents",
   "cdpInput",
   "viewportEmulation",
+  "deviceEmulation",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -78,6 +79,7 @@ const OPEN_WINDOW_BOUNDS_TOLERANCE_PX = 96;
 const EXTERNAL_POPUP_RISK_PERMISSIONS = Object.freeze(["debugger", "nativeMessaging"]);
 const POPUP_RISK_SUPPRESSION_RECHECK_MS = 60000;
 const VIEWPORT_BASELINE_BY_TAB = new Map();
+const DEVICE_BASELINE_BY_TAB = new Map();
 
 let hostId = null;
 let bridgeToken = null;
@@ -335,6 +337,7 @@ function commandRequiresExternalPopupSuppression(kind) {
     "pageEvents",
     "cdpInput",
     "viewportEmulation",
+    "deviceEmulation",
     "navigateTab",
     "activateTab",
     "domAction",
@@ -833,6 +836,8 @@ async function handleCommand(command) {
       result = await handleCdpInput(params);
     } else if (kind === "viewportEmulation") {
       result = await handleViewportEmulation(params);
+    } else if (kind === "deviceEmulation") {
+      result = await handleDeviceEmulation(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -3029,6 +3034,96 @@ async function handleViewportEmulation(params) {
   };
 }
 
+async function handleDeviceEmulation(params) {
+  requireDebuggerApiAvailable("deviceEmulation", params);
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeDeviceEmulationOperation(params.operation);
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const before = await tabPageState(selected.tabId, selected.target);
+  const beforeDevice = await tabDeviceMetricsState(selected.tabId);
+  let descriptor = null;
+  let dispatch;
+  let restoredUserAgent = null;
+  if (operation === "set") {
+    descriptor = normalizeDeviceDescriptor(params);
+    if (!DEVICE_BASELINE_BY_TAB.has(selected.tabId)) {
+      DEVICE_BASELINE_BY_TAB.set(selected.tabId, beforeDevice);
+    }
+    dispatch = await dispatchDeviceEmulationSet(selected.tabId, descriptor);
+    await applyDeviceEmulationShim(selected.tabId, descriptor);
+  } else {
+    rejectDeviceResetField(params.userAgent, "userAgent");
+    rejectDeviceResetField(params.width, "width");
+    rejectDeviceResetField(params.height, "height");
+    rejectDeviceResetField(params.deviceScaleFactor, "deviceScaleFactor");
+    rejectDeviceResetField(params.isMobile, "isMobile");
+    rejectDeviceResetField(params.hasTouch, "hasTouch");
+    rejectDeviceResetField(params.maxTouchPoints, "maxTouchPoints");
+    const baseline = DEVICE_BASELINE_BY_TAB.get(selected.tabId);
+    restoredUserAgent = typeof baseline?.user_agent === "string" && baseline.user_agent
+      ? baseline.user_agent
+      : null;
+    dispatch = await dispatchDeviceEmulationReset(selected.tabId, restoredUserAgent);
+    await clearDeviceEmulationShim(selected.tabId);
+  }
+  let after = descriptor
+    ? await waitForDeviceReadback(selected.tabId, selected.target, waitTimeoutMs, descriptor)
+    : await waitForDeviceResetReadback(selected.tabId, selected.target, waitTimeoutMs, beforeDevice);
+  let resetFallback = null;
+  let resetBaselineRestore = null;
+  if (!descriptor) {
+    const baseline = DEVICE_BASELINE_BY_TAB.get(selected.tabId);
+    const baselineRequest = viewportRequestFromBaseline(baseline?.viewport);
+    if (baselineRequest && !viewportMatchesRequest(after.device.viewport, baselineRequest)) {
+      resetFallback = await reloadViewportTabAfterReset(
+        selected.tabId,
+        selected.target,
+        waitTimeoutMs
+      );
+      try {
+        after = await waitForDeviceResetBaselineReadback(
+          selected.tabId,
+          selected.target,
+          Math.min(waitTimeoutMs, 2000),
+          baseline
+        );
+      } catch (_error) {
+        resetBaselineRestore = await dispatchViewportBaselineRestore(selected.tabId, baselineRequest);
+        after = await waitForDeviceResetBaselineReadback(
+          selected.tabId,
+          selected.target,
+          waitTimeoutMs,
+          baseline
+        );
+      }
+    }
+    DEVICE_BASELINE_BY_TAB.delete(selected.tabId);
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.page.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.page.chrome_window_id,
+    operation,
+    descriptor,
+    restored_user_agent: restoredUserAgent,
+    page_url: after.page.url || "",
+    page_title: after.page.title || "",
+    ready_state: after.page.ready_state || "",
+    device: after.device,
+    before_page: before,
+    before_device: beforeDevice,
+    readback_backend: "chrome.debugger.Emulation + chrome.scripting.executeScript(MAIN device readback/device shim)",
+    backend_tier_used: "chrome_tabs_extension_debugger",
+    required_foreground: false,
+    source_of_truth: "normal Chrome bridge page script navigator/userAgent/viewport/touch media queries",
+    method: viewportEmulationMethod(dispatch, resetFallback, resetBaselineRestore),
+    debugger_protocol_version: dispatch.protocol_version,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 function normalizeCdpInputAction(value) {
   const action = String(value || "").trim().toLowerCase();
   if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
@@ -3091,6 +3186,172 @@ function rejectViewportResetField(value, fieldName) {
       ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
       `viewportEmulation ${fieldName} is not valid for operation=reset`
     );
+  }
+}
+
+function normalizeDeviceEmulationOperation(value) {
+  const operation = String(value || "set").trim().toLowerCase();
+  if (operation === "set" || operation === "reset") {
+    return operation;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `deviceEmulation operation must be set or reset; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeDeviceDescriptor(params) {
+  const userAgent = String(params.userAgent || "").trim();
+  if (!userAgent) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "deviceEmulation userAgent is required for operation=set");
+  }
+  const hasTouch = normalizeDeviceBoolean(params.hasTouch, "hasTouch", false);
+  const maxTouchPoints = normalizeDeviceMaxTouchPoints(params.maxTouchPoints, hasTouch);
+  return {
+    user_agent: userAgent,
+    width: normalizeViewportDimension(params.width, "width"),
+    height: normalizeViewportDimension(params.height, "height"),
+    device_scale_factor: normalizeViewportScaleFactor(params.deviceScaleFactor),
+    is_mobile: normalizeDeviceBoolean(params.isMobile, "isMobile", false),
+    has_touch: hasTouch,
+    max_touch_points: maxTouchPoints
+  };
+}
+
+function normalizeDeviceBoolean(value, fieldName, defaultValue) {
+  if (value === null || value === undefined) {
+    return defaultValue;
+  }
+  if (typeof value !== "boolean") {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `deviceEmulation ${fieldName} must be a boolean; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+function normalizeDeviceMaxTouchPoints(value, hasTouch) {
+  const resolved = value === null || value === undefined
+    ? (hasTouch ? 5 : 0)
+    : value;
+  if (!Number.isSafeInteger(resolved) || resolved < 0 || resolved > 100) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `deviceEmulation maxTouchPoints must be an integer in 0..=100; got ${JSON.stringify(value)}`
+    );
+  }
+  if (hasTouch && resolved === 0) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "deviceEmulation maxTouchPoints must be >=1 when hasTouch=true");
+  }
+  if (!hasTouch && resolved !== 0) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "deviceEmulation maxTouchPoints must be 0 when hasTouch=false");
+  }
+  return resolved;
+}
+
+function rejectDeviceResetField(value, fieldName) {
+  if (value !== null && value !== undefined) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `deviceEmulation ${fieldName} is not valid for operation=reset`
+    );
+  }
+}
+
+async function dispatchDeviceEmulationSet(tabId, descriptor) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    await sendDebuggerCommand(debuggee, "Emulation.setUserAgentOverride", {
+      userAgent: descriptor.user_agent
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setDeviceMetricsOverride", {
+      width: descriptor.width,
+      height: descriptor.height,
+      deviceScaleFactor: descriptor.device_scale_factor,
+      mobile: descriptor.is_mobile,
+      screenWidth: descriptor.width,
+      screenHeight: descriptor.height
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+      enabled: descriptor.has_touch,
+      maxTouchPoints: descriptor.has_touch ? descriptor.max_touch_points : 0
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setEmitTouchEventsForMouse", {
+      enabled: descriptor.has_touch,
+      configuration: descriptor.is_mobile ? "mobile" : "desktop"
+    });
+    return {
+      method: "Emulation.setUserAgentOverride+Emulation.setDeviceMetricsOverride+Emulation.setTouchEmulationEnabled+Emulation.setEmitTouchEventsForMouse",
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger deviceEmulation set failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for deviceEmulation set tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function dispatchDeviceEmulationReset(tabId, restoredUserAgent) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    await sendDebuggerCommand(debuggee, "Emulation.clearDeviceMetricsOverride", {});
+    await sendDebuggerCommand(debuggee, "Emulation.setDeviceMetricsOverride", {
+      width: 0,
+      height: 0,
+      deviceScaleFactor: 0,
+      mobile: false,
+      screenWidth: 0,
+      screenHeight: 0
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+      enabled: false
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setEmitTouchEventsForMouse", {
+      enabled: false,
+      configuration: "desktop"
+    });
+    if (restoredUserAgent) {
+      await sendDebuggerCommand(debuggee, "Emulation.setUserAgentOverride", {
+        userAgent: restoredUserAgent
+      });
+    }
+    return {
+      method: restoredUserAgent
+        ? "Emulation.clearDeviceMetricsOverride+Emulation.setDeviceMetricsOverride(width=0,height=0)+Emulation.setTouchEmulationEnabled(false)+Emulation.setUserAgentOverride(original)"
+        : "Emulation.clearDeviceMetricsOverride+Emulation.setDeviceMetricsOverride(width=0,height=0)+Emulation.setTouchEmulationEnabled(false)",
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger deviceEmulation reset failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for deviceEmulation reset tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
   }
 }
 
@@ -3241,6 +3502,86 @@ async function waitForViewportResetReadback(tabId, fallbackTarget, waitTimeoutMs
   throw bridgeError(ERROR_EXTENSION_TIMEOUT, `viewportEmulation reset readback unavailable within ${timeoutMs} ms; ${detail}`);
 }
 
+async function waitForDeviceReadback(tabId, fallbackTarget, waitTimeoutMs, descriptor) {
+  const started = Date.now();
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= waitTimeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const device = await tabDeviceMetricsState(tabId);
+      last = { page, device };
+      lastError = null;
+      if (deviceMatchesDescriptor(device, descriptor)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  const detail = last
+    ? `last device=${JSON.stringify(summarizeDeviceReadback(last.device))} descriptor=${JSON.stringify(descriptor)}`
+    : lastError
+      ? `last readback error=${JSON.stringify(lastError)}`
+      : "no device readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `deviceEmulation readback did not settle within ${waitTimeoutMs} ms; ${detail}`);
+}
+
+async function waitForDeviceResetReadback(tabId, fallbackTarget, waitTimeoutMs, beforeDevice) {
+  const started = Date.now();
+  const timeoutMs = Math.min(waitTimeoutMs, 1000);
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= timeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const device = await tabDeviceMetricsState(tabId);
+      last = { page, device };
+      lastError = null;
+      if (!sameDeviceMetrics(device, beforeDevice)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  if (last) {
+    return last;
+  }
+  const detail = lastError
+    ? `last readback error=${JSON.stringify(lastError)}`
+    : "no device readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `deviceEmulation reset readback unavailable within ${timeoutMs} ms; ${detail}`);
+}
+
+async function waitForDeviceResetBaselineReadback(tabId, fallbackTarget, waitTimeoutMs, baseline) {
+  const started = Date.now();
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= waitTimeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const device = await tabDeviceMetricsState(tabId);
+      last = { page, device };
+      lastError = null;
+      if (deviceMatchesBaseline(device, baseline)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  const detail = last
+    ? `last device=${JSON.stringify(summarizeDeviceReadback(last.device))} baseline=${JSON.stringify(summarizeDeviceReadback(baseline))}`
+    : lastError
+      ? `last readback error=${JSON.stringify(lastError)}`
+      : "no device readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `deviceEmulation reset baseline readback did not settle within ${waitTimeoutMs} ms; ${detail}`);
+}
+
 async function applyViewportDprShim(tabId, deviceScaleFactor) {
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
     throw bridgeError(
@@ -3259,6 +3600,49 @@ async function applyViewportDprShim(tabId, deviceScaleFactor) {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
       `chrome.scripting.executeScript viewportEmulation(${tabId}) devicePixelRatio shim failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function applyDeviceEmulationShim(tabId, descriptor) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: installDeviceEmulationShimInPage,
+      args: [descriptor]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript deviceEmulation(${tabId}) device shim failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function clearDeviceEmulationShim(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: clearDeviceEmulationShimInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript deviceEmulation(${tabId}) device shim reset failed: ${errorMessage(error)}`
     );
   }
 }
@@ -3356,6 +3740,61 @@ function sameViewportMetrics(left, right) {
   );
 }
 
+function deviceMatchesDescriptor(device, descriptor) {
+  if (!device || !descriptor) {
+    return false;
+  }
+  return (
+    viewportMatchesRequest(device.viewport, {
+      width: descriptor.width,
+      height: descriptor.height,
+      device_scale_factor: descriptor.device_scale_factor
+    }) &&
+    device.user_agent === descriptor.user_agent &&
+    Number(device.max_touch_points) === descriptor.max_touch_points &&
+    Boolean(device.ontouchstart_available) === descriptor.has_touch &&
+    Boolean(device.pointer_coarse) === descriptor.has_touch &&
+    Boolean(device.any_pointer_coarse) === descriptor.has_touch &&
+    Boolean(device.hover_none) === descriptor.has_touch &&
+    Boolean(device.any_hover_none) === descriptor.has_touch
+  );
+}
+
+function sameDeviceMetrics(left, right) {
+  return (
+    left &&
+    right &&
+    sameViewportMetrics(left.viewport, right.viewport) &&
+    left.user_agent === right.user_agent &&
+    Number(left.max_touch_points) === Number(right.max_touch_points) &&
+    Boolean(left.ontouchstart_available) === Boolean(right.ontouchstart_available) &&
+    Boolean(left.pointer_coarse) === Boolean(right.pointer_coarse) &&
+    Boolean(left.any_pointer_coarse) === Boolean(right.any_pointer_coarse) &&
+    Boolean(left.hover_none) === Boolean(right.hover_none) &&
+    Boolean(left.any_hover_none) === Boolean(right.any_hover_none)
+  );
+}
+
+function deviceMatchesBaseline(device, baseline) {
+  return sameDeviceMetrics(device, baseline);
+}
+
+function summarizeDeviceReadback(device) {
+  if (!device) {
+    return null;
+  }
+  return {
+    viewport: device.viewport,
+    user_agent: device.user_agent,
+    max_touch_points: device.max_touch_points,
+    ontouchstart_available: device.ontouchstart_available,
+    pointer_coarse: device.pointer_coarse,
+    any_pointer_coarse: device.any_pointer_coarse,
+    hover_none: device.hover_none,
+    any_hover_none: device.any_hover_none
+  };
+}
+
 async function tabViewportMetricsState(tabId) {
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
     throw bridgeError(
@@ -3381,6 +3820,36 @@ async function tabViewportMetricsState(tabId) {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
       `chrome.scripting.executeScript viewportEmulation(${tabId}) returned no viewport metrics`
+    );
+  }
+  return metrics;
+}
+
+async function tabDeviceMetricsState(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: readDeviceMetricsInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript deviceEmulation(${tabId}) readback failed: ${errorMessage(error)}`
+    );
+  }
+  const metrics = results?.[0]?.result;
+  if (!metrics || typeof metrics !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript deviceEmulation(${tabId}) returned no device metrics`
     );
   }
   return metrics;
@@ -3444,6 +3913,152 @@ function clearViewportDprShimInPage() {
   return {
     cleared: Boolean(state),
     device_pixel_ratio: Number(globalThis.devicePixelRatio) || 1
+  };
+}
+
+function installDeviceEmulationShimInPage(descriptor) {
+  const stateKey = "__synapseDeviceEmulationOverride";
+  const requested = descriptor && typeof descriptor === "object" ? descriptor : {};
+  const state = globalThis[stateKey] && typeof globalThis[stateKey] === "object"
+    ? globalThis[stateKey]
+    : {
+      original_global_device_pixel_ratio_had_own_descriptor: Object.prototype.hasOwnProperty.call(globalThis, "devicePixelRatio"),
+      original_global_device_pixel_ratio_descriptor: Object.getOwnPropertyDescriptor(globalThis, "devicePixelRatio") || null,
+      original_navigator_user_agent_descriptor: Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent") || null,
+      original_navigator_max_touch_points_descriptor: Object.getOwnPropertyDescriptor(Navigator.prototype, "maxTouchPoints") || null,
+      original_global_ontouchstart_had_own_descriptor: Object.prototype.hasOwnProperty.call(globalThis, "ontouchstart"),
+      original_global_ontouchstart_descriptor: Object.getOwnPropertyDescriptor(globalThis, "ontouchstart") || null,
+      original_match_media: typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null,
+      value: {}
+    };
+  state.value = {
+    device_pixel_ratio: Number(requested.device_scale_factor) || 1,
+    user_agent: String(requested.user_agent || ""),
+    has_touch: Boolean(requested.has_touch),
+    max_touch_points: Number.isFinite(Number(requested.max_touch_points))
+      ? Number(requested.max_touch_points)
+      : 0
+  };
+  Object.defineProperty(globalThis, stateKey, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: state
+  });
+  Object.defineProperty(globalThis, "devicePixelRatio", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const current = globalThis[stateKey];
+      const value = Number(current && current.value && current.value.device_pixel_ratio);
+      return Number.isFinite(value) && value > 0 ? value : 1;
+    }
+  });
+  Object.defineProperty(Navigator.prototype, "userAgent", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const current = globalThis[stateKey];
+      return String(current && current.value && current.value.user_agent || "");
+    }
+  });
+  Object.defineProperty(Navigator.prototype, "maxTouchPoints", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const current = globalThis[stateKey];
+      const value = Number(current && current.value && current.value.max_touch_points);
+      return Number.isFinite(value) && value >= 0 ? value : 0;
+    }
+  });
+  if (state.value.has_touch) {
+    Object.defineProperty(globalThis, "ontouchstart", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null
+    });
+  } else if (state.original_global_ontouchstart_had_own_descriptor && state.original_global_ontouchstart_descriptor) {
+    Object.defineProperty(globalThis, "ontouchstart", state.original_global_ontouchstart_descriptor);
+  } else {
+    try {
+      delete globalThis.ontouchstart;
+    } catch (_) {}
+  }
+  const nativeMatchMedia = state.original_match_media;
+  globalThis.matchMedia = function synapseDeviceMatchMedia(query) {
+    function mediaQueryList(media, matches) {
+      return {
+        matches: Boolean(matches),
+        media: String(media || ""),
+        onchange: null,
+        addListener() {},
+        removeListener() {},
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent() {
+          return false;
+        }
+      };
+    }
+    const normalized = String(query || "").replace(/\s+/g, "").toLowerCase();
+    const current = globalThis[stateKey];
+    const hasTouch = Boolean(current && current.value && current.value.has_touch);
+    if (
+      normalized === "(pointer:coarse)" ||
+      normalized === "(any-pointer:coarse)" ||
+      normalized === "(hover:none)" ||
+      normalized === "(any-hover:none)"
+    ) {
+      return mediaQueryList(query, hasTouch);
+    }
+    if (typeof nativeMatchMedia === "function") {
+      return nativeMatchMedia.call(this, query);
+    }
+    return mediaQueryList(query, false);
+  };
+  globalThis.dispatchEvent(new Event("resize"));
+  return {
+    applied: true,
+    user_agent: state.value.user_agent,
+    max_touch_points: state.value.max_touch_points,
+    has_touch: state.value.has_touch,
+    device_pixel_ratio: state.value.device_pixel_ratio
+  };
+}
+
+function clearDeviceEmulationShimInPage() {
+  const stateKey = "__synapseDeviceEmulationOverride";
+  const state = globalThis[stateKey];
+  if (state && typeof state === "object") {
+    if (state.original_global_device_pixel_ratio_had_own_descriptor && state.original_global_device_pixel_ratio_descriptor) {
+      Object.defineProperty(globalThis, "devicePixelRatio", state.original_global_device_pixel_ratio_descriptor);
+    } else {
+      delete globalThis.devicePixelRatio;
+    }
+    if (state.original_navigator_user_agent_descriptor) {
+      Object.defineProperty(Navigator.prototype, "userAgent", state.original_navigator_user_agent_descriptor);
+    }
+    if (state.original_navigator_max_touch_points_descriptor) {
+      Object.defineProperty(Navigator.prototype, "maxTouchPoints", state.original_navigator_max_touch_points_descriptor);
+    }
+    if (state.original_global_ontouchstart_had_own_descriptor && state.original_global_ontouchstart_descriptor) {
+      Object.defineProperty(globalThis, "ontouchstart", state.original_global_ontouchstart_descriptor);
+    } else {
+      try {
+        delete globalThis.ontouchstart;
+      } catch (_) {}
+    }
+    if (typeof state.original_match_media === "function") {
+      globalThis.matchMedia = state.original_match_media;
+    }
+    delete globalThis[stateKey];
+  }
+  globalThis.dispatchEvent(new Event("resize"));
+  return {
+    cleared: Boolean(state),
+    user_agent: String(globalThis.navigator ? globalThis.navigator.userAgent || "" : ""),
+    max_touch_points: Number(globalThis.navigator ? globalThis.navigator.maxTouchPoints || 0 : 0)
   };
 }
 
@@ -8887,6 +9502,37 @@ function readViewportMetricsInPage() {
     outer_height: Math.round(globalThis.outerHeight || 0),
     visual_viewport_width: viewport ? Number(viewport.width) : null,
     visual_viewport_height: viewport ? Number(viewport.height) : null
+  };
+}
+
+function readDeviceMetricsInPage() {
+  function media(query) {
+    try {
+      return Boolean(globalThis.matchMedia && globalThis.matchMedia(query).matches);
+    } catch (_) {
+      return false;
+    }
+  }
+  const viewport = globalThis.visualViewport || null;
+  return {
+    viewport: {
+      inner_width: Math.round(globalThis.innerWidth || 0),
+      inner_height: Math.round(globalThis.innerHeight || 0),
+      device_pixel_ratio: Number(globalThis.devicePixelRatio || 0),
+      screen_width: Math.round(globalThis.screen ? globalThis.screen.width || 0 : 0),
+      screen_height: Math.round(globalThis.screen ? globalThis.screen.height || 0 : 0),
+      outer_width: Math.round(globalThis.outerWidth || 0),
+      outer_height: Math.round(globalThis.outerHeight || 0),
+      visual_viewport_width: viewport ? Number(viewport.width) : null,
+      visual_viewport_height: viewport ? Number(viewport.height) : null
+    },
+    user_agent: String(globalThis.navigator ? globalThis.navigator.userAgent || "" : ""),
+    max_touch_points: Number(globalThis.navigator ? globalThis.navigator.maxTouchPoints || 0 : 0),
+    ontouchstart_available: Boolean("ontouchstart" in globalThis),
+    pointer_coarse: media("(pointer: coarse)"),
+    any_pointer_coarse: media("(any-pointer: coarse)"),
+    hover_none: media("(hover: none)"),
+    any_hover_none: media("(any-hover: none)")
   };
 }
 
