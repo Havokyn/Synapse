@@ -655,7 +655,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Set or reset geolocation emulation for the calling session's owned raw-CDP browser tab. operation=set applies latitude, longitude, optional accuracy/altitude/heading/speed through Emulation.setGeolocationOverride and sets the current page origin's geolocation permission with Browser.setPermission: grant_permission=true grants it, grant_permission=false denies it so getCurrentPosition rejects. operation=reset clears Emulation.clearGeolocationOverride and restores the origin's permission to prompt. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent FSV readback for navigator.permissions.query({name:'geolocation'}) and navigator.geolocation.getCurrentPosition."
+        description = "Set or reset geolocation emulation for the calling session's owned browser tab. Raw-CDP targets use Emulation.setGeolocationOverride and Browser.setPermission: grant_permission=true grants geolocation to the current page origin, grant_permission=false denies it so getCurrentPosition rejects. Normal Chrome bridge chrome-tab:* targets in the already-open authenticated profile use the bundled geolocationEmulation bridge lane with target-scoped debugger geolocation plus a MAIN-world navigator.permissions/geolocation shim and page-visible readback. operation=reset clears the override and restores the origin/page behavior to the profile default. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_geolocation(
         &self,
@@ -1066,6 +1066,11 @@ impl SynapseService {
         params: &NormalizedBrowserGeolocationParams,
     ) -> Result<BrowserGeolocationResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with(CHROME_TAB_PREFIX) {
+                return self
+                    .browser_geolocation_bridge_impl(session_id, window_hwnd, cdp_target_id, params)
+                    .await;
+            }
             return Err(browser_raw_cdp_required_error(
                 GEOLOCATION_TOOL,
                 window_hwnd,
@@ -1117,6 +1122,67 @@ impl SynapseService {
             "readback=Emulation.geolocation+Browser.setPermission+Runtime.evaluate outcome=geolocation_state"
         );
         Ok(browser_geolocation_response(
+            session_id,
+            window_hwnd,
+            result,
+        ))
+    }
+
+    #[cfg(windows)]
+    async fn browser_geolocation_bridge_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &NormalizedBrowserGeolocationParams,
+    ) -> Result<BrowserGeolocationResponse, ErrorData> {
+        let operation = match params.operation {
+            BrowserGeolocationOperation::Set => "set",
+            BrowserGeolocationOperation::Reset => "reset",
+        };
+        let geolocation = params.geolocation.as_ref();
+        let result = crate::chrome_debugger_bridge::geolocation_emulation(
+            crate::chrome_debugger_bridge::ChromeDebuggerGeolocationEmulationRequest {
+                hwnd: window_hwnd,
+                target_id: cdp_target_id.to_owned(),
+                operation: operation.to_owned(),
+                latitude: geolocation.map(|value| value.latitude),
+                longitude: geolocation.map(|value| value.longitude),
+                accuracy: geolocation.map(|value| value.accuracy),
+                altitude: geolocation.and_then(|value| value.altitude),
+                altitude_accuracy: geolocation.and_then(|value| value.altitude_accuracy),
+                heading: geolocation.and_then(|value| value.heading),
+                speed: geolocation.and_then(|value| value.speed),
+                grant_permission: match params.operation {
+                    BrowserGeolocationOperation::Set => Some(params.grant_permission),
+                    BrowserGeolocationOperation::Reset => None,
+                },
+                wait_timeout_ms: DEFAULT_BRIDGE_VIEWPORT_WAIT_TIMEOUT_MS,
+            },
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "{GEOLOCATION_TOOL} normal Chrome bridge geolocation emulation failed for target {cdp_target_id:?}: {}",
+                    error.detail()
+                ),
+            )
+        })?;
+        tracing::info!(
+            code = "CHROME_BRIDGE_GEOLOCATION_EMULATION",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id,
+            operation = ?params.operation,
+            origin = %result.origin,
+            permission_state = %result.geolocation.permission_state,
+            position_returned = result.geolocation.position.is_some(),
+            error_code = ?result.geolocation.error.as_ref().map(|error| error.code),
+            "readback=chrome.debugger.Emulation+chrome.scripting.executeScript outcome=geolocation_state"
+        );
+        Ok(browser_geolocation_bridge_response(
             session_id,
             window_hwnd,
             result,
@@ -2117,6 +2183,79 @@ fn browser_geolocation_response(
     }
 }
 
+fn browser_geolocation_bridge_response(
+    session_id: &str,
+    window_hwnd: i64,
+    result: crate::chrome_debugger_bridge::ChromeDebuggerGeolocationEmulationResult,
+) -> BrowserGeolocationResponse {
+    BrowserGeolocationResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "chrome_tabs_extension".to_owned(),
+        endpoint: chrome_debugger_default_endpoint(),
+        cdp_target_id: result.target_id,
+        operation: match result.operation.as_str() {
+            "reset" => BrowserGeolocationOperation::Reset,
+            _ => BrowserGeolocationOperation::Set,
+        },
+        origin: result.origin,
+        requested: result
+            .requested
+            .map(|requested| BrowserGeolocationOverride {
+                latitude: requested.latitude,
+                longitude: requested.longitude,
+                accuracy: requested.accuracy,
+                altitude: requested.altitude,
+                altitude_accuracy: requested.altitude_accuracy,
+                heading: requested.heading,
+                speed: requested.speed,
+            }),
+        permission_setting: result.permission_setting,
+        page_url: result.page_url,
+        page_title: result.page_title,
+        ready_state: result.ready_state,
+        geolocation: BrowserGeolocationReadback {
+            permission_state: result.geolocation.permission_state,
+            position: result.geolocation.position.map(|position| {
+                BrowserGeolocationCoordinatesReadback {
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    accuracy: position.accuracy,
+                    altitude: position.altitude,
+                    altitude_accuracy: position.altitude_accuracy,
+                    heading: position.heading,
+                    speed: position.speed,
+                    timestamp: position.timestamp,
+                }
+            }),
+            error: result
+                .geolocation
+                .error
+                .map(|error| BrowserGeolocationErrorReadback {
+                    code: error.code,
+                    message: error.message,
+                }),
+        },
+        readback_backend: if result.readback_backend.is_empty() {
+            "chrome.debugger.Emulation + chrome.scripting.executeScript".to_owned()
+        } else {
+            result.readback_backend
+        },
+        backend_tier_used: if result.backend_tier_used.is_empty() {
+            "chrome_tabs_extension_debugger".to_owned()
+        } else {
+            result.backend_tier_used
+        },
+        required_foreground: result.required_foreground,
+        source_of_truth: if result.source_of_truth.is_empty() {
+            "normal Chrome bridge page script navigator.permissions + navigator.geolocation"
+                .to_owned()
+        } else {
+            result.source_of_truth
+        },
+    }
+}
+
 fn browser_locale_response(
     session_id: &str,
     window_hwnd: i64,
@@ -2558,6 +2697,75 @@ mod tests {
                 .as_ref()
                 .map(|descriptor| descriptor.max_touch_points),
             Some(5)
+        );
+        assert!(!response.required_foreground);
+    }
+
+    #[test]
+    fn browser_geolocation_bridge_response_maps_readback() {
+        let response = browser_geolocation_bridge_response(
+            "session-1",
+            0x2200,
+            crate::chrome_debugger_bridge::ChromeDebuggerGeolocationEmulationResult {
+                extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+                target_id: "chrome-tab:45".to_owned(),
+                tab_id: 45,
+                chrome_window_id: Some(7),
+                operation: "set".to_owned(),
+                origin: "http://127.0.0.1:8769".to_owned(),
+                requested: Some(crate::chrome_debugger_bridge::ChromeDebuggerGeolocationOverride {
+                    latitude: 37.7749,
+                    longitude: -122.4194,
+                    accuracy: 12.0,
+                    altitude: None,
+                    altitude_accuracy: None,
+                    heading: None,
+                    speed: None,
+                }),
+                permission_setting: "granted".to_owned(),
+                page_url: "http://127.0.0.1:8769/".to_owned(),
+                page_title: "Geo".to_owned(),
+                ready_state: "complete".to_owned(),
+                geolocation: crate::chrome_debugger_bridge::ChromeDebuggerGeolocationReadback {
+                    permission_state: "granted".to_owned(),
+                    position: Some(
+                        crate::chrome_debugger_bridge::ChromeDebuggerGeolocationCoordinatesReadback {
+                            latitude: 37.7749,
+                            longitude: -122.4194,
+                            accuracy: 12.0,
+                            altitude: None,
+                            altitude_accuracy: None,
+                            heading: None,
+                            speed: None,
+                            timestamp: 123.0,
+                        },
+                    ),
+                    error: None,
+                },
+                readback_backend: "chrome.debugger.Emulation + chrome.scripting.executeScript"
+                    .to_owned(),
+                backend_tier_used: "chrome_tabs_extension_debugger".to_owned(),
+                required_foreground: false,
+                source_of_truth: "normal Chrome bridge page script".to_owned(),
+                method: "Emulation.setGeolocationOverride".to_owned(),
+                debugger_protocol_version: Some("1.3".to_owned()),
+                target_candidate_count: 1,
+                target_selection_reason: "chrome_tab_id_hint".to_owned(),
+            },
+        );
+
+        assert_eq!(response.transport, "chrome_tabs_extension");
+        assert_eq!(response.cdp_target_id, "chrome-tab:45");
+        assert_eq!(response.operation, BrowserGeolocationOperation::Set);
+        assert_eq!(response.permission_setting, "granted");
+        assert_eq!(response.geolocation.permission_state, "granted");
+        assert_eq!(
+            response
+                .geolocation
+                .position
+                .as_ref()
+                .map(|position| position.latitude),
+            Some(37.7749)
         );
         assert!(!response.required_foreground);
     }

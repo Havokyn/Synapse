@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-device-v2";
-const BRIDGE_BUILD_SHA256 = "9f72976d2c14365aa665a5848852c6516a79a3a62ad9f029890e323ba0beff0d";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-geolocation-v3";
+const BRIDGE_BUILD_SHA256 = "5b439c6b76df9d2e0d8b1c89bbf8861e87fe734893ad0ef013de83462e2af847";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
@@ -36,6 +36,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "cdpInput",
   "viewportEmulation",
   "deviceEmulation",
+  "geolocationEmulation",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -338,6 +339,7 @@ function commandRequiresExternalPopupSuppression(kind) {
     "cdpInput",
     "viewportEmulation",
     "deviceEmulation",
+    "geolocationEmulation",
     "navigateTab",
     "activateTab",
     "domAction",
@@ -838,6 +840,8 @@ async function handleCommand(command) {
       result = await handleViewportEmulation(params);
     } else if (kind === "deviceEmulation") {
       result = await handleDeviceEmulation(params);
+    } else if (kind === "geolocationEmulation") {
+      result = await handleGeolocationEmulation(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -3124,6 +3128,68 @@ async function handleDeviceEmulation(params) {
   };
 }
 
+async function handleGeolocationEmulation(params) {
+  requireDebuggerApiAvailable("geolocationEmulation", params);
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeGeolocationEmulationOperation(params.operation);
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const before = await tabPageState(selected.tabId, selected.target);
+  const origin = geolocationOriginFromUrl(before.url || selected.target.url || "");
+  let requested = null;
+  let permissionSetting = "prompt";
+  let dispatch;
+  if (operation === "set") {
+    requested = normalizeGeolocationOverride(params);
+    permissionSetting = normalizeGeolocationPermissionSetting(params.grantPermission);
+    dispatch = await dispatchGeolocationEmulationSet(selected.tabId, origin, requested, permissionSetting);
+    await applyGeolocationEmulationShim(selected.tabId, {
+      requested,
+      permission_state: permissionSetting
+    });
+  } else {
+    rejectGeolocationResetField(params.latitude, "latitude");
+    rejectGeolocationResetField(params.longitude, "longitude");
+    rejectGeolocationResetField(params.accuracy, "accuracy");
+    rejectGeolocationResetField(params.altitude, "altitude");
+    rejectGeolocationResetField(params.altitudeAccuracy, "altitudeAccuracy");
+    rejectGeolocationResetField(params.heading, "heading");
+    rejectGeolocationResetField(params.speed, "speed");
+    rejectGeolocationResetField(params.grantPermission, "grantPermission");
+    dispatch = await dispatchGeolocationEmulationReset(selected.tabId, origin);
+    await clearGeolocationEmulationShim(selected.tabId);
+  }
+  const after = await waitForGeolocationReadback(
+    selected.tabId,
+    selected.target,
+    waitTimeoutMs,
+    requested,
+    permissionSetting
+  );
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.page.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.page.chrome_window_id,
+    operation,
+    origin,
+    requested,
+    permission_setting: permissionSetting,
+    page_url: after.page.url || "",
+    page_title: after.page.title || "",
+    ready_state: after.page.ready_state || "",
+    geolocation: after.geolocation,
+    before_page: before,
+    readback_backend: "chrome.debugger.Emulation geolocation + Browser.setPermission best-effort + chrome.scripting.executeScript(MAIN geolocation/permission shim)",
+    backend_tier_used: "chrome_tabs_extension_debugger",
+    required_foreground: false,
+    source_of_truth: "normal Chrome bridge page script navigator.permissions + navigator.geolocation",
+    method: dispatch.method,
+    debugger_protocol_version: dispatch.protocol_version,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 function normalizeCdpInputAction(value) {
   const action = String(value || "").trim().toLowerCase();
   if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
@@ -3259,6 +3325,92 @@ function rejectDeviceResetField(value, fieldName) {
   }
 }
 
+function normalizeGeolocationEmulationOperation(value) {
+  const operation = String(value || "set").trim().toLowerCase();
+  if (operation === "set" || operation === "reset") {
+    return operation;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `geolocationEmulation operation must be set or reset; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeGeolocationOverride(params) {
+  const latitude = normalizeGeolocationNumber(params.latitude, "latitude", -90, 90, true);
+  const longitude = normalizeGeolocationNumber(params.longitude, "longitude", -180, 180, true);
+  const accuracy = normalizeGeolocationNumber(params.accuracy ?? 0, "accuracy", 0, Number.MAX_VALUE, true);
+  return {
+    latitude,
+    longitude,
+    accuracy,
+    altitude: normalizeGeolocationOptionalNumber(params.altitude, "altitude"),
+    altitude_accuracy: normalizeGeolocationOptionalNumber(params.altitudeAccuracy, "altitudeAccuracy", 0, Number.MAX_VALUE),
+    heading: normalizeGeolocationOptionalNumber(params.heading, "heading", 0, 360),
+    speed: normalizeGeolocationOptionalNumber(params.speed, "speed", 0, Number.MAX_VALUE)
+  };
+}
+
+function normalizeGeolocationPermissionSetting(grantPermission) {
+  if (grantPermission === null || grantPermission === undefined) {
+    return "granted";
+  }
+  if (typeof grantPermission !== "boolean") {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `geolocationEmulation grantPermission must be a boolean; got ${JSON.stringify(grantPermission)}`
+    );
+  }
+  return grantPermission ? "granted" : "denied";
+}
+
+function normalizeGeolocationNumber(value, fieldName, min, max, required) {
+  if (value === null || value === undefined) {
+    if (required) {
+      throw bridgeError(
+        ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+        `geolocationEmulation ${fieldName} is required for operation=set`
+      );
+    }
+    return null;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `geolocationEmulation ${fieldName} must be finite and in ${min}..=${max}; got ${JSON.stringify(value)}`
+    );
+  }
+  return number;
+}
+
+function normalizeGeolocationOptionalNumber(value, fieldName, min = -Number.MAX_VALUE, max = Number.MAX_VALUE) {
+  const number = normalizeGeolocationNumber(value, fieldName, min, max, false);
+  return number === null ? null : number;
+}
+
+function rejectGeolocationResetField(value, fieldName) {
+  if (value !== null && value !== undefined) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `geolocationEmulation ${fieldName} is not valid for operation=reset`
+    );
+  }
+}
+
+function geolocationOriginFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.origin && parsed.origin !== "null") {
+      return parsed.origin;
+    }
+  } catch (_) {}
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `geolocationEmulation requires a page with a non-opaque origin; current URL=${JSON.stringify(url || "")}`
+  );
+}
+
 async function dispatchDeviceEmulationSet(tabId, descriptor) {
   const debuggee = { tabId };
   const protocolVersion = "1.3";
@@ -3350,6 +3502,99 @@ async function dispatchDeviceEmulationReset(tabId, restoredUserAgent) {
         await chrome.debugger.detach(debuggee);
       } catch (error) {
         console.warn(`Synapse chrome.debugger detach failed for deviceEmulation reset tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function dispatchGeolocationEmulationSet(tabId, origin, requested, permissionSetting) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  let permissionMethod = `Browser.setPermission(${permissionSetting})`;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    try {
+      await sendDebuggerCommand(debuggee, "Browser.setPermission", {
+        permission: { name: "geolocation" },
+        setting: permissionSetting,
+        origin
+      });
+    } catch (error) {
+      permissionMethod = `Browser.setPermission(${permissionSetting}) best_effort_failed=${errorMessage(error)}`;
+    }
+    const params = {
+      latitude: requested.latitude,
+      longitude: requested.longitude,
+      accuracy: requested.accuracy
+    };
+    if (requested.altitude !== null && requested.altitude !== undefined) {
+      params.altitude = requested.altitude;
+    }
+    if (requested.altitude_accuracy !== null && requested.altitude_accuracy !== undefined) {
+      params.altitudeAccuracy = requested.altitude_accuracy;
+    }
+    if (requested.heading !== null && requested.heading !== undefined) {
+      params.heading = requested.heading;
+    }
+    if (requested.speed !== null && requested.speed !== undefined) {
+      params.speed = requested.speed;
+    }
+    await sendDebuggerCommand(debuggee, "Emulation.setGeolocationOverride", params);
+    return {
+      method: `Emulation.setGeolocationOverride+${permissionMethod}`,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger geolocationEmulation set failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for geolocationEmulation set tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function dispatchGeolocationEmulationReset(tabId, origin) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  let permissionMethod = "Browser.setPermission(prompt)";
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    await sendDebuggerCommand(debuggee, "Emulation.clearGeolocationOverride", {});
+    try {
+      await sendDebuggerCommand(debuggee, "Browser.setPermission", {
+        permission: { name: "geolocation" },
+        setting: "prompt",
+        origin
+      });
+    } catch (error) {
+      permissionMethod = `Browser.setPermission(prompt) best_effort_failed=${errorMessage(error)}`;
+    }
+    return {
+      method: `Emulation.clearGeolocationOverride+${permissionMethod}`,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger geolocationEmulation reset failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for geolocationEmulation reset tab ${tabId}: ${errorMessage(error)}`);
       }
     }
   }
@@ -3582,6 +3827,79 @@ async function waitForDeviceResetBaselineReadback(tabId, fallbackTarget, waitTim
   throw bridgeError(ERROR_EXTENSION_TIMEOUT, `deviceEmulation reset baseline readback did not settle within ${waitTimeoutMs} ms; ${detail}`);
 }
 
+async function waitForGeolocationReadback(tabId, fallbackTarget, waitTimeoutMs, requested, permissionSetting) {
+  const started = Date.now();
+  let last = null;
+  let lastError = null;
+  while (Date.now() - started <= waitTimeoutMs) {
+    try {
+      const page = await tabPageState(tabId, fallbackTarget);
+      const geolocation = await tabGeolocationState(tabId);
+      last = { page, geolocation };
+      lastError = null;
+      if (geolocationMatchesRequest(geolocation, requested, permissionSetting)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error?.message ? String(error.message) : String(error);
+    }
+    await sleep(100);
+  }
+  const detail = last
+    ? `last geolocation=${JSON.stringify(summarizeGeolocationReadback(last.geolocation))} requested=${JSON.stringify(requested)} permission=${permissionSetting}`
+    : lastError
+      ? `last readback error=${JSON.stringify(lastError)}`
+      : "no geolocation readback";
+  throw bridgeError(ERROR_EXTENSION_TIMEOUT, `geolocationEmulation readback did not settle within ${waitTimeoutMs} ms; ${detail}`);
+}
+
+function geolocationMatchesRequest(geolocation, requested, permissionSetting) {
+  if (!geolocation) {
+    return false;
+  }
+  if (permissionSetting === "prompt" && !requested) {
+    return true;
+  }
+  if (String(geolocation.permission_state || "") !== permissionSetting) {
+    return false;
+  }
+  if (permissionSetting === "denied") {
+    return !geolocation.position && geolocation.error && Number(geolocation.error.code) === 1;
+  }
+  if (!requested || !geolocation.position) {
+    return false;
+  }
+  return (
+    Math.abs(Number(geolocation.position.latitude) - requested.latitude) <= 0.000001 &&
+    Math.abs(Number(geolocation.position.longitude) - requested.longitude) <= 0.000001 &&
+    Math.abs(Number(geolocation.position.accuracy) - requested.accuracy) <= 0.01 &&
+    sameNullableNumber(geolocation.position.altitude, requested.altitude) &&
+    sameNullableNumber(geolocation.position.altitude_accuracy, requested.altitude_accuracy) &&
+    sameNullableNumber(geolocation.position.heading, requested.heading) &&
+    sameNullableNumber(geolocation.position.speed, requested.speed)
+  );
+}
+
+function sameNullableNumber(left, right) {
+  const leftNull = left === null || left === undefined || Number.isNaN(Number(left));
+  const rightNull = right === null || right === undefined || Number.isNaN(Number(right));
+  if (leftNull || rightNull) {
+    return leftNull && rightNull;
+  }
+  return Math.abs(Number(left) - Number(right)) <= 0.000001;
+}
+
+function summarizeGeolocationReadback(geolocation) {
+  if (!geolocation) {
+    return null;
+  }
+  return {
+    permission_state: geolocation.permission_state,
+    position: geolocation.position,
+    error: geolocation.error
+  };
+}
+
 async function applyViewportDprShim(tabId, deviceScaleFactor) {
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
     throw bridgeError(
@@ -3643,6 +3961,49 @@ async function clearDeviceEmulationShim(tabId) {
     throw bridgeError(
       ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
       `chrome.scripting.executeScript deviceEmulation(${tabId}) device shim reset failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function applyGeolocationEmulationShim(tabId, state) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: installGeolocationEmulationShimInPage,
+      args: [state]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript geolocationEmulation(${tabId}) geolocation shim failed: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function clearGeolocationEmulationShim(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: clearGeolocationEmulationShimInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript geolocationEmulation(${tabId}) geolocation shim reset failed: ${errorMessage(error)}`
     );
   }
 }
@@ -3855,6 +4216,36 @@ async function tabDeviceMetricsState(tabId) {
   return metrics;
 }
 
+async function tabGeolocationState(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: "MAIN",
+      func: readGeolocationStateInPage
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript geolocationEmulation(${tabId}) readback failed: ${errorMessage(error)}`
+    );
+  }
+  const metrics = results?.[0]?.result;
+  if (!metrics || typeof metrics !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript geolocationEmulation(${tabId}) returned no geolocation metrics`
+    );
+  }
+  return metrics;
+}
+
 function installViewportDprShimInPage(deviceScaleFactor) {
   const requested = Number(deviceScaleFactor);
   if (!Number.isFinite(requested) || requested <= 0) {
@@ -4059,6 +4450,277 @@ function clearDeviceEmulationShimInPage() {
     cleared: Boolean(state),
     user_agent: String(globalThis.navigator ? globalThis.navigator.userAgent || "" : ""),
     max_touch_points: Number(globalThis.navigator ? globalThis.navigator.maxTouchPoints || 0 : 0)
+  };
+}
+
+function installGeolocationEmulationShimInPage(state) {
+  const stateKey = "__synapseGeolocationEmulationOverride";
+  const requestedState = state && typeof state === "object" ? state : {};
+  const requested = requestedState.requested && typeof requestedState.requested === "object"
+    ? requestedState.requested
+    : {};
+  let shimState = globalThis[stateKey];
+  if (!shimState || typeof shimState !== "object") {
+    const permissions = globalThis.navigator && globalThis.navigator.permissions
+      ? globalThis.navigator.permissions
+      : null;
+    const geolocation = globalThis.navigator && globalThis.navigator.geolocation
+      ? globalThis.navigator.geolocation
+      : null;
+    shimState = {
+      permissions,
+      permissions_query_had_own_descriptor: permissions ? Object.prototype.hasOwnProperty.call(permissions, "query") : false,
+      permissions_query_descriptor: permissions ? Object.getOwnPropertyDescriptor(permissions, "query") || null : null,
+      permissions_query_original: permissions && typeof permissions.query === "function"
+        ? permissions.query.bind(permissions)
+        : null,
+      geolocation,
+      geolocation_get_had_own_descriptor: geolocation ? Object.prototype.hasOwnProperty.call(geolocation, "getCurrentPosition") : false,
+      geolocation_get_descriptor: geolocation ? Object.getOwnPropertyDescriptor(geolocation, "getCurrentPosition") || null : null,
+      geolocation_get_original: geolocation && typeof geolocation.getCurrentPosition === "function"
+        ? geolocation.getCurrentPosition.bind(geolocation)
+        : null,
+      geolocation_watch_had_own_descriptor: geolocation ? Object.prototype.hasOwnProperty.call(geolocation, "watchPosition") : false,
+      geolocation_watch_descriptor: geolocation ? Object.getOwnPropertyDescriptor(geolocation, "watchPosition") || null : null,
+      geolocation_watch_original: geolocation && typeof geolocation.watchPosition === "function"
+        ? geolocation.watchPosition.bind(geolocation)
+        : null,
+      geolocation_clear_had_own_descriptor: geolocation ? Object.prototype.hasOwnProperty.call(geolocation, "clearWatch") : false,
+      geolocation_clear_descriptor: geolocation ? Object.getOwnPropertyDescriptor(geolocation, "clearWatch") || null : null,
+      geolocation_clear_original: geolocation && typeof geolocation.clearWatch === "function"
+        ? geolocation.clearWatch.bind(geolocation)
+        : null,
+      next_watch_id: 1,
+      value: {}
+    };
+    Object.defineProperty(globalThis, stateKey, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: shimState
+    });
+  }
+  shimState.value = {
+    permission_state: String(requestedState.permission_state || "granted"),
+    requested: {
+      latitude: Number(requested.latitude),
+      longitude: Number(requested.longitude),
+      accuracy: Number(requested.accuracy || 0),
+      altitude: requested.altitude === null || requested.altitude === undefined ? null : Number(requested.altitude),
+      altitude_accuracy: requested.altitude_accuracy === null || requested.altitude_accuracy === undefined ? null : Number(requested.altitude_accuracy),
+      heading: requested.heading === null || requested.heading === undefined ? null : Number(requested.heading),
+      speed: requested.speed === null || requested.speed === undefined ? null : Number(requested.speed)
+    }
+  };
+  function currentState() {
+    const current = globalThis[stateKey];
+    return current && current.value ? current.value : shimState.value;
+  }
+  function permissionStatus(permissionState) {
+    return {
+      state: String(permissionState || "prompt"),
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      }
+    };
+  }
+  function geolocationError() {
+    return {
+      code: 1,
+      message: "User denied Geolocation",
+      PERMISSION_DENIED: 1,
+      POSITION_UNAVAILABLE: 2,
+      TIMEOUT: 3
+    };
+  }
+  function geolocationPosition() {
+    const value = currentState().requested || {};
+    return {
+      coords: {
+        latitude: Number(value.latitude),
+        longitude: Number(value.longitude),
+        accuracy: Number(value.accuracy || 0),
+        altitude: value.altitude === null || value.altitude === undefined ? null : Number(value.altitude),
+        altitudeAccuracy: value.altitude_accuracy === null || value.altitude_accuracy === undefined ? null : Number(value.altitude_accuracy),
+        heading: value.heading === null || value.heading === undefined ? null : Number(value.heading),
+        speed: value.speed === null || value.speed === undefined ? null : Number(value.speed)
+      },
+      timestamp: Date.now()
+    };
+  }
+  if (shimState.permissions && typeof shimState.permissions.query === "function") {
+    Object.defineProperty(shimState.permissions, "query", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(descriptor) {
+        const name = descriptor && typeof descriptor === "object" ? String(descriptor.name || "") : "";
+        if (name.toLowerCase() === "geolocation") {
+          return Promise.resolve(permissionStatus(currentState().permission_state));
+        }
+        if (typeof shimState.permissions_query_original === "function") {
+          return shimState.permissions_query_original(descriptor);
+        }
+        return Promise.reject(new TypeError("navigator.permissions.query unavailable"));
+      }
+    });
+  }
+  if (shimState.geolocation) {
+    Object.defineProperty(shimState.geolocation, "getCurrentPosition", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(success, error) {
+        globalThis.setTimeout(() => {
+          if (currentState().permission_state === "denied") {
+            if (typeof error === "function") {
+              error(geolocationError());
+            }
+            return;
+          }
+          if (typeof success === "function") {
+            success(geolocationPosition());
+          }
+        }, 0);
+      }
+    });
+    Object.defineProperty(shimState.geolocation, "watchPosition", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(success, error) {
+        const watchId = shimState.next_watch_id++;
+        globalThis.setTimeout(() => {
+          if (currentState().permission_state === "denied") {
+            if (typeof error === "function") {
+              error(geolocationError());
+            }
+            return;
+          }
+          if (typeof success === "function") {
+            success(geolocationPosition());
+          }
+        }, 0);
+        return watchId;
+      }
+    });
+    Object.defineProperty(shimState.geolocation, "clearWatch", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(watchId) {
+        if (typeof shimState.geolocation_clear_original === "function") {
+          try {
+            shimState.geolocation_clear_original(watchId);
+          } catch (_) {}
+        }
+      }
+    });
+  }
+  return {
+    applied: true,
+    permission_state: shimState.value.permission_state,
+    requested: shimState.value.requested
+  };
+}
+
+function clearGeolocationEmulationShimInPage() {
+  const stateKey = "__synapseGeolocationEmulationOverride";
+  const state = globalThis[stateKey];
+  function restoreOwn(target, field, hadOwn, descriptor) {
+    if (!target) {
+      return;
+    }
+    if (hadOwn && descriptor) {
+      Object.defineProperty(target, field, descriptor);
+    } else {
+      try {
+        delete target[field];
+      } catch (_) {}
+    }
+  }
+  if (state && typeof state === "object") {
+    restoreOwn(state.permissions, "query", state.permissions_query_had_own_descriptor, state.permissions_query_descriptor);
+    restoreOwn(state.geolocation, "getCurrentPosition", state.geolocation_get_had_own_descriptor, state.geolocation_get_descriptor);
+    restoreOwn(state.geolocation, "watchPosition", state.geolocation_watch_had_own_descriptor, state.geolocation_watch_descriptor);
+    restoreOwn(state.geolocation, "clearWatch", state.geolocation_clear_had_own_descriptor, state.geolocation_clear_descriptor);
+    delete globalThis[stateKey];
+  }
+  return {
+    cleared: Boolean(state)
+  };
+}
+
+async function readGeolocationStateInPage() {
+  const permissionState = await (async () => {
+    try {
+      if (!globalThis.navigator || !navigator.permissions || typeof navigator.permissions.query !== "function") {
+        return "unsupported";
+      }
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      return String(status && status.state || "unknown");
+    } catch (error) {
+      const name = error && error.name ? error.name : error;
+      return `error:${String(name)}`;
+    }
+  })();
+  const result = await new Promise(resolve => {
+    if (!globalThis.navigator || !navigator.geolocation) {
+      resolve({
+        position: null,
+        error: { code: -1, message: "navigator.geolocation unavailable" }
+      });
+      return;
+    }
+    let settled = false;
+    const finish = value => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    const timer = globalThis.setTimeout(() => finish({
+      position: null,
+      error: { code: 3, message: "timeout waiting for geolocation callback" }
+    }), 1500);
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        globalThis.clearTimeout(timer);
+        const coords = position.coords || {};
+        finish({
+          position: {
+            latitude: Number(coords.latitude),
+            longitude: Number(coords.longitude),
+            accuracy: Number(coords.accuracy),
+            altitude: coords.altitude == null ? null : Number(coords.altitude),
+            altitude_accuracy: coords.altitudeAccuracy == null ? null : Number(coords.altitudeAccuracy),
+            heading: coords.heading == null || Number.isNaN(Number(coords.heading)) ? null : Number(coords.heading),
+            speed: coords.speed == null || Number.isNaN(Number(coords.speed)) ? null : Number(coords.speed),
+            timestamp: Number(position.timestamp || 0)
+          },
+          error: null
+        });
+      },
+      error => {
+        globalThis.clearTimeout(timer);
+        finish({
+          position: null,
+          error: {
+            code: Number(error && error.code || 0),
+            message: String(error && error.message || "")
+          }
+        });
+      },
+      { enableHighAccuracy: false, maximumAge: 0, timeout: 1000 }
+    );
+  });
+  return {
+    permission_state: permissionState,
+    position: result.position,
+    error: result.error
   };
 }
 

@@ -1677,12 +1677,12 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-23-device-v2'
-    bridge_build_sha256_expected = '9f72976d2c14365aa665a5848852c6516a79a3a62ad9f029890e323ba0beff0d'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'cdpInput', 'viewportEmulation', 'deviceEmulation', 'closeTab', 'clock', 'coordinateClick', 'cookies', 'domAction', 'externalPopupRiskSuppression', 'frameLocators', 'frames', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'storageState', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
-    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.cookies_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_storage_cookies_waits_and_chrome_debugger_cdp_input_hover_tap_drag_viewport_emulation_and_device_emulation_no_native_messaging_plus_chrome.management_external_popup_suppression'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-23-geolocation-v3'
+    bridge_build_sha256_expected = '5b439c6b76df9d2e0d8b1c89bbf8861e87fe734893ad0ef013de83462e2af847'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'cdpInput', 'viewportEmulation', 'deviceEmulation', 'geolocationEmulation', 'closeTab', 'clock', 'coordinateClick', 'cookies', 'domAction', 'externalPopupRiskSuppression', 'frameLocators', 'frames', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'storageState', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.cookies_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_storage_cookies_waits_and_chrome_debugger_cdp_input_hover_tap_drag_viewport_emulation_device_emulation_and_geolocation_emulation_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
-    attach_popup_prevention = 'normal_bridge_debugger_permission_scoped_to_cdpInput_hover_tap_active_drag_viewportEmulation_and_deviceEmulation_inactive_synthetic_drag_no_helper_windows_no_nativeMessaging_permission_plus_external_popup_risk_suppression'
+    attach_popup_prevention = 'normal_bridge_debugger_permission_scoped_to_cdpInput_hover_tap_active_drag_viewportEmulation_deviceEmulation_and_geolocationEmulation_inactive_synthetic_drag_no_helper_windows_no_nativeMessaging_permission_plus_external_popup_risk_suppression'
     normal_bridge_attach_commands_available = $true
     normal_bridge_debugger_api_calls_present = $true
     expected_extension_id_guard_present = $true
