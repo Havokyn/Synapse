@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-media-v1";
-const BRIDGE_BUILD_SHA256 = "9d48260852a636266af4920c19d7bea4506885fe932ecd83697d510fa4e6f9f4";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-media-v2";
+const BRIDGE_BUILD_SHA256 = "65bbc9f360d56f9d02aaad3cc5ed5ae4cf38563983b28cb99b86750793ef6e1e";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
@@ -5638,6 +5638,7 @@ function installMediaEmulationShimInPage(requested) {
         : null,
       match_media_had_own_descriptor: Object.prototype.hasOwnProperty.call(globalThis, "matchMedia"),
       match_media_descriptor: Object.getOwnPropertyDescriptor(globalThis, "matchMedia") || null,
+      style_element_id: "__synapseMediaEmulationCssOverride",
       value: {}
     };
     Object.defineProperty(globalThis, stateKey, {
@@ -5768,11 +5769,72 @@ function installMediaEmulationShimInPage(requested) {
       return mediaQueryList(query, forced === null ? false : forced, nativeResult);
     }
   });
+  function removeMediaStyleElement() {
+    try {
+      const existing = globalThis.document && document.getElementById(state.style_element_id);
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+    } catch (_) {}
+  }
+  function collectMatchedRules(ruleList, output) {
+    if (!ruleList) {
+      return;
+    }
+    for (const rule of Array.from(ruleList)) {
+      try {
+        const condition = rule && (
+          typeof rule.conditionText === "string"
+            ? rule.conditionText
+            : rule.media && typeof rule.media.mediaText === "string"
+              ? rule.media.mediaText
+              : ""
+        );
+        if (condition && rule.cssRules) {
+          let matches = false;
+          try {
+            matches = Boolean(globalThis.matchMedia && globalThis.matchMedia(condition).matches);
+          } catch (_) {
+            matches = false;
+          }
+          if (matches) {
+            collectMatchedRules(rule.cssRules, output);
+          }
+        } else if (rule && typeof rule.cssText === "string") {
+          output.push(rule.cssText);
+        }
+      } catch (_) {}
+    }
+  }
+  function applyMatchedMediaStyleRules() {
+    removeMediaStyleElement();
+    if (!globalThis.document || !document.documentElement || !document.createElement) {
+      return 0;
+    }
+    const rules = [];
+    for (const sheet of Array.from(document.styleSheets || [])) {
+      try {
+        collectMatchedRules(sheet.cssRules, rules);
+      } catch (_) {}
+    }
+    if (!rules.length) {
+      return 0;
+    }
+    const style = document.createElement("style");
+    style.id = state.style_element_id;
+    style.setAttribute("data-synapse-media-emulation", "true");
+    style.textContent = rules.join("\n");
+    const parent = document.head || document.documentElement;
+    parent.appendChild(style);
+    return rules.length;
+  }
+  const appliedRuleCount = applyMatchedMediaStyleRules();
   try {
     globalThis.dispatchEvent(new Event("resize"));
   } catch (_) {}
   return {
     applied: true,
+    applied_css_rule_count: appliedRuleCount,
     requested: state.value
   };
 }
@@ -5781,6 +5843,12 @@ function clearMediaEmulationShimInPage() {
   const stateKey = "__synapseMediaEmulationOverride";
   const state = globalThis[stateKey];
   if (state && typeof state === "object") {
+    try {
+      const existing = globalThis.document && document.getElementById(state.style_element_id);
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+    } catch (_) {}
     if (state.match_media_had_own_descriptor && state.match_media_descriptor) {
       Object.defineProperty(globalThis, "matchMedia", state.match_media_descriptor);
     } else {
