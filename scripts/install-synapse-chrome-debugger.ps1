@@ -308,7 +308,13 @@ function Set-SynapseChromeExternalDebuggerPolicy {
         if ($existing.Contains('blocked_permissions')) {
             $blocked = @($existing['blocked_permissions'])
         }
-        $nextBlocked = @($blocked + @('debugger', 'nativeMessaging') | Where-Object {
+        $hazardPermissions = @($hazard.hazard_api | Where-Object {
+            $_ -eq 'debugger' -or $_ -eq 'nativeMessaging'
+        })
+        if ($hazardPermissions.Count -eq 0) {
+            $hazardPermissions = @('debugger', 'nativeMessaging')
+        }
+        $nextBlocked = @($blocked + $hazardPermissions | Where-Object {
             -not [string]::IsNullOrWhiteSpace([string]$_)
         } | Sort-Object -Unique)
 
@@ -374,7 +380,7 @@ function Set-SynapseChromeExternalDebuggerPolicy {
 }
 
 if ($RemoveExternalDebuggerPolicyOnly) {
-    $cleanup = Remove-SynapseChromeExternalDebuggerPolicy -PreserveExtensionIds @($ExtensionId)
+    $cleanup = Remove-SynapseChromeExternalDebuggerPolicy -PreserveExtensionIds @()
     [pscustomobject]@{
         ok = $true
         mode = 'chrome_policy_cleanup_only'
@@ -513,10 +519,10 @@ $requiredPermissions = @($extensionManifest.permissions)
 $optionalPermissions = @($extensionManifest.optional_permissions)
 $hostPermissions = @($extensionManifest.host_permissions)
 if ($optionalPermissions -contains 'debugger') {
-    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the normal end-user bridge must be debugger-free; Chrome's debugger infobar changes viewport/layout and breaks coordinate truth"
+    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the Synapse bridge must request debugger as a required permission so target-scoped CDP input support is deterministic after auto-install"
 }
-if ($requiredPermissions -contains 'debugger') {
-    throw "SYNAPSE_CHROME_EXTENSION_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the normal end-user bridge must not request debugger; use raw CDP from a dedicated Synapse-launched automation profile started with --silent-debugger-extension-api for debugger-backed work"
+if (-not ($requiredPermissions -contains 'debugger')) {
+    throw "SYNAPSE_CHROME_EXTENSION_DEBUGGER_PERMISSION_REQUIRED path=$manifestPath remediation=normal-profile hover/tap FSV requires the bundled bridge to expose a narrow chrome.debugger CDP input lane for already-open Chrome tabs"
 }
 if ($requiredPermissions -contains 'nativeMessaging') {
     throw "SYNAPSE_CHROME_EXTENSION_NATIVE_MESSAGING_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use direct localhost HTTP registration plus WebSocket command delivery; nativeMessaging can launch a visible cmd.exe wrapper on Windows"
@@ -562,6 +568,8 @@ namespace SynapseChromeBridgeAutoInstall {
         [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+        [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
     }
 }
 '@ -ErrorAction Stop
@@ -587,6 +595,31 @@ function Get-SynapseActiveChromeProfileName {
         return $null
     }
     return $null
+}
+
+function Get-SynapseChromeBridgeManifestApiPermissions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionDir
+    )
+
+    $manifestPath = Join-Path $ExtensionDir 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return @()
+    }
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return @()
+    }
+    if (-not $manifest.permissions) {
+        return @()
+    }
+    @($manifest.permissions | ForEach-Object { [string]$_ } | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+            $_ -notmatch '://' -and
+            $_ -ne '<all_urls>'
+        } | Sort-Object -Unique)
 }
 
 function Test-SynapseChromeBridgeProfileRow {
@@ -629,6 +662,25 @@ function Test-SynapseChromeBridgeProfileRow {
                 $manifestMatches = ($manifestPath -ieq $ExtensionDir)
             }
         }
+        $activeApiPermissions = @()
+        if ($setting.PSObject.Properties.Name -contains 'active_permissions' -and $setting.active_permissions -and $setting.active_permissions.api) {
+            $activeApiPermissions = @($setting.active_permissions.api | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        }
+        $grantedApiPermissions = @()
+        if ($setting.PSObject.Properties.Name -contains 'granted_permissions' -and $setting.granted_permissions -and $setting.granted_permissions.api) {
+            $grantedApiPermissions = @($setting.granted_permissions.api | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        }
+        $disableReasons = @()
+        if ($setting.PSObject.Properties.Name -contains 'disable_reasons' -and $null -ne $setting.disable_reasons) {
+            $disableReasons = @($setting.disable_reasons | ForEach-Object { [int]$_ })
+        }
+        $requiredApiPermissions = Get-SynapseChromeBridgeManifestApiPermissions -ExtensionDir $ExtensionDir
+        $missingActiveApiPermissions = @($requiredApiPermissions | Where-Object {
+                $activeApiPermissions -notcontains $_
+            })
+        $ready = $manifestMatches -and
+            ($disableReasons.Count -eq 0) -and
+            ($missingActiveApiPermissions.Count -eq 0)
         return [pscustomobject]@{
             installed = $true
             profile = $ProfileName
@@ -636,6 +688,12 @@ function Test-SynapseChromeBridgeProfileRow {
             pref_path = $prefPath
             manifest_path = $manifestPath
             manifest_path_matches = $manifestMatches
+            active_api_permissions = $activeApiPermissions
+            granted_api_permissions = $grantedApiPermissions
+            disable_reasons = $disableReasons
+            required_api_permissions = $requiredApiPermissions
+            missing_active_api_permissions = $missingActiveApiPermissions
+            ready = $ready
         }
     }
 
@@ -646,6 +704,12 @@ function Test-SynapseChromeBridgeProfileRow {
         pref_path = $null
         manifest_path = $null
         manifest_path_matches = $false
+        active_api_permissions = @()
+        granted_api_permissions = @()
+        disable_reasons = @()
+        required_api_permissions = Get-SynapseChromeBridgeManifestApiPermissions -ExtensionDir $ExtensionDir
+        missing_active_api_permissions = Get-SynapseChromeBridgeManifestApiPermissions -ExtensionDir $ExtensionDir
+        ready = $false
     }
 }
 
@@ -711,6 +775,31 @@ function Find-SynapseAutomationElementByName {
     $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
 }
 
+function Find-SynapseAutomationElementByAutomationId {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Automation.AutomationElement]$Root,
+        [Parameter(Mandatory = $true)]
+        [string]$AutomationId,
+        [AllowNull()]
+        [System.Windows.Automation.ControlType]$ControlType
+    )
+
+    $idCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    )
+    $condition = $idCondition
+    if ($null -ne $ControlType) {
+        $typeCondition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            $ControlType
+        )
+        $condition = [System.Windows.Automation.AndCondition]::new($idCondition, $typeCondition)
+    }
+    $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+}
+
 function Invoke-SynapseAutomationElement {
     param(
         [Parameter(Mandatory = $true)]
@@ -732,6 +821,27 @@ function Invoke-SynapseAutomationElement {
             throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_INVOKE_FAILED control=$Description error=$($_.Exception.Message)"
         }
     }
+}
+
+function Invoke-SynapseAutomationElementMouseClick {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    $rect = $Element.Current.BoundingRectangle
+    if ($rect.Width -le 0 -or $rect.Height -le 0) {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_MOUSE_CLICK_FAILED control=$Description reason=empty_bounding_rect"
+    }
+    $x = [int]($rect.Left + ($rect.Width / 2))
+    $y = [int]($rect.Top + ($rect.Height / 2))
+    [SynapseChromeBridgeAutoInstall.Win32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [SynapseChromeBridgeAutoInstall.Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 120
+    [SynapseChromeBridgeAutoInstall.Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Set-SynapseAutomationEditValue {
@@ -834,6 +944,147 @@ function Find-SynapseChromeFolderDialog {
     return $null
 }
 
+function Get-SynapseChromeWindowByHwnd {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int64]$Hwnd
+    )
+
+    @(Get-SynapseChromeTopLevelWindows | Where-Object { $_.hwnd -eq $Hwnd } | Select-Object -First 1)[0]
+}
+
+function Invoke-SynapseChromeBridgeExistingExtensionRepair {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChromeUserDataRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExtensionDir,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$ChromeWindow,
+        [Parameter(Mandatory = $true)]
+        [datetime]$Deadline,
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Before
+    )
+
+    $actions = New-Object System.Collections.Generic.List[string]
+    [SynapseChromeBridgeAutoInstall.Win32]::ShowWindowAsync([IntPtr]$ChromeWindow.hwnd, 5) | Out-Null
+    [SynapseChromeBridgeAutoInstall.Win32]::SetForegroundWindow([IntPtr]$ChromeWindow.hwnd) | Out-Null
+    Start-Sleep -Milliseconds 300
+    Set-Clipboard -Value "chrome://extensions/?id=$ExtensionId"
+    Send-SynapseNativeKeyTap -VirtualKey 0x1B
+    Start-Sleep -Milliseconds 200
+    Send-SynapseNativeKeyChord -VirtualKeys ([byte[]](0x11, 0x4C))
+    Start-Sleep -Milliseconds 250
+    Send-SynapseNativeKeyChord -VirtualKeys ([byte[]](0x11, 0x56))
+    Start-Sleep -Milliseconds 250
+    Send-SynapseNativeKeyTap -VirtualKey 0x0D
+
+    $detailWindow = Wait-SynapseUntil -Deadline $Deadline -Probe {
+        $currentWindow = Get-SynapseChromeWindowByHwnd -Hwnd $ChromeWindow.hwnd
+        if (-not $currentWindow) {
+            return $null
+        }
+        $reloadButton = Find-SynapseAutomationElementByAutomationId `
+            -Root $currentWindow.element `
+            -AutomationId 'dev-reload-button' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $enableToggle = Find-SynapseAutomationElementByAutomationId `
+            -Root $currentWindow.element `
+            -AutomationId 'enableToggle' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($reloadButton -or $enableToggle) {
+            return $currentWindow
+        }
+        return $null
+    }
+    if (-not $detailWindow) {
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_EXISTING_EXTENSION_DETAIL_NOT_FOUND active_profile=$ProfileName timeout_s=$TimeoutSeconds remediation=Chrome did not expose the existing Synapse extension detail page for permission repair"
+    }
+
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $currentWindow = Get-SynapseChromeWindowByHwnd -Hwnd $ChromeWindow.hwnd
+        if (-not $currentWindow) {
+            break
+        }
+
+        $acceptPermissions = Find-SynapseAutomationElementByName `
+            -Root $currentWindow.element `
+            -Name 'Accept permissions' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($acceptPermissions) {
+            Invoke-SynapseAutomationElement -Element $acceptPermissions -Description 'Accept permissions'
+            $actions.Add('accept_permissions') | Out-Null
+            Start-Sleep -Seconds 2
+        }
+
+        foreach ($automationId in @('updateNow', 'dev-reload-button')) {
+            $button = Find-SynapseAutomationElementByAutomationId `
+                -Root $currentWindow.element `
+                -AutomationId $automationId `
+                -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($button) {
+                Invoke-SynapseAutomationElement -Element $button -Description $automationId
+                $actions.Add($automationId) | Out-Null
+                Start-Sleep -Seconds 3
+            }
+        }
+
+        $readyRow = Wait-SynapseUntil -Deadline ((Get-Date).AddSeconds(8)) -Probe {
+            $row = Test-SynapseChromeBridgeProfileRow `
+                -ChromeUserDataRoot $ChromeUserDataRoot `
+                -ProfileName $ProfileName `
+                -ExtensionId $ExtensionId `
+                -ExtensionDir $ExtensionDir
+            if ($row.ready) {
+                return $row
+            }
+            return $null
+        }
+        if ($readyRow) {
+            return [pscustomobject]@{
+                attempted = $true
+                changed = $true
+                reason = 'repaired_existing_unpacked_extension_permissions'
+                active_profile = $ProfileName
+                chrome_window_hwnd = $ChromeWindow.hwnd
+                repair_actions = @($actions)
+                before = $Before
+                after = $readyRow
+            }
+        }
+
+        $currentWindow = Get-SynapseChromeWindowByHwnd -Hwnd $ChromeWindow.hwnd
+        if (-not $currentWindow) {
+            break
+        }
+        $enableToggle = Find-SynapseAutomationElementByAutomationId `
+            -Root $currentWindow.element `
+            -AutomationId 'enableToggle' `
+            -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($enableToggle -and [string]$enableToggle.Current.Name -eq 'Off') {
+            Invoke-SynapseAutomationElementMouseClick -Element $enableToggle -Description 'enableToggle'
+            $actions.Add('enableToggle') | Out-Null
+            Start-Sleep -Seconds 3
+        }
+    }
+
+    $latest = Test-SynapseChromeBridgeProfileRow `
+        -ChromeUserDataRoot $ChromeUserDataRoot `
+        -ProfileName $ProfileName `
+        -ExtensionId $ExtensionId `
+        -ExtensionDir $ExtensionDir
+    $missing = if ($latest.missing_active_api_permissions.Count -eq 0) { '<none>' } else { $latest.missing_active_api_permissions -join ',' }
+    $disableReasons = if ($latest.disable_reasons.Count -eq 0) { '<none>' } else { $latest.disable_reasons -join ',' }
+    throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_EXISTING_EXTENSION_REPAIR_FAILED active_profile=$ProfileName ready=$($latest.ready) missing_active_api_permissions=$missing disable_reasons=$disableReasons actions=$($actions -join ',') remediation=on chrome://extensions/?id=$ExtensionId click Accept permissions if present, click Update, then reload the Synapse Chrome Bridge card"
+}
+
 function Invoke-SynapseChromeBridgeAutoInstall {
     param(
         [Parameter(Mandatory = $true)]
@@ -855,11 +1106,11 @@ function Invoke-SynapseChromeBridgeAutoInstall {
         -ProfileName $activeProfile `
         -ExtensionId $ExtensionId `
         -ExtensionDir $ExtensionDir
-    if ($before.installed -and $before.manifest_path_matches) {
+    if ($before.installed -and $before.manifest_path_matches -and $before.ready) {
         return [pscustomobject]@{
             attempted = $false
             changed = $false
-            reason = 'active_profile_already_has_expected_unpacked_extension'
+            reason = 'active_profile_already_has_ready_unpacked_extension'
             active_profile = $activeProfile
             before = $before
             after = $before
@@ -897,6 +1148,17 @@ function Invoke-SynapseChromeBridgeAutoInstall {
             $restoreClipboard = $true
         } catch {
             $restoreClipboard = $false
+        }
+        if ($before.installed -and $before.manifest_path_matches) {
+            return Invoke-SynapseChromeBridgeExistingExtensionRepair `
+                -ChromeUserDataRoot $ChromeUserDataRoot `
+                -ProfileName $activeProfile `
+                -ExtensionId $ExtensionId `
+                -ExtensionDir $ExtensionDir `
+                -ChromeWindow $chromeWindow `
+                -Deadline $deadline `
+                -TimeoutSeconds $TimeoutSeconds `
+                -Before $before
         }
         Set-Clipboard -Value 'chrome://extensions'
         Send-SynapseNativeKeyTap -VirtualKey 0x1B
@@ -1168,10 +1430,10 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                         @($activeApi)
                         @($manifestApi)
                     ) | Where-Object {
-                        $_ -eq 'debugger' -or $_ -eq 'nativeMessaging'
+                        $_ -eq 'nativeMessaging'
                     } | Sort-Object -Unique
                     $synapseGrantedHazardApi = @($grantedApi | Where-Object {
-                        $_ -eq 'debugger' -or $_ -eq 'nativeMessaging'
+                        $_ -eq 'nativeMessaging'
                     } | Sort-Object -Unique)
                     $row = [pscustomobject]@{
                         profile = $profileDir.Name
@@ -1370,7 +1632,7 @@ $synapseSelfShieldRow = [pscustomobject]@{
     active_api = @()
     granted_api = @()
     manifest_api = @()
-    hazard_api = @('debugger', 'nativeMessaging')
+    hazard_api = @('nativeMessaging')
     runtime_enabled = $true
     source = 'synapse_self_bridge_invariant'
 }
@@ -1383,14 +1645,11 @@ $synapseSelfShieldRow = [pscustomobject]@{
 # tabs/scripting commands fail closed before queueing any Chrome command.
 #
 # As a one-way remediation we remove stale Synapse-authored blockers from prior
-# builds, but preserve the current self-shield for the Synapse extension ID. The
-# current bridge does not request debugger/nativeMessaging, so blocking those
-# permissions is harmless for the supported build and prevents an older loaded
-# Synapse Chrome Bridge from retaining the capability that triggers Chrome's
-# layout-shifting "started debugging this browser" banner.
+# builds, then write the current self-shield for the Synapse extension ID. The
+# current bridge intentionally requests debugger for a narrow target-scoped CDP
+# input lane, so the self-shield blocks nativeMessaging only.
 $chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy -PreserveExtensionIds @(
     @($externalHazardExtensionIds)
-    $ExtensionId
 )
 $policyShieldExtensions = @($synapseSelfShieldRow)
 if (-not $PreserveExternalDebuggerExtensions) {
@@ -1404,7 +1663,7 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
         stale_active_permissions = $staleSynapseActivePermissions
         chrome_policy_popup_shield = $chromePolicyPopupShield
     } | ConvertTo-Json -Depth 8 -Compress
-    throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_DEBUGGER_PERMISSION extension_id=$ExtensionId detail=$detail remediation=Synapse attempted to apply/preserve the HKCU ExtensionSettings self-shield for debugger/nativeMessaging and included the physical policy write result in detail.chrome_policy_popup_shield; call cdp_bridge_reload through the real Synapse MCP tool when the live bridge advertises reloadSelf, otherwise keep normal browser commands failed closed until Chrome reloads the extension or restarts the already-open profile"
+    throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_NATIVE_MESSAGING_PERMISSION extension_id=$ExtensionId detail=$detail remediation=Synapse attempted to apply/preserve the HKCU ExtensionSettings self-shield for nativeMessaging and included the physical policy write result in detail.chrome_policy_popup_shield; call cdp_bridge_reload through the real Synapse MCP tool when the live bridge advertises reloadSelf, otherwise keep normal browser commands failed closed until Chrome reloads the extension or restarts the already-open profile"
 }
 
 [pscustomobject]@{
@@ -1418,19 +1677,19 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-23-dom-action-element-path-v1'
-    bridge_build_sha256_expected = '3c17e31387132cc53533b15f74e570d7e4fc72f13495435395ada80cfb117314'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'closeTab', 'clock', 'coordinateClick', 'cookies', 'domAction', 'externalPopupRiskSuppression', 'frameLocators', 'frames', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'storageState', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
-    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.cookies_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_storage_cookies_and_waits_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-23-cdp-input-v3'
+    bridge_build_sha256_expected = 'eec1cb0805ccaed5416576ac8ecd1566a788e8751ebcda70da27b89658a4a9d8'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'cdpInput', 'closeTab', 'clock', 'coordinateClick', 'cookies', 'domAction', 'externalPopupRiskSuppression', 'frameLocators', 'frames', 'inspectElement', 'listTabs', 'locateElements', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'scrollIntoView', 'setContent', 'storageState', 'waitForFunction', 'waitForLoadState', 'waitForUrl', 'waitForRequest', 'waitForResponse', 'waitForSelector', 'waitForText', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_plus_chrome.cookies_plus_chrome.webNavigation_plus_chrome.webRequest_for_typed_dom_actions_storage_cookies_waits_and_chrome_debugger_cdp_input_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
-    attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'
-    normal_bridge_attach_commands_available = $false
-    normal_bridge_debugger_api_calls_present = $false
+    attach_popup_prevention = 'normal_bridge_debugger_permission_scoped_to_cdpInput_no_helper_windows_no_nativeMessaging_permission_plus_external_popup_risk_suppression'
+    normal_bridge_attach_commands_available = $true
+    normal_bridge_debugger_api_calls_present = $true
     expected_extension_id_guard_present = $true
     required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
     recurring_wakeup_permission_present = ($requiredPermissions -contains 'alarms')
     required_cookies_permission_present = ($requiredPermissions -contains 'cookies')
-    required_debugger_permission_present = $false
+    required_debugger_permission_present = ($requiredPermissions -contains 'debugger')
     optional_debugger_permission_present = $false
     required_management_permission_present = ($requiredPermissions -contains 'management')
     required_web_navigation_permission_present = ($requiredPermissions -contains 'webNavigation')

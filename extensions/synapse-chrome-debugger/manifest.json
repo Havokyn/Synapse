@@ -8,6 +8,7 @@
   "permissions": [
     "alarms",
     "cookies",
+    "debugger",
     "management",
     "scripting",
     "tabs",

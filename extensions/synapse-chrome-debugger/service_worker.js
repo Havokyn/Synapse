@@ -1,6 +1,7 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-dom-action-element-path-v1";
-const BRIDGE_BUILD_SHA256 = "3c17e31387132cc53533b15f74e570d7e4fc72f13495435395ada80cfb117314";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-cdp-input-v3";
+const BRIDGE_BUILD_SHA256 = "eec1cb0805ccaed5416576ac8ecd1566a788e8751ebcda70da27b89658a4a9d8";
+const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -32,6 +33,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "waitForSelector",
   "clock",
   "pageEvents",
+  "cdpInput",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -112,16 +114,6 @@ async function startBridge() {
         `reload the unpacked extension from the Synapse extension directory so the daemon can ` +
         `authenticate the bridge origin`,
       ERROR_EXTENSION_ID_MISMATCH
-    );
-    return;
-  }
-  if (runtimeDebuggerApiAvailable()) {
-    disableBridgePermanently(
-      `loaded runtime exposes chrome.debugger; normal Synapse Chrome Bridge must be ` +
-        `debugger-free because Chrome's debugger infobar changes browser layout. ` +
-        `Reload the bundled extension from the Synapse repo before any normal-profile ` +
-        `browser work can proceed.`,
-      ERROR_DEBUGGER_WARNING_UNSUPPRESSED
     );
     return;
   }
@@ -339,6 +331,7 @@ function commandRequiresExternalPopupSuppression(kind) {
     "waitForSelector",
     "clock",
     "pageEvents",
+    "cdpInput",
     "navigateTab",
     "activateTab",
     "domAction",
@@ -776,7 +769,6 @@ async function handleCommand(command) {
   try {
     let result;
     let reloadAfterResponse = false;
-    rejectIfDebuggerApiAvailable(kind, params);
     await requireExternalPopupRisksSuppressed(kind, params);
     if (kind === "snapshot") {
       result = rejectAttachCommand(kind, params);
@@ -834,6 +826,8 @@ async function handleCommand(command) {
       result = await handleClock(params);
     } else if (kind === "pageEvents") {
       result = await handlePageEvents(params);
+    } else if (kind === "cdpInput") {
+      result = await handleCdpInput(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -890,28 +884,26 @@ function runtimeDebuggerApiAvailable() {
   );
 }
 
-function rejectIfDebuggerApiAvailable(kind, params) {
-  if (!runtimeDebuggerApiAvailable()) {
+function requireDebuggerApiAvailable(kind, params) {
+  if (runtimeDebuggerApiAvailable()) {
     return;
   }
   throw bridgeError(
     ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
-    `normal Synapse Chrome Bridge refused ${String(kind)} before browser work; ` +
-      `loaded runtime exposes chrome.debugger even though the normal bridge must be ` +
-      `debugger-free. Chrome's debugger infobar changes browser layout and breaks ` +
-      `coordinate truth. hwnd=${String(params?.hwnd ?? "unknown")} remediation=reload ` +
-      `the bundled Synapse extension from the repo and re-read mcp__synapse.health ` +
-      `until debuggerApiAvailable=false`
+    `Synapse Chrome Bridge refused ${String(kind)} because chrome.debugger is unavailable ` +
+      `in the loaded extension runtime; hwnd=${String(params?.hwnd ?? "unknown")} ` +
+      `remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload ` +
+      `so the active already-open Chrome profile loads the debugger-capable bridge build`
   );
 }
 
 function rejectAttachCommand(kind, params) {
   throw bridgeError(
     ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
-    `normal Synapse Chrome Bridge refused ${String(kind)} before browser debugger startup; ` +
-      `the normal end-user extension is debugger-free and cannot call chrome.debugger. ` +
-      `hwnd=${String(params?.hwnd ?? "unknown")} remediation=use raw CDP with a dedicated ` +
-      `Synapse-launched automation profile`
+    `Synapse Chrome Bridge refused unsupported legacy attach command ${String(kind)}; ` +
+      `target-scoped CDP input is exposed through cdpInput, while full DOM snapshots and ` +
+      `general browser_evaluate still require the dedicated raw-CDP automation profile. ` +
+      `hwnd=${String(params?.hwnd ?? "unknown")}`
   );
 }
 
@@ -2777,6 +2769,352 @@ async function handleDomAction(params) {
     target_selection_reason: selected.selectionReason,
     ...actionResult
   };
+}
+
+async function handleCdpInput(params) {
+  requireDebuggerApiAvailable("cdpInput", params);
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const action = normalizeCdpInputAction(params.action);
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const autoWait = params.autoWait === undefined ? true : Boolean(params.autoWait);
+  const autoWaitTimeoutMs = normalizeDomActionAutoWaitTimeout(params.autoWaitTimeoutMs, autoWait);
+  const before = await tabPageState(selected.tabId, selected.target);
+  const beforePageText = await tabPageTextState(selected.tabId);
+  let point;
+  let frameId = 0;
+  let resolved = {
+    resolved_by: "viewport_coordinate",
+    matched_count: null,
+    before_element: null,
+    after_element: null,
+    auto_wait: false,
+    auto_wait_readback: null,
+    frame_result_count: 0,
+    frame_results: [],
+    element_id: null
+  };
+
+  const coordinate = normalizeCdpInputCoordinate(params, action);
+  if (coordinate) {
+    point = { x: coordinate.x, y: coordinate.y };
+  } else {
+    if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+      throw bridgeError(
+        ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+        "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+      );
+    }
+    const requestedElementId = stringOrNull(params.elementId);
+    const bridgeElement = requestedElementId && requestedElementId.startsWith("chrome-tab:")
+      ? parseChromeBridgeElementId(requestedElementId, selected.tabId, "cdpInput")
+      : { raw: requestedElementId, frameId: null, path: null };
+    const request = {
+      action,
+      selector: stringOrNull(params.selector),
+      elementId: requestedElementId,
+      elementPath: bridgeElement.path,
+      role: stringOrNull(params.role),
+      name: stringOrNull(params.name),
+      value: stringOrNull(params.value),
+      autoWait,
+      autoWaitTimeoutMs,
+      resolveOnly: true,
+      resolveActionability: true,
+      maxPageTextChars: MAX_PAGE_TEXT_CHARS
+    };
+    const resolveTarget = { tabId: selected.tabId };
+    if (Number.isSafeInteger(bridgeElement.frameId)) {
+      resolveTarget.frameIds = [bridgeElement.frameId];
+    } else {
+      resolveTarget.allFrames = true;
+    }
+    let injected;
+    try {
+      injected = await chrome.scripting.executeScript({
+        target: resolveTarget,
+        func: performDomActionInPage,
+        args: [request]
+      });
+    } catch (error) {
+      throw bridgeError(
+        ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+        `chrome.scripting.executeScript cdpInput(${selected.tabId}, ${action}) resolve failed: ${errorMessage(error)}`
+      );
+    }
+
+    const frameResults = frameExecutionResults(injected);
+    const okFrames = frameResults.filter((frame) => frame.result && frame.result.ok);
+    const totalMatches = frameResults.reduce((sum, frame) => sum + frameResolvedMatchCount(frame), 0);
+    const ambiguousFrames = frameResults.filter((frame) =>
+      frame.result?.error_code === ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS
+    );
+    if (okFrames.length > 1 || totalMatches > 1 || ambiguousFrames.length > 0) {
+      throw bridgeError(
+        ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS,
+        `cdpInput ${action} matched ${totalMatches} actionable element(s) across ${frameResults.length} frame(s); ` +
+          `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+      );
+    }
+    const first = okFrames[0] || null;
+    if (!first || !first.result || typeof first.result !== "object") {
+      const failed = frameResults.find((frame) => frame.result)?.result;
+      throw bridgeError(
+        String(failed?.error_code || ERROR_CHROME_DOM_ELEMENT_NOT_FOUND),
+        `cdpInput ${action} failed across ${frameResults.length} frame(s): ${String(failed?.error_detail || "no matching frame result")}; ` +
+          `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+      );
+    }
+    if (first.frame_id !== 0) {
+      throw bridgeError(
+        ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+        `cdpInput ${action} currently supports top-frame targets only because chrome.debugger ` +
+          `Input coordinates are root-viewport CSS pixels; resolved frame_id=${first.frame_id}. ` +
+          `Re-resolve a top-frame element or use a raw-CDP frame-aware target.`
+      );
+    }
+    const actionPoint = first.result.action_point;
+    if (!actionPoint || !Number.isFinite(actionPoint.x) || !Number.isFinite(actionPoint.y)) {
+      throw bridgeError(
+        ERROR_CHROME_DOM_ELEMENT_NOT_ACTIONABLE,
+        `cdpInput ${action} resolved element without a finite viewport action point`
+      );
+    }
+    point = { x: actionPoint.x, y: actionPoint.y };
+    frameId = first.frame_id;
+    resolved = {
+      resolved_by: first.result.resolved_by,
+      matched_count: first.result.matched_count,
+      before_element: first.result.before_element,
+      after_element: first.result.after_element,
+      auto_wait: first.result.auto_wait,
+      auto_wait_readback: first.result.auto_wait_readback,
+      frame_result_count: frameResults.length,
+      frame_results: frameResults.map(summarizeFrameExecutionResult),
+      element_id: requestedElementId
+    };
+  }
+
+  const touchActivation = action === "tap"
+    ? await activateTabForCdpTouch(selected.tabId, before)
+    : {
+        attempted: false,
+        activated: false,
+        before_active: before.active,
+        after_active: before.active,
+        required_foreground: false,
+        readback_backend: "not_required_for_hover"
+      };
+  const dispatch = await dispatchCdpInput(selected.tabId, action, point);
+  const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs);
+  const afterPageText = await tabPageTextState(selected.tabId);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    action,
+    before_page: before,
+    after_page: after,
+    before_page_text: beforePageText,
+    after_page_text: afterPageText,
+    readback_backend: "chrome.debugger.Input",
+    required_foreground: false,
+    frame_id: frameId,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    method: dispatch.method,
+    dispatched_events: dispatch.dispatched_events,
+    viewport_point: point,
+    debugger_protocol_version: dispatch.protocol_version,
+    tab_activation_for_touch: touchActivation,
+    ...resolved
+  };
+}
+
+function normalizeCdpInputAction(value) {
+  const action = String(value || "").trim().toLowerCase();
+  if (action === "hover" || action === "tap") {
+    return action;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `cdpInput action must be hover or tap; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeCdpInputCoordinate(params, action) {
+  const hasX = params.x !== null && params.x !== undefined;
+  const hasY = params.y !== null && params.y !== undefined;
+  if (!hasX && !hasY) {
+    return null;
+  }
+  if (action !== "tap") {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "cdpInput hover requires an element locator, not x/y");
+  }
+  if (!hasX || !hasY) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "cdpInput tap coordinate input requires both x and y");
+  }
+  const coordinateSpace = String(params.coordinateSpace || "viewport").trim().toLowerCase();
+  if (coordinateSpace !== "viewport") {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `cdpInput tap coordinateSpace must be viewport because Input.dispatchTouchEvent consumes viewport CSS pixels; got ${JSON.stringify(params.coordinateSpace)}`
+    );
+  }
+  return {
+    x: normalizeCoordinateValue(params.x, "x"),
+    y: normalizeCoordinateValue(params.y, "y")
+  };
+}
+
+async function dispatchCdpInput(tabId, action, point) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  let touchEmulationEnabled = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    if (action === "hover") {
+      await sendDebuggerCommand(debuggee, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        button: "none",
+        pointerType: "mouse"
+      });
+      return {
+        method: "Input.dispatchMouseEvent(mouseMoved)",
+        dispatched_events: ["mouseMoved"],
+        protocol_version: protocolVersion
+      };
+    }
+    await sendDebuggerCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 1
+    });
+    touchEmulationEnabled = true;
+    await sendDebuggerCommand(debuggee, "Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{
+        x: point.x,
+        y: point.y,
+        radiusX: 1,
+        radiusY: 1,
+        force: 1,
+        id: 1
+      }]
+    });
+    await sendDebuggerCommand(debuggee, "Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: []
+    });
+    await sendDebuggerCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+      enabled: false
+    });
+    touchEmulationEnabled = false;
+    return {
+      method: "Emulation.setTouchEmulationEnabled + Input.dispatchTouchEvent(touchStart,touchEnd)",
+      dispatched_events: ["setTouchEmulationEnabled(true)", "touchStart", "touchEnd", "setTouchEmulationEnabled(false)"],
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger ${action} dispatch failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      if (touchEmulationEnabled) {
+        try {
+          await sendDebuggerCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+            enabled: false
+          }, 1000);
+        } catch (error) {
+          console.warn(`Synapse touch emulation cleanup failed for tab ${tabId}: ${errorMessage(error)}`);
+        }
+      }
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function activateTabForCdpTouch(tabId, beforeState) {
+  const beforeActive = Boolean(beforeState?.active);
+  if (beforeActive) {
+    return {
+      attempted: true,
+      activated: false,
+      before_active: true,
+      after_active: true,
+      required_foreground: false,
+      readback_backend: "chrome.tabs.get"
+    };
+  }
+  if (!chrome.tabs || typeof chrome.tabs.update !== "function") {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      "cdpInput tap requires activating the target tab before Input.dispatchTouchEvent, but chrome.tabs.update is unavailable"
+    );
+  }
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `cdpInput tap could not activate tab ${tabId} before Input.dispatchTouchEvent: ${errorMessage(error)}`
+    );
+  }
+  const started = Date.now();
+  let after = null;
+  while (Date.now() - started <= 2000) {
+    after = await tabPageState(tabId, null);
+    if (after.active) {
+      return {
+        attempted: true,
+        activated: true,
+        before_active: false,
+        after_active: true,
+        required_foreground: false,
+        readback_backend: "chrome.tabs.update(active=true)+chrome.tabs.get"
+      };
+    }
+    await sleep(50);
+  }
+  throw bridgeError(
+    ERROR_EXTENSION_TIMEOUT,
+    `cdpInput tap activated tab ${tabId} but active readback did not settle within 2000ms; after_active=${Boolean(after?.active)}`
+  );
+}
+
+async function sendDebuggerCommand(debuggee, method, params, timeoutMs = DEBUGGER_COMMAND_TIMEOUT_MS) {
+  try {
+    return await promiseWithTimeout(
+      chrome.debugger.sendCommand(debuggee, method, params),
+      timeoutMs,
+      `${method} timed out after ${timeoutMs}ms`
+    );
+  } catch (error) {
+    throw new Error(`${method}: ${errorMessage(error)}`);
+  }
+}
+
+function promiseWithTimeout(promise, timeoutMs, message) {
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    })
+  ]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 function handleReloadSelf(params = {}) {
@@ -8617,6 +8955,7 @@ async function performDomActionInPage(request) {
   const eventType = stringOrEmpty(request?.eventType);
   const eventInit = plainObjectOrEmpty(request?.eventInit);
   const resolveOnly = Boolean(request?.resolveOnly);
+  const resolveActionability = Boolean(request?.resolveActionability);
   const autoWait = Boolean(request?.autoWait);
   const autoWaitTimeoutMs = Number.isSafeInteger(request?.autoWaitTimeoutMs)
     ? Math.max(50, Math.min(request.autoWaitTimeoutMs, 30000))
@@ -8625,7 +8964,7 @@ async function performDomActionInPage(request) {
     ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
     : 4096;
 
-  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck"].includes(action)) {
+  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck", "hover", "tap"].includes(action)) {
     return fail(ERROR_ACTION_UNSUPPORTED, `unsupported DOM action ${JSON.stringify(action)}`);
   }
   if (action === "dispatch_event" && !eventType) {
@@ -8658,14 +8997,48 @@ async function performDomActionInPage(request) {
     });
   }
   if (resolveOnly) {
+    let autoWaitReadback = null;
+    if (resolveActionability && !bypassActionability) {
+      autoWaitReadback = await waitForDomActionability(element, action, autoWaitTimeoutMs);
+      if (!autoWaitReadback.ok) {
+        return fail(
+          ERROR_BROWSER_WAIT_TIMEOUT,
+          `domAction ${action} auto_wait timed out after ${autoWaitTimeoutMs} ms waiting for ${autoWaitReadback.requirement}; unmet predicates: ${autoWaitReadback.predicate_detail}`,
+          {
+            matched_count: resolved.matchedCount,
+            resolved_by: resolved.resolvedBy,
+            before_element: beforeElement,
+            auto_wait: true,
+            auto_wait_readback: autoWaitReadback,
+            source_of_truth: "Element.scrollIntoView({block:nearest,inline:nearest}) + getBoundingClientRect + elementFromPoint"
+          }
+        );
+      }
+    }
+    let actionPoint = null;
+    try {
+      const point = elementClickPoint(element, null);
+      actionPoint = { x: point.client_x, y: point.client_y };
+    } catch (error) {
+      return fail(error?.code || ERROR_ELEMENT_NOT_ACTIONABLE, errorMessageLocal(error), {
+        matched_count: resolved.matchedCount,
+        resolved_by: resolved.resolvedBy,
+        before_element: beforeElement,
+        auto_wait: autoWait,
+        auto_wait_readback: autoWaitReadback
+      });
+    }
     return {
       ok: true,
       action,
       matched_count: resolved.matchedCount,
       resolved_by: resolved.resolvedBy,
       before_element: beforeElement,
+      after_element: elementSummary(element),
+      action_point: actionPoint,
       resolve_only: true,
       auto_wait: autoWait,
+      auto_wait_readback: autoWaitReadback,
       in_page_before_url: beforeUrl,
       in_page_after_url: String(location.href || ""),
       in_page_title: String(document.title || ""),
@@ -8734,6 +9107,8 @@ async function performDomActionInPage(request) {
       actionReadback = performCheckState(element, true, eventsDispatched);
     } else if (action === "uncheck") {
       actionReadback = performCheckState(element, false, eventsDispatched);
+    } else if (action === "hover" || action === "tap") {
+      throw actionError(ERROR_ACTION_UNSUPPORTED, `DOM action ${action} is resolver-only; dispatch through cdpInput`);
     }
   } catch (error) {
     return fail(error?.code || ERROR_ACTION_UNSUPPORTED, errorMessageLocal(error), {

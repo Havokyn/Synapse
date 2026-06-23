@@ -40,10 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-23-dom-action-element-path-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-cdp-input-v3";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "3c17e31387132cc53533b15f74e570d7e4fc72f13495435395ada80cfb117314";
+    "eec1cb0805ccaed5416576ac8ecd1566a788e8751ebcda70da27b89658a4a9d8";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -76,6 +75,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "waitForSelector",
     "clock",
     "pageEvents",
+    "cdpInput",
     "reloadSelf",
     "targetInfo",
     "targetInfoPageText",
@@ -92,7 +92,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge is debugger-free and uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake without nativeMessaging, never creates helper Chrome windows, and refuses attach-capable debugger commands and general-purpose browser_evaluate before queueing any Chrome command; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, and exposes a narrow chrome.debugger CDP input lane for target-scoped hover/tap; it never uses nativeMessaging or helper Chrome windows; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -257,7 +257,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge is debugger-free and cannot call chrome.debugger, because Chrome's debugger infobar changes browser layout and breaks coordinate truth{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 to apply the reversible HKCU ExtensionSettings popup shield for debugger/nativeMessaging hazards, or use raw CDP from a dedicated Synapse-launched automation profile started with --silent-debugger-extension-api for DOM/action CDP or screenshots"
+                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only the narrow cdpInput chrome.debugger lane for target-scoped hover/tap, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
             ),
         }
     }
@@ -331,14 +331,14 @@ fn synapse_chrome_self_profile_surfaces() -> Vec<String> {
             let active_permissions = active_api_permissions(setting);
             let manifest_permissions = manifest_api_permissions(setting);
             let granted_permissions = granted_api_permissions(setting);
-            let active_or_manifest_hazards = hazard_api_permissions(
+            let active_or_manifest_hazards = synapse_self_hazard_api_permissions(
                 active_permissions
                     .iter()
                     .chain(manifest_permissions.iter())
                     .map(String::as_str),
             );
             let granted_hazards =
-                hazard_api_permissions(granted_permissions.iter().map(String::as_str));
+                synapse_self_hazard_api_permissions(granted_permissions.iter().map(String::as_str));
             if active_or_manifest_hazards.is_empty() && granted_hazards.is_empty() {
                 continue;
             }
@@ -391,7 +391,7 @@ fn synapse_chrome_self_permission_warning(rows: &[String], policy_shield_present
     let formatted = format_external_chrome_popup_risks(rows);
     if !active_rows.is_empty() {
         return format!(
-            "synapse_chrome_bridge_permission_blocking=true self_risk_scope=active_synapse_bridge_debugger_or_native_permission self_risk_count={} self_active_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=normal bridge commands fail closed while the Synapse extension profile row still exposes active/manifest debugger or nativeMessaging; rerun scripts\\install-synapse-chrome-debugger.ps1 to preserve the self ExtensionSettings blocked_permissions shield and reload the existing Chrome extension through cdp_bridge_reload when available",
+            "synapse_chrome_bridge_permission_blocking=true self_risk_scope=active_synapse_bridge_native_messaging_permission self_risk_count={} self_active_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=normal bridge commands fail closed while the Synapse extension profile row still exposes active/manifest nativeMessaging; rerun scripts\\install-synapse-chrome-debugger.ps1 to preserve the self ExtensionSettings blocked_permissions shield and reload the existing Chrome extension through cdp_bridge_reload when available",
             rows.len(),
             active_rows.len(),
             formatted
@@ -403,7 +403,7 @@ fn synapse_chrome_self_permission_warning(rows: &[String], policy_shield_present
         "granted_only_stale_permissions_without_policy_shield"
     };
     format!(
-        "synapse_chrome_bridge_permission_warning=true self_risk_scope={shield_scope} self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=granted-only profile residue is not active Chrome extension capability once the loaded bridge identity is current and extension_debugger_api_available=false; setup still attempts the HKCU ExtensionSettings self-shield when ACLs allow it, but commands rely on runtime debugger-free readback plus active/manifest permission fail-closed gates to prevent the 'Synapse Chrome Bridge started debugging this browser' layout infobar",
+        "synapse_chrome_bridge_permission_warning=true self_risk_scope={shield_scope} self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=granted-only profile residue is not active Chrome extension capability once the loaded bridge identity is current and extension_debugger_api_available=true with cdpInput advertised; setup still attempts the HKCU ExtensionSettings self-shield for nativeMessaging when ACLs allow it, and commands rely on exact bridge identity plus active/manifest nativeMessaging fail-closed gates",
         rows.len(),
         formatted
     )
@@ -597,13 +597,12 @@ fn synapse_chrome_self_policy_shield_status() -> SynapseChromeSelfPolicyShieldSt
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let has_debugger = blocked.iter().any(|permission| permission == "debugger");
     let has_native_messaging = blocked
         .iter()
         .any(|permission| permission == "nativeMessaging");
     let marker_matches = entry.get("blocked_install_message").and_then(Value::as_str)
         == Some(SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE);
-    let present = has_debugger && has_native_messaging && marker_matches;
+    let present = has_native_messaging && marker_matches;
     SynapseChromeSelfPolicyShieldStatus {
         present,
         detail: format!(
@@ -616,7 +615,7 @@ fn synapse_chrome_self_policy_shield_status() -> SynapseChromeSelfPolicyShieldSt
             },
             marker_matches,
             if present {
-                "self_shield_active"
+                "native_messaging_self_shield_active"
             } else {
                 "self_entry_incomplete"
             }
@@ -851,7 +850,7 @@ fn ensure_normal_bridge_external_popup_suppressed(
         return Err(ChromeDebuggerBridgeError {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=Synapse Chrome Bridge profile still exposes active debugger/nativeMessaging permission synapse_chrome_bridge_permission_risk={} remediation=rerun scripts\\install-synapse-chrome-debugger.ps1 so the HKCU ExtensionSettings self-shield blocks debugger/nativeMessaging for the Synapse extension ID, then reload the existing bridge through cdp_bridge_reload or keep commands failed closed until Chrome reloads it",
+                "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=Synapse Chrome Bridge profile still exposes active nativeMessaging permission synapse_chrome_bridge_permission_risk={} remediation=rerun scripts\\install-synapse-chrome-debugger.ps1 so the HKCU ExtensionSettings self-shield blocks nativeMessaging for the Synapse extension ID, then reload the existing bridge through cdp_bridge_reload or keep commands failed closed until Chrome reloads it",
                 format_external_chrome_popup_risks(&self_active_risks)
             ),
         });
@@ -868,7 +867,7 @@ fn ensure_normal_bridge_external_popup_suppressed(
             risk_count = self_risks.len(),
             synapse_chrome_bridge_permission_risk = %format_external_chrome_popup_risks(&self_risks),
             synapse_chrome_self_policy_shield = %self_policy_shield.detail,
-            "normal Chrome bridge continuing because Synapse self debugger/nativeMessaging residue is granted-only and the live bridge runtime is verified debugger-free before commands are queued"
+            "normal Chrome bridge continuing because Synapse self nativeMessaging residue is granted-only and the live bridge identity/cdpInput capability is verified before commands are queued"
         );
     }
     let risks = external_chrome_popup_risks();
@@ -1198,6 +1197,19 @@ fn hazard_api_permissions<'a>(permissions: impl IntoIterator<Item = &'a str>) ->
     let mut hazards = permissions
         .into_iter()
         .filter(|permission| *permission == "debugger" || *permission == "nativeMessaging")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    hazards.sort();
+    hazards.dedup();
+    hazards
+}
+
+fn synapse_self_hazard_api_permissions<'a>(
+    permissions: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut hazards = permissions
+        .into_iter()
+        .filter(|permission| *permission == "nativeMessaging")
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     hazards.sort();
@@ -3352,9 +3364,9 @@ fn bridge_command_stale_reason(host: &HostRecord, kind: &str) -> Option<String> 
     if !identity_reasons.is_empty() {
         return Some(identity_reasons.join("|"));
     }
-    if host.extension_debugger_api_available != Some(false) {
+    if host.extension_debugger_api_available != Some(true) {
         return Some(format!(
-            "debugger_api_available={} expected=false",
+            "debugger_api_available={} expected=true",
             host.extension_debugger_api_available
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "not_seen_yet".to_owned())
@@ -3397,9 +3409,9 @@ fn bridge_identity_stale_reasons(host: &ChromeBridgeHealthRecord) -> Vec<String>
                 .unwrap_or("not_seen_yet")
         ));
     }
-    if host.extension_debugger_api_available != Some(false) {
+    if host.extension_debugger_api_available != Some(true) {
         reasons.push(format!(
-            "debugger_api_available={} expected=false",
+            "debugger_api_available={} expected=true",
             host.extension_debugger_api_available
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "not_seen_yet".to_owned())
@@ -4330,7 +4342,7 @@ fn chrome_bridge_health_from_snapshot_with_self_policy(
     SubsystemHealth {
         status: status.to_owned(),
         detail: Some(format!(
-            "tab_control_available={} extension_stale={} extension_stale_reasons={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} expected_extension_build_id={} extension_build_sha256={} expected_extension_build_sha256={} extension_debugger_api_available={} expected_extension_debugger_api_available=false extension_capabilities={} required_extension_capabilities={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} extension_user_agent={} bridge_popup_risk_suppression={} {} {} {} {} {} install_guidance={}",
+            "tab_control_available={} extension_stale={} extension_stale_reasons={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} expected_extension_build_id={} extension_build_sha256={} expected_extension_build_sha256={} extension_debugger_api_available={} expected_extension_debugger_api_available=true extension_capabilities={} required_extension_capabilities={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} extension_user_agent={} bridge_popup_risk_suppression={} {} {} {} {} {} install_guidance={}",
             tab_control_available,
             extension_stale,
             extension_stale_reasons,
@@ -5284,6 +5296,50 @@ pub(crate) async fn dom_action(
                 "modifiers": request.modifiers,
                 "positionX": request.position_x,
                 "positionY": request.position_y,
+                "waitTimeoutMs": request.wait_timeout_ms,
+                "autoWait": request.auto_wait,
+                "autoWaitTimeoutMs": request.auto_wait_timeout_ms,
+            }),
+        )
+        .await
+}
+
+pub(crate) struct ChromeDebuggerCdpInputRequest<'a> {
+    pub hwnd: i64,
+    pub target_id: &'a str,
+    pub action: &'a str,
+    pub selector: Option<&'a str>,
+    pub element_id: Option<&'a str>,
+    pub role: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub value: Option<&'a str>,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub coordinate_space: Option<&'a str>,
+    pub wait_timeout_ms: u64,
+    pub auto_wait: bool,
+    pub auto_wait_timeout_ms: u32,
+}
+
+pub(crate) async fn cdp_input(
+    request: ChromeDebuggerCdpInputRequest<'_>,
+) -> Result<Value, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "cdpInput")?;
+    bridge()
+        .send_command(
+            "cdpInput",
+            json!({
+                "hwnd": request.hwnd,
+                "targetIdHint": request.target_id,
+                "action": request.action,
+                "selector": request.selector,
+                "elementId": request.element_id,
+                "role": request.role,
+                "name": request.name,
+                "value": request.value,
+                "x": request.x,
+                "y": request.y,
+                "coordinateSpace": request.coordinate_space,
                 "waitTimeoutMs": request.wait_timeout_ms,
                 "autoWait": request.auto_wait,
                 "autoWaitTimeoutMs": request.auto_wait_timeout_ms,
@@ -6267,6 +6323,27 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "auto_wait_unmet_predicates": result.get("auto_wait_readback")
                 .and_then(|value| value.get("unmet_predicates")),
             "readback_backend": result.get("readback_backend"),
+            "tab_activation_for_touch": result.get("tab_activation_for_touch"),
+            "frame_id": result.get("frame_id"),
+            "frame_result_count": result.get("frame_result_count"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "cdpInput" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "action": result.get("action"),
+            "method": result.get("method"),
+            "viewport_point": result.get("viewport_point"),
+            "resolved_by": result.get("resolved_by"),
+            "matched_count": result.get("matched_count"),
+            "auto_wait": result.get("auto_wait"),
+            "auto_wait_poll_count": result.get("auto_wait_readback")
+                .and_then(|value| value.get("poll_count")),
+            "auto_wait_unmet_predicates": result.get("auto_wait_readback")
+                .and_then(|value| value.get("unmet_predicates")),
+            "readback_backend": result.get("readback_backend"),
             "frame_id": result.get("frame_id"),
             "frame_result_count": result.get("frame_result_count"),
             "target_candidate_count": result.get("target_candidate_count"),
@@ -6555,7 +6632,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6589,11 +6666,11 @@ mod tests {
         );
         assert!(detail.contains("queued_count=2"));
         assert!(detail.contains("pending_count=3"));
-        assert!(detail.contains("extension_debugger_api_available=false"));
+        assert!(detail.contains("extension_debugger_api_available=true"));
     }
 
     #[test]
-    fn chrome_bridge_health_blocks_runtime_debugger_api_available() {
+    fn chrome_bridge_health_blocks_runtime_debugger_api_unavailable() {
         let host = ChromeBridgeHealthRecord {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
@@ -6607,7 +6684,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(true),
+            extension_debugger_api_available: Some(false),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6633,8 +6710,8 @@ mod tests {
         assert_eq!(health.status, "stale");
         let detail = health.detail.as_deref().expect("health detail");
         assert!(detail.contains("tab_control_available=false"));
-        assert!(detail.contains("extension_debugger_api_available=true"));
-        assert!(detail.contains("debugger_api_available=true expected=false"));
+        assert!(detail.contains("extension_debugger_api_available=false"));
+        assert!(detail.contains("debugger_api_available=false expected=true"));
     }
 
     #[test]
@@ -6652,7 +6729,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: None,
             pid: 42,
             parent_window: None,
@@ -6696,7 +6773,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "suppressed",
@@ -6752,7 +6829,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6812,7 +6889,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6924,7 +7001,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6946,7 +7023,7 @@ mod tests {
         };
 
         let self_rows = [format!(
-            "profile=Default pref=Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=debugger manifest_api=debugger granted_hazard_api=debugger synapse_self_popup_risk=true risk_basis=active_or_manifest_hazard_without_disable_reason state=1 active_bit=true disable_reasons=[]"
+            "profile=Default pref=Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=nativeMessaging manifest_api=nativeMessaging granted_hazard_api=nativeMessaging synapse_self_popup_risk=true risk_basis=active_or_manifest_hazard_without_disable_reason state=1 active_bit=true disable_reasons=[]"
         )];
         let health = chrome_bridge_health_from_snapshot(Some(&host), 1, 0, 0, &[], &self_rows, &[]);
 
@@ -6954,7 +7031,7 @@ mod tests {
         let detail = health.detail.as_deref().expect("health detail");
         assert!(detail.contains("tab_control_available=false"));
         assert!(detail.contains("synapse_chrome_bridge_permission_blocking=true"));
-        assert!(detail.contains("active_synapse_bridge_debugger_or_native_permission"));
+        assert!(detail.contains("active_synapse_bridge_native_messaging_permission"));
     }
 
     #[test]
@@ -6972,7 +7049,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -6994,7 +7071,7 @@ mod tests {
         };
 
         let self_rows = [format!(
-            "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs manifest_api=alarms,tabs granted_hazard_api=debugger,nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
+            "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs,debugger manifest_api=alarms,tabs,debugger granted_hazard_api=nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
         )];
         let missing_policy_shield = SynapseChromeSelfPolicyShieldStatus {
             present: false,
@@ -7020,7 +7097,7 @@ mod tests {
         assert!(detail.contains("synapse_chrome_bridge_permission_warning=true"));
         assert!(detail.contains("granted_only_stale_permissions_without_policy_shield"));
         assert!(detail.contains("synapse_chrome_self_policy_shield_present=false"));
-        assert!(detail.contains("extension_debugger_api_available=false"));
+        assert!(detail.contains("extension_debugger_api_available=true"));
     }
 
     #[test]
@@ -7038,7 +7115,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
-            extension_debugger_api_available: Some(false),
+            extension_debugger_api_available: Some(true),
             extension_popup_risk_suppression: Some(json!({
                 "ok": true,
                 "status": "clear",
@@ -7060,7 +7137,7 @@ mod tests {
         };
 
         let self_rows = [format!(
-            "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs manifest_api=alarms,tabs granted_hazard_api=debugger,nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
+            "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs,debugger manifest_api=alarms,tabs,debugger granted_hazard_api=nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
         )];
         let present_policy_shield = SynapseChromeSelfPolicyShieldStatus {
             present: true,
@@ -7237,21 +7314,18 @@ mod tests {
                 .detail()
                 .contains("before queueing any Chrome command")
         );
+        assert!(error.detail().contains("narrow cdpInput"));
         assert!(
             error
                 .detail()
-                .contains("normal end-user bridge is debugger-free")
+                .contains("dedicated raw-CDP automation profile")
         );
-        assert!(error.detail().contains("coordinate truth"));
         assert!(
             error
                 .detail()
                 .contains("scripts\\install-synapse-chrome-debugger.ps1")
         );
-        assert!(error.detail().contains("ExtensionSettings"));
-        assert!(error.detail().contains("popup shield"));
         assert!(error.detail().contains("raw CDP"));
-        assert!(error.detail().contains("--silent-debugger-extension-api"));
     }
 
     #[test]
